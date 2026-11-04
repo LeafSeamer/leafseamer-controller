@@ -100,7 +100,7 @@ export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, o
           first = Object.freeze(frame); clearTimeout(startupTimer); startedResolve(first);
         } else {
           check(!last && frame.event === 'process_group_empty' && frame.containment_id === first.containment_id && frame.active_processes === 0 &&
-            Number.isInteger(frame.core_exit_code) && typeof frame.stop_requested === 'boolean' && typeof frame.forced === 'boolean', 'process_host_protocol');
+            Number.isInteger(frame.core_exit_code) && typeof frame.stop_requested === 'boolean' && typeof frame.forced === 'boolean' && typeof frame.control_failed === 'boolean', 'process_host_protocol');
           last = Object.freeze(frame);
         }
       } catch (error) { fail(error instanceof ProcessHostError ? error.code : 'process_host_protocol'); }

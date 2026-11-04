@@ -68,6 +68,16 @@ SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 
 
 当前真实Windows集成覆盖双库绑定后监听、正常退出、错误制品／服务、旧业务库、HMAC／角色／重复帧／EOF／超时拒绝、写入故障、历史迁移和重放拒绝。完整RuntimeBinding、worker子域、保护配置来源、旧域退役恢复、Linux、生产profile及设备验收继续实施。
 
+### 监督控制连接与准入原件查询
+
+已准入核心使用单独的Windows命名管道连接原生宿主，bootstrap的两条继承管道不承载控制帧。宿主创建随机名称、只允许本机、显式当前账户／SYSTEM DACL及FIRST_PIPE_INSTANCE的单实例端点，生命周期内持续持有；名称和channel_id由原生父进程通过固定内部参数交付，普通supervise不能指定。连接后宿主核GetNamedPipeClientProcessId等于所持核心实例PID，并重新检查实际Job归属；同一Job的其它后代也不能取得核心控制通道。控制连接不自动重连。（平台接口依据：[CreateNamedPipe](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createnamedpipea)、[GetNamedPipeClientProcessId](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeclientprocessid)、[overlapped管道I/O](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-server-using-overlapped-i-o)。）
+
+当前接通LAUNCH_QUERY：从同一原生SQLite日志读取既有核心AdmissionReceipt，返回完整JournalView；未知launch返回record=null，同ID异摘要返回identity_conflict且只能query_only。查询不创建、消费或重签bootstrap，不产生新lease，也不把历史closed回执改成Ready。scope固定服务、数据库、监督实例和域；双向序号从1连续，channel及reply_to必须绑定本连接和实际未决请求。输入采用单帧规范JSON加LF、原生16KiB预算和异步I/O；额外字段、重复键、乱序或跨通道帧关闭连接。
+
+核心在持久采用启动绑定前先完成一次原件查询，之后每500ms串行核验。当前开发预算为单次请求2秒、宿主无完整控制交互5秒；期限从原请求起点计算，部分帧和迟到结果不续期，时钟读取异常或回退锁存。它们用于关闭失去监督的开发运行实例，不是经生产测量批准的执行租约或实时调度保证。控制来源先在内存失效，后关闭HTTP、认证监测和业务库；正常关停保持原停止流程。宿主观察到控制故障则终止完整Job，核实际空组与核心退出并持久保存退出原件，结果control_failed=true且进程失败退出；宿主自身崩溃仍没有成功退出证明。
+
+查询来源有效不代表完整RuntimeBindingRef、worker启动fence、发行批准或设备发送资格。当前没有REGISTER／CREATE／RETIRE写处理器，不能以未知键null推断旧进程不存在。完整保护配置、扩展审批／物化来源、worker子组及旧域恢复继续实施。Linux及跨账户部署未验；当前真实Windows用例验证正常查询、原件一致、错scope／序号／方向、重放、后代冒充和断线／静默终止，消费者错响应和迟到路径另用合成服务端验证。
+
 ### 实例锁与启动记录
 
 `init-process-host` 只安装当前本机开发身份的 `supervisor-journal.db`，目录须已存在，文件已存在就拒绝覆盖；也可由可信本机装配调用 `initializeProcessHost(dataDir)`。普通 `supervise` 不初始化或补建日志。安装没有创建人员权限、生产宿主批准或已认证运行域。已有开发目录需显式安装该日志后再使用 `supervise`，原 `start` 仍是无设备出口的保护态诊断入口。

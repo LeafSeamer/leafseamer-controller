@@ -157,4 +157,9 @@ public:
     execute("BEGIN IMMEDIATE"); Statement q(db.get(), "INSERT INTO core_admission VALUES(?,?,?)");
     q.bind(1, id); q.bind(2, receiptId); q.bind(3, receipt); q.done(); execute("COMMIT");
   }
+  std::string admission(const std::string& id) {
+    Statement q(db.get(), "SELECT a.receipt_jcs FROM core_admission a JOIN core_observation o USING(attempt_id) LEFT JOIN core_exit e USING(attempt_id) WHERE a.attempt_id=? AND e.attempt_id IS NULL");
+    q.bind(1, id); require(sqlite3_step(q.value) == SQLITE_ROW, "control_journal_closed");
+    const auto body = q.text(0); require(sqlite3_step(q.value) == SQLITE_DONE, "control_journal_binding"); return body;
+  }
 };

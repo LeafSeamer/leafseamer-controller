@@ -45,6 +45,7 @@ if (process.platform === 'win32') {
   fs.writeFileSync(path.join(artifact, 'process-host-manifest.json'), JSON.stringify({format: 'leafseamer-process-host/1',
     platform: process.platform, arch: process.arch, binary_sha256: hash(host),
     source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-host.cc'))),
+    control_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-control.h'))),
     bootstrap_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-bootstrap.h'))),
     journal_v1_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal-v1.sql'))),
     journal_upgrade_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal-upgrade.sql'))),

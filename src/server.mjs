@@ -13,13 +13,16 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   if (tls !== null && (!tls || Object.keys(tls).sort().join(',') !== 'cert,key,origin' || typeof tls.origin !== 'string')) throw new Error('tls_options');
   if (guiDirectory !== null && tls === null) throw new Error('gui_requires_https');
   const storage = openStorage(dataDir);
+  let supervision = null;
   try {
     if (coreBootstrap !== null) {
       if (typeof coreBootstrap !== 'function' || Number(storage.identity.schema_revision) < 11) throw new Error('core_runtime_migration_required');
-      const {binding, policy} = await coreBootstrap(storage.identity);
+      const result = await coreBootstrap(storage.identity), {binding, policy} = result;
+      supervision = result.supervision ?? null; supervision?.assertCurrent();
       storage.bindCoreRuntime(binding, policy);
+      supervision?.assertCurrent();
     }
-  } catch (error) { storage.close(); throw error; }
+  } catch (error) { try { storage.close(); } finally { supervision?.close(); } throw error; }
   let clock = null, authentication = null, sessions = null;
   if (storage.clockJournal) {
     try {
@@ -33,7 +36,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     catch {
       clock?.stop(); authentication?.stop(); sessions = null;
       try { storage.clockJournal.fault('native_clock_unavailable'); }
-      catch (error) { storage.close(); throw error; }
+      catch (error) { try { storage.close(); } finally { supervision?.close(); } throw error; }
       clock = {status: () => ({state: 'faulted', qualified: false}), stop() {}};
     }
   }
@@ -44,6 +47,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       serviceBootId: storage.serviceBootId, sessions, origin: tls?.origin ?? null});
     const options = {maxHeaderSize: 16384, requestTimeout: 5000, headersTimeout: 5000, keepAliveTimeout: 1000};
     const listener = (req, res) => {
+    try { supervision?.assertCurrent(); } catch { res.writeHead(503, {'Cache-Control': 'no-store', Connection: 'close'}); res.end(); return; }
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     if (authenticationHttp.handle(req, res)) return;
@@ -65,18 +69,20 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     res.end(req.method === 'HEAD' ? undefined : bytes);
     };
     server = tls ? https.createServer({...options, key: tls.key, cert: tls.cert, minVersion: 'TLSv1.2', maxVersion: 'TLSv1.3'}, listener) : http.createServer(options, listener);
-  } catch (error) { clock?.stop(); authentication?.stop(); storage.close(); throw error; }
+  } catch (error) { clock?.stop(); authentication?.stop(); try { storage.close(); } finally { supervision?.close(); } throw error; }
   server.maxRequestsPerSocket = 100;
   server.on('clientError', (_error, socket) => { if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); });
-  try { await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); }); }
-  catch (error) { clock?.stop(); authentication?.stop(); storage.close(); throw error; }
+  try { supervision?.assertCurrent(); await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); }); supervision?.assertCurrent(); }
+  catch (error) { server.close(); clock?.stop(); authentication?.stop(); try { storage.close(); } finally { supervision?.close(); } throw error; }
   let stopping;
-  return Object.freeze({address: server.address(), identity: storage.identity, serviceBootId: storage.serviceBootId,
+  const application = Object.freeze({address: server.address(), identity: storage.identity, serviceBootId: storage.serviceBootId,
     close() {
       if (!stopping) stopping = new Promise((resolve, reject) => {
-        server.close(error => { try { clock?.stop(); authentication?.stop(); storage.close(); if (error) reject(error); else resolve(); } catch (e) { reject(e); } });
+        server.close(error => { try { clock?.stop(); authentication?.stop(); storage.close(); if (error) reject(error); else resolve(); } catch (e) { reject(e); } finally { supervision?.close(); } });
         server.closeAllConnections();
       });
       return stopping;
     }});
+  supervision?.onLost(() => { void application.close().catch(() => {}); });
+  return application;
 }

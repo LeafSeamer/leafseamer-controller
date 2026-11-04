@@ -9,12 +9,13 @@ import {requireLocalAdministrator, requirePrivatePipes, readEnrollmentInput} fro
 import canonicalize from 'canonicalize';
 import {openNativeClock} from './native-clock.mjs';
 import {BootstrapError, validateBootstrapPolicy, createCoreBootstrapChannel, verifyCoreAssignment, verifyCoreAdmission} from './core-bootstrap.mjs';
+import {connectCoreSupervisor, SupervisorError} from './supervisor-control.mjs';
 const authenticatedCore = process.argv[2] === 'contained-core-auth';
 const emit = value => (authenticatedCore ? process.stderr : process.stdout).write(JSON.stringify(value) + '\n');
 let app;
 try {
   const [command, ...args] = process.argv.slice(2);
-  const allowed = ['init-storage', 'init-process-host', 'upgrade-process-host', 'migrate-storage', 'enroll-admin', 'identity-status', 'register-device'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy'] : [])] : [];
+  const allowed = ['init-storage', 'init-process-host', 'upgrade-process-host', 'migrate-storage', 'enroll-admin', 'identity-status', 'register-device'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel'] : [])] : [];
   if (!allowed.length || args.length % 2) throw new Error('arguments');
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
@@ -85,7 +86,8 @@ try {
         const binding = await verifyCoreAdmission(assignment, receipt, policy);
         current(); assignment = null;
         channel.release();
-        return {binding, policy};
+        const supervision = await connectCoreSupervisor({pipe: options['--supervisor-pipe'], channelId: options['--supervisor-channel'], binding, policy});
+        return {binding, policy, supervision};
       };
     }
     try { app = await startController(launch); }
@@ -114,6 +116,6 @@ try {
   }
 } catch (error) {
   if (app) await app.close().catch(() => {});
-  process.stderr.write(JSON.stringify({error: error instanceof StorageError || error instanceof IdentityError || error instanceof ProcessHostError || error instanceof BootstrapError ? error.code : 'startup_failed'}) + '\n');
+  process.stderr.write(JSON.stringify({error: error instanceof StorageError || error instanceof IdentityError || error instanceof ProcessHostError || error instanceof BootstrapError || error instanceof SupervisorError ? error.code : 'startup_failed'}) + '\n');
   process.exitCode = 1;
 }

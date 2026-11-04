@@ -36,6 +36,7 @@ static std::string identifier() {
 }
 #include "process-journal.h"
 #include "process-bootstrap.h"
+#include "process-control.h"
 struct Attributes {
   std::vector<unsigned char> buffer; LPPROC_THREAD_ATTRIBUTE_LIST list = nullptr;
   Attributes() {
@@ -70,6 +71,8 @@ int wmain(int argc, wchar_t** argv) {
     }
     std::unique_ptr<bootstrap::Exchange> exchange;
     if (policy) exchange = std::make_unique<bootstrap::Exchange>(*policy, id);
+    std::unique_ptr<CoreControl> control;
+    if (exchange) control = std::make_unique<CoreControl>(instance, *exchange);
     Handle job(CreateJobObjectW(&instance.security, jobName.c_str())); const DWORD jobError = GetLastError();
     require(job.value != nullptr && jobError != ERROR_ALREADY_EXISTS, "job_create_failed");
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -97,6 +100,7 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring command = quote(argv[2]) + L" --disallow-code-generation-from-strings " + quote(argv[3]);
     for (int i = 4; i < argc; ++i) { require(wcslen(argv[i]) <= 32768, "argument_capacity"); command += L" " + quote(argv[i]); }
     command += L" --data-dir " + quote(instance.path);
+    if (control) command += L" --supervisor-pipe " + quote(control->name) + L" --supervisor-channel " + quote(std::wstring(control->channel.begin(), control->channel.end()));
     require(command.size() < 32767, "command_capacity"); PROCESS_INFORMATION pi{};
     journal.begin(id, jobName, exchange ? policy->body : "", exchange ? exchange->descriptor : "", exchange ? exchange->intent : "");
     require(CreateProcessW(argv[2], command.data(), nullptr, nullptr, TRUE,
@@ -123,12 +127,17 @@ int wmain(int argc, wchar_t** argv) {
       journal.admitted(id, exchange->receiptId, bootstrap::object(receipt));
       require(bootstrap::tick() < exchange->expires, "bootstrap_expired");
       bootstrap::write(inputWriter.value, bootstrap::Exchange::frame("ADMISSION", receipt));
+      control->activate(bootstrap::object(receipt));
     }
     printf("{\"event\":\"process_contained\",\"containment_id\":\"%s\",\"supervisor_pid\":%lu,\"core_pid\":%lu,\"bootstrap_authenticated\":%s,\"runtime_admitted\":false}\n",
       id.c_str(), GetCurrentProcessId(), pi.dwProcessId, exchange ? "true" : "false"); fflush(stdout);
     exchange.reset(); // 挑战秘密不进入普通运行期或日志。
-    bool requested = false, invalid = false; std::string input;
+    bool requested = false, invalid = false; std::string input, controlFailure;
     while (WaitForSingleObject(process.value, 20) == WAIT_TIMEOUT) {
+      if (control) {
+        try { control->poll(process.value, pi.dwProcessId, job.value, journal); }
+        catch (const std::exception& e) { controlFailure = e.what(); invalid = true; break; }
+      }
       if (policy) { DWORD extra = 0; if (!PeekNamedPipe(proofReader.value, nullptr, 0, nullptr, &extra, nullptr) || extra) { invalid = true; break; } }
       DWORD count = 0;
       if (!PeekNamedPipe(GetStdHandle(STD_INPUT_HANDLE), nullptr, 0, nullptr, &count, nullptr)) { requested = true; break; }
@@ -158,8 +167,8 @@ int wmain(int argc, wchar_t** argv) {
     require(WaitForSingleObject(process.value, 5000) == WAIT_OBJECT_0, "core_exit_unproven");
     DWORD code = 1; require(GetExitCodeProcess(process.value, &code) != 0, "core_status_failed");
     journal.retired(id, code, forced);
-    printf("{\"event\":\"process_group_empty\",\"containment_id\":\"%s\",\"active_processes\":0,\"core_exit_code\":%lu,\"stop_requested\":%s,\"forced\":%s,\"runtime_admitted\":false}\n",
-      id.c_str(), code, requested ? "true" : "false", forced ? "true" : "false"); fflush(stdout);
+    printf("{\"event\":\"process_group_empty\",\"containment_id\":\"%s\",\"active_processes\":0,\"core_exit_code\":%lu,\"stop_requested\":%s,\"forced\":%s,\"control_failed\":%s,\"runtime_admitted\":false}\n",
+      id.c_str(), code, requested ? "true" : "false", forced ? "true" : "false", controlFailure.empty() ? "false" : "true"); fflush(stdout);
     return !invalid && code == 0 && !forced ? 0 : 1;
   } catch (const std::exception& e) {
     // 栈展开关闭唯一 Job 句柄；没有观察到空组时不产生 empty 成功帧。
