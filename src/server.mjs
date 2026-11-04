@@ -3,6 +3,7 @@ import {openStorage} from './storage.mjs';
 import {openNativeClock} from './native-clock.mjs';
 import {startClockMonitor} from './clock-monitor.mjs';
 import {startAuthenticationClock} from './auth-clock.mjs';
+import {createAuthenticationHttp} from './auth-http.mjs';
 
 export async function startController({dataDir, host = '127.0.0.1', port = 0} = {}) {
   if (!['127.0.0.1', '::1'].includes(host) || !Number.isInteger(port) || port < 0 || port > 65535) throw new Error('listen_options');
@@ -22,11 +23,13 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0} = 
       clock = {status: () => ({state: 'faulted', qualified: false}), stop() {}};
     }
   }
+  const authenticationHttp = createAuthenticationHttp({serviceId: storage.identity.service_id, serviceBootId: storage.serviceBootId});
   const server = http.createServer({maxHeaderSize: 16384, requestTimeout: 5000, headersTimeout: 5000,
     keepAliveTimeout: 1000}, (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    // 启动阶段没有写接口。拒收带正文请求并关闭连接，不排队读入无界数据。
+    if (authenticationHttp.handle(req, res)) return;
+    // 其它启动端点仍不接收正文。
     if (req.headers['transfer-encoding'] !== undefined || (req.headers['content-length'] !== undefined && req.headers['content-length'] !== '0')) {
       res.writeHead(413, {Connection: 'close'}); res.end(); return;
     }

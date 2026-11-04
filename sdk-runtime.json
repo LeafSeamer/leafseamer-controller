@@ -1,0 +1,9 @@
+{
+  "format": "leafseamer-controller-sdk/1",
+  "manifest_sha256": "ee2e83ea1b257c9fb5bfeaeddcc852417548b47edba67769dcd6f88c74cb3d4f",
+  "selection": {
+    "contract_id": "leafseamer.api.v1.panel4",
+    "contract_digest": "sha256:decbdf83f91486da0f473d0cbd5ad20efd188cc681de3b04a39921a4e72fa4fd"
+  },
+  "license_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+}
