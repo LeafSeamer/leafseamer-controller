@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
-const names = ['cli.mjs', 'server.mjs', 'storage.mjs', 'storage.sql'];
+const names = ['cli.mjs', 'server.mjs', 'storage.mjs', 'storage.sql', 'identity.sql', 'identity-crypto.mjs', 'identity-store.mjs', 'local-admin.mjs'];
 const files = await Promise.all(names.map(async name => [name, await fs.readFile(path.join(root, 'src', name))]));
 const output = path.resolve(root, 'dist');
 if (path.dirname(output) !== path.resolve(root)) throw new Error('output_path');

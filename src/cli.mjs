@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 import path from 'node:path';
-import {initializeStorage, StorageError} from './storage.mjs';
+import {initializeStorage, migrateStorage, openStorage, StorageError} from './storage.mjs';
 import {startController} from './server.mjs';
+import {IdentityError} from './identity-crypto.mjs';
+import {requireLocalAdministrator, requirePrivatePipes, readEnrollmentInput} from './local-admin.mjs';
 
 const emit = value => process.stdout.write(JSON.stringify(value) + '\n');
 let app;
 try {
   const [command, ...args] = process.argv.slice(2);
-  const allowed = command === 'init-storage' ? ['--data-dir'] : command === 'start' ? ['--data-dir', '--host', '--port'] : [];
+  const allowed = ['init-storage', 'migrate-storage', 'enroll-admin', 'identity-status'].includes(command) ? ['--data-dir'] : command === 'start' ? ['--data-dir', '--host', '--port'] : [];
   if (!allowed.length || args.length % 2) throw new Error('arguments');
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
@@ -18,6 +20,22 @@ try {
   if (command === 'init-storage') {
     const identity = initializeStorage(options['--data-dir']);
     emit({event: 'storage_initialized', ...identity, ready: false});
+  } else if (command === 'migrate-storage') {
+    emit({event: 'storage_migrated', ...await migrateStorage(options['--data-dir']), ready: false});
+  } else if (command === 'enroll-admin' || command === 'identity-status') {
+    requireLocalAdministrator();
+    if (command === 'enroll-admin') requirePrivatePipes();
+    const storage = openStorage(options['--data-dir']);
+    try {
+      if (!storage.enrollment) throw new IdentityError('identity_migration_required');
+      if (command === 'identity-status') emit({event: 'identity_status', ...storage.enrollment.summary(), ready: false});
+      else {
+        // 唯一一次秘密交付只写受控本机管道，不经普通日志、argv或环境变量。
+        emit({event: 'initialization_capability', ...storage.enrollment.begin()});
+        const result = await storage.enrollment.complete(await readEnrollmentInput());
+        emit({event: 'identity_initialized', ...result, ready: false});
+      }
+    } finally { storage.close(); }
   } else {
     const rawPort = options['--port'] ?? '0';
     if (!/^(0|[1-9][0-9]{0,4})$/.test(rawPort)) throw new Error('arguments');
@@ -32,6 +50,6 @@ try {
   }
 } catch (error) {
   if (app) await app.close().catch(() => {});
-  process.stderr.write(JSON.stringify({error: error instanceof StorageError ? error.code : 'startup_failed'}) + '\n');
+  process.stderr.write(JSON.stringify({error: error instanceof StorageError || error instanceof IdentityError ? error.code : 'startup_failed'}) + '\n');
   process.exitCode = 1;
 }

@@ -1,6 +1,6 @@
 # LeafSeamer Controller
 
-> **施工中 / Work in progress。** 已提供保护状态的服务启动、持久服务身份和本机健康检查。认证、命令受理、监督器及设备出口尚未接通，不能用于实际直播控制。
+> **施工中 / Work in progress。** 已提供保护状态的服务启动、持久服务身份、本机健康检查，以及首次管理员的存储事务和受限本机工具。网络登录与会话认证、命令受理、监督器及设备出口尚未接通，不能用于实际直播控制。
 
 可独立使用的直播软硬件控制平台：设备模块、连接、手动控制、资源协调、接管、凭据和状态采集。
 
@@ -8,7 +8,7 @@
 
 ## 开发运行
 
-使用 Node 24.22.0、npm 11.19.1。先在相邻 `leafseamer-sdk` 仓库构建 SDK `7618b1f` 或其后明确兼容的开发提交，再安装本仓锁定依赖。SDK 目前用于跨仓测试，Controller 运行入口只依赖固定的 better-sqlite3 13.0.3。
+使用 Node 24.22.0、npm 11.19.1。先在相邻 `leafseamer-sdk` 仓库构建 SDK `7618b1f` 或其后明确兼容的开发提交，再安装本仓锁定依赖。SDK 目前用于跨仓测试，Controller 运行依赖固定的 better-sqlite3 13.0.3 和 argon2 0.45.1；安装使用锁内完整依赖。
 
 ```sh
 npm ci --ignore-scripts
@@ -27,9 +27,9 @@ Windows 使用绝对目录参数，运行文件与业务数据分开存放。当
 
 `init-storage` 只创建服务存储，不创建管理员或设备权限。数据库已存在时拒绝覆盖；启动时数据库缺失、版本未知、迁移摘要不符或完整性检查失败均拒绝，不自动创建新身份或修复原库。初始化失败留下的文件须按故障检查处理，不能通过重复初始化静默替换。
 
-库中固定 service_id、database_instance_id、control_epoch 和 request_epoch。普通重启保留它们，为每次启动生成新的 service_boot_id；它不充当 DF02 的已批准运行域。启动记录与迁移记录持久保存，正常关闭只结束本次启动记录；强停留下的旧记录不改写成成功关闭。记录中的 UTC 只供诊断，不是认证时钟、业务 NTP 或排序权威。备份恢复换 scope、管理员初始化和持久请求账本尚待实现。
+库中固定 service_id、database_instance_id、control_epoch 和 request_epoch。普通重启保留它们，为每次启动生成新的 service_boot_id；它不充当 DF02 的已批准运行域。启动记录与迁移记录持久保存，正常关闭只结束本次启动记录；强停留下的旧记录不改写成成功关闭。记录中的 UTC 只供诊断，不是认证时钟、业务 NTP 或排序权威。备份恢复换 scope、完整身份生命周期和持久请求账本尚待实现。
 
-SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 同步及单连接排他模式。第二个进程不能接管仍被占用的业务库；操作系统释放旧连接后，新进程仍以保护状态启动。排他数据库连接不证明外部 worker 已退役，也不授予设备发送权限。驱动使用原始数组行和显式字段映射，可在禁止动态代码生成时运行。（SQLite 行为依据：[locking_mode](https://www.sqlite.org/pragma.html#pragma_locking_mode)、[WAL](https://www.sqlite.org/wal.html)。）
+SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 同步及单连接排他模式，关闭连接自动checkpoint并读回检查。第二个进程不能接管仍被占用的业务库；操作系统释放旧连接后，新进程仍以保护状态启动。排他数据库连接不证明外部 worker 已退役，也不授予设备发送权限。驱动使用原始数组行和显式字段映射，可在禁止动态代码生成时运行。完整业务写入前仍须接入DF04有界checkpoint与WAL容量协调，不能将当前保护态启动用于持续生产写入。（SQLite 行为依据：[locking_mode](https://www.sqlite.org/pragma.html#pragma_locking_mode)、[WAL](https://www.sqlite.org/wal.html)。）
 
 | 本机入口 | 当前结果 |
 | --- | --- |
@@ -39,7 +39,25 @@ SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 
 
 健康接口支持 HEAD，禁止缓存；不暴露数据库路径、版本或凭据。启动时的 JSON 输出包含本次 boot 身份与监听端口，`ready` 为 false。未知路由不进入业务处理，带正文请求不读入无界缓冲；当前没有命令发送、自动重放或自动布防路径。
 
-`npm test` 使用真实文件库、SDK HTTP 客户端和自建子进程，覆盖身份稳定、重复初始化拒绝、排他占用、错误版本／迁移拒绝、存活与就绪分离、强停重启及配置错误。当前验证平台为 Windows x64；未验证 Linux、掉电、生产认证、部署或设备。源码与运行构建在本仓，测试数据和依赖不提交。
+## 首次管理员与数据库升级
+
+新建库初始为 schema 1；启动不会自动升级。需要首次管理员存储时，停止本库服务并显式执行：
+
+```sh
+node --disallow-code-generation-from-strings dist/cli.mjs migrate-storage --data-dir /absolute/controller-data
+```
+
+此操作先通过 SQLite backup 生成同目录的独立 v1 文件及 SHA-256，再同事务升级至 schema 2、保留全部服务 scope 与启动历史、登记迁移摘要和备份引用。已为 v2 时只返回 `changed:false`；正在运行、未知版本或不完整迁移拒绝。DDL 中途失败回滚，保留备份供诊断；这份备份不能作为另一个活动实例直接使用，正式恢复仍需换 scope 和完整恢复流程。活动库与备份目录的安装 ACL、备份恢复和掉电耐久尚待平台验收。
+
+`enroll-admin --data-dir <绝对目录>` 是供本机安装管理客户端使用的子进程入口。Windows 要求实际提升权限的管理员，首期系统工具固定标准 Windows 安装位置；Linux 要求有效 UID 0。没有在线角色、环境开关或命令参数可替代该检查。当前账户非管理员时，在打开业务库或发出能力前拒绝。父客户端必须用受控继承管道连接 stdin/stdout，终端和文件重定向拒绝；尚未提供交互安装向导。
+
+管道协议为：子进程首先只交付一次 `initialization_capability`，含 `token_id`、32随机字节的规范base64url `secret` 和600秒上限；父客户端通过 stdin 提交一个 UTF-8 JSON 对象后关闭输入，字段精确为 `token_id,secret,login,password,mode`。总输入至多64 KiB，mode为 `standalone` 或 `suite_issuer`。登录名保留精确大小写与字符，不trim或规范化，长度1—128个Unicode标量且不含控制字符；密码长度16—4096个Unicode标量，不接受非法代理项。秘密和密码不放 argv、环境变量、普通日志或磁盘中间文件；父客户端也须遵守一次交付边界。
+
+能力只在本次持库进程和单调10分钟窗口内可消费，密码计算完成后再次核验，截止等号拒绝；关闭或重开使未消费能力失效。首次管理员、human主体映射、本地管理员授权、issuer身份、能力消费与非秘密回执在同一事务提交，最多一次。初始化完成仍保持服务 `protected`，不发会话、token或设备权限；这不是公开 `/auth/bootstrap` 的网络实现。响应丢失可由 OS 管理员执行 `identity-status --data-dir <绝对目录>` 查原，返回非秘密身份与事务引用，不重新初始化或取回秘密。
+
+密码采用 `identity-runtime/1`：Argon2id v19，65536 KiB、3轮、并行度1，独立16字节盐和32字节结果。仅执行登记成本的PHC；驱动0.45.1的参数顺序固定为 `m,p,t`。密码工作全进程同时2项、等待8项，超额报 `password_busy`，不占数据库事务等待计算。高熵opaque验证值按六种具名用途分域，不能代替人员密码。上述数值沿Suite既定profile；实现调用[官方node-argon2](https://github.com/ranisalt/node-argon2/tree/v0.45.1)，不自行实现密码算法。
+
+`npm test` 使用真实文件库、密码库、SDK HTTP 客户端和自建子进程。现有启动检查之外，覆盖迁移备份／回滚、管理员并发消费、每个身份写入故障、KDF期间到期、旧boot拒绝、秘密不落业务库、输入预算及非管理员拒绝。当前 Windows x64 下16项通过；因运行账户未提升权限，未验证管理员权限下完整CLI成功路径，事务成功与管道输入分别实际验证。Linux、掉电、生产认证时钟、TLS、网络登录／会话、部署和设备均未验收。源码与运行构建在本仓，测试数据和依赖不提交。
 
 旧 NodeCG 实现及历史保留于 [leafseamer-legacy](https://github.com/ikenainanodesu/leafseamer-legacy)。本仓尚未导入旧业务源码；后续复用时逐项记录来源、历史映射和必要许可声明。
 
