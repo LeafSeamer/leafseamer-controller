@@ -36,6 +36,47 @@ export function accessTokenService({db, serviceId, authority, enabled, writer, t
       authorization_digest: row.authorization_digest};
   }
   const deliver = result => { if (result.denied) fail(result.denied); return result; };
+  function authorizeToken(input, audience) {
+    available();
+    if (!db.inTransaction) fail('token_transaction_required');
+    if (!input || Object.keys(input).sort().join(',') !== 'secret,token_id' || !uuid(input.token_id) || !uuid(audience)) fail('token_invalid');
+    const now = time(), row = rows(db, 'SELECT * FROM access_token WHERE token_id = ?', input.token_id)[0];
+    if (!row || row.audience !== audience || !verifyOpaqueSecret('access_token', input.secret, row.verifier) || row.state !== 'active') fail('token_invalid');
+    const session = rows(db, 'SELECT * FROM auth_session WHERE session_id = ?', row.session_id)[0];
+    const credential = rows(db, 'SELECT * FROM session_refresh_credential WHERE credential_id = ?', row.credential_id)[0];
+    if (!session || session.state !== 'active' || !credential || credential.session_id !== session.session_id || credential.state === 'revoked') fail('token_invalid');
+    if (now.upper >= BigInt(session.expires_ns) || now.upper >= BigInt(session.idle_before_ns)) {
+      terminal(session, 'expired', now); return {denied: 'token_invalid'};
+    }
+    if (now.upper >= BigInt(row.expires_ns)) {
+      db.prepare("UPDATE access_token SET state = 'expired' WHERE token_id = ? AND state = 'active'").run(row.token_id);
+      return {denied: 'token_expired'};
+    }
+    if (now.lower < BigInt(row.not_before_ns)) fail('token_time_invalid');
+    const original = checked(JSON.parse(row.authorization_body.toString()));
+    if (original.digest !== row.authorization_digest) fail('token_authorization_invalid');
+    const current = grant(session, credential, audience, original.permissions, now);
+    if (!same(current, original)) {
+      db.prepare("UPDATE access_token SET state = 'revoked' WHERE token_id = ? AND state = 'active'").run(row.token_id);
+      return {denied: 'token_invalid'};
+    }
+    const last = time(); if (last.upper >= BigInt(row.expires_ns)) {
+      db.prepare("UPDATE access_token SET state = 'expired' WHERE token_id = ? AND state = 'active'").run(row.token_id);
+      return {denied: 'token_expired'};
+    }
+    if (!same(grant(session, credential, audience, original.permissions, last), original)) {
+      db.prepare("UPDATE access_token SET state = 'revoked' WHERE token_id = ? AND state = 'active'").run(row.token_id);
+      return {denied: 'token_invalid'};
+    }
+    return {active: true, principal_kind: 'human', issuer_id: session.issuer_id, issuer_epoch: session.issuer_epoch,
+      principal_id: session.principal_id, session_id: session.session_id, credential_id: row.credential_id, audience,
+      permissions: original.permissions, scope_digest: original.scope_digest, expires_ns: String(BigInt(row.expires_ns)),
+      policy_revision: original.policy_revision, authorization_revision: original.revision,
+      session_not_before_ns: String(BigInt(session.not_before_ns)), session_expires_ns: String(BigInt(session.expires_ns)),
+      session_idle_before_ns: String(BigInt(session.idle_before_ns)),
+      acquisition_ref: last.acquisition, authorization_digest: original.digest};
+
+  }
   return {
     issueToken(sessionInput, request) {
       available();
@@ -70,46 +111,7 @@ export function accessTokenService({db, serviceId, authority, enabled, writer, t
       deliver(result); time(); return result;
     },
     // audience必须由已认证的本地目标或mTLS对端导出；此函数不接受公开HTTP自报对端。
-    verifyToken(input, audience) {
-      available();
-      if (!input || Object.keys(input).sort().join(',') !== 'secret,token_id' || !uuid(input.token_id) || !uuid(audience)) fail('token_invalid');
-      return deliver(writer(() => {
-        const now = time(), row = rows(db, 'SELECT * FROM access_token WHERE token_id = ?', input.token_id)[0];
-        if (!row || row.audience !== audience || !verifyOpaqueSecret('access_token', input.secret, row.verifier) || row.state !== 'active') fail('token_invalid');
-        const session = rows(db, 'SELECT * FROM auth_session WHERE session_id = ?', row.session_id)[0];
-        const credential = rows(db, 'SELECT * FROM session_refresh_credential WHERE credential_id = ?', row.credential_id)[0];
-        if (!session || session.state !== 'active' || !credential || credential.session_id !== session.session_id || credential.state === 'revoked') fail('token_invalid');
-        if (now.upper >= BigInt(session.expires_ns) || now.upper >= BigInt(session.idle_before_ns)) {
-          terminal(session, 'expired', now); return {denied: 'token_invalid'};
-        }
-        if (now.upper >= BigInt(row.expires_ns)) {
-          db.prepare("UPDATE access_token SET state = 'expired' WHERE token_id = ? AND state = 'active'").run(row.token_id);
-          return {denied: 'token_expired'};
-        }
-        if (now.lower < BigInt(row.not_before_ns)) fail('token_time_invalid');
-        const original = checked(JSON.parse(row.authorization_body.toString()));
-        if (original.digest !== row.authorization_digest) fail('token_authorization_invalid');
-        const current = grant(session, credential, audience, original.permissions, now);
-        if (!same(current, original)) {
-          db.prepare("UPDATE access_token SET state = 'revoked' WHERE token_id = ? AND state = 'active'").run(row.token_id);
-          return {denied: 'token_invalid'};
-        }
-        const last = time(); if (last.upper >= BigInt(row.expires_ns)) {
-          db.prepare("UPDATE access_token SET state = 'expired' WHERE token_id = ? AND state = 'active'").run(row.token_id);
-          return {denied: 'token_expired'};
-        }
-        if (!same(grant(session, credential, audience, original.permissions, last), original)) {
-          db.prepare("UPDATE access_token SET state = 'revoked' WHERE token_id = ? AND state = 'active'").run(row.token_id);
-          return {denied: 'token_invalid'};
-        }
-        return {active: true, principal_kind: 'human', issuer_id: session.issuer_id, issuer_epoch: session.issuer_epoch,
-          principal_id: session.principal_id, session_id: session.session_id, credential_id: row.credential_id, audience,
-          permissions: original.permissions, scope_digest: original.scope_digest, expires_ns: String(BigInt(row.expires_ns)),
-          policy_revision: original.policy_revision, authorization_revision: original.revision,
-          session_not_before_ns: String(BigInt(session.not_before_ns)), session_expires_ns: String(BigInt(session.expires_ns)),
-          session_idle_before_ns: String(BigInt(session.idle_before_ns)),
-          acquisition_ref: last.acquisition, authorization_digest: original.digest};
-      }));
-    }
+    verifyToken(input, audience) { return deliver(writer(() => authorizeToken(input, audience))); },
+    authorizeToken,
   };
 }

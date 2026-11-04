@@ -3,6 +3,7 @@ import {IdentityError, validateLogin, hashPassword, verifyPassword, createOpaque
 import {clockInteger} from './native-clock.mjs';
 import {seal, ref, canonical} from './auth-clock-value.mjs';
 import {accessTokenService} from './access-token-store.mjs';
+import {requestContextService} from './request-context-store.mjs';
 
 const HOUR = 3600000000000n, MINUTE = 60000000000n, MAX = (1n << 64n) - 1n;
 const fail = code => { throw new IdentityError(code); };
@@ -17,7 +18,7 @@ function rows(db, sql, ...args) {
 }
 
 // 内部人员会话服务；clock由同服务认证时钟装配，HTTP Cookie与Origin边界另由传输层落实。
-export function sessionStore(db, serviceId, clock, authority = null, tokensEnabled = false) {
+export function sessionStore(db, serviceId, clock, authority = null, tokensEnabled = false, contextBinding = null) {
   let stopped = false, dummy = null;
   const buckets = new Map(), global = {start: process.hrtime.bigint(), failed: 0, pending: 0};
   const salt = crypto.randomBytes(32);
@@ -103,8 +104,10 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
     if (value.state !== 'active' || value.issuer_id !== session.issuer_id || value.issuer_epoch !== session.issuer_epoch) fail('local_authorization_denied');
     return value;
   }
+  const {authorizeToken, ...tokens} = accessTokenService({db, serviceId, authority, enabled: tokensEnabled, writer, time, authenticated, terminal, rows, pad});
+  const contexts = requestContextService({db, binding: contextBinding, writer, time, authorizeToken, rows, pad});
   return Object.freeze({
-    ...accessTokenService({db, serviceId, authority, enabled: tokensEnabled, writer, time, authenticated, terminal, rows, pad}),
+    ...tokens, ...contexts,
     localPermissions(input) {
       if (!authority?.current) fail('local_authorization_unavailable');
       return deliver(writer(() => { const found = authenticated(input, time()); return found.denied ? found : authority.current(found.session.principal_id); }));

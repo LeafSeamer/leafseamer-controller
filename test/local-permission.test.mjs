@@ -116,11 +116,11 @@ test('管理核近期认证与合法目录，不接受角色或远端权限自�
 test('已有v6管理员显式迁移保留身份，新增授权只来自已保存初始化角色', async t => {
   const dir = directory(t), identity = initializeStorage(dir); await migrateStorage(dir, 6);
   const old = openStorage(dir); const initial = await enroll(old); old.close();
-  const migrated = await migrateStorage(dir); assert.equal(migrated.schema_revision, '7');
+  const migrated = await migrateStorage(dir, 7); assert.equal(migrated.schema_revision, '7');
   const next = openStorage(dir);
   try { assert.equal(next.identity.service_id, identity.service_id); assert.deepEqual(next.enrollment.summary(), initial); }
   finally { next.close(); }
-  assert.equal((await migrateStorage(dir)).changed, false);
+  assert.equal((await migrateStorage(dir, 7)).changed, false);
   inspect(dir, db => {
     assert.equal(db.prepare('SELECT count(*) FROM local_permission_revision').pluck().get(), 1);
     const body = JSON.parse(db.prepare('SELECT body FROM local_permission_revision').pluck().get().toString());

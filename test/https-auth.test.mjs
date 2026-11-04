@@ -69,6 +69,26 @@ test('精确Origin与Host、CSRF和Cookie唯一性均在身份操作前验证', 
   finally { db.close(); }
 });
 
+test('实际HTTPS与SDK签发上下文，目标操作越权拒绝且注销关闭原件', {timeout: 15000}, async t => {
+  const a = await setup(t); await a.client.login(login);
+  await a.client.issueToken({audience: a.app.identity.service_id, requested_scopes: ['request.create', 'session.read']});
+  const request = {audience: a.app.identity.service_id, operations: ['getSession'], ttl_ms: 30000, max_unique_requests: 16};
+  const result = await a.client.createRequestContext(request);
+  assert.equal(result.status, '201'); assert.equal(result.body.data.principal_id, a.enrolled.principal_id);
+  assert.deepEqual(result.body.data.operations, ['getSession']); assert.equal(result.body.data.max_unique_requests, 16);
+  assert.equal(a.browser.state.requests.at(-1).headers.origin, a.origin);
+  const expanded = await a.client.createRequestContext({...request, operations: ['getSession', 'createRequestContext']});
+  // 此token包含request.create，因此此操作集也获得完整授权。
+  assert.equal(expanded.status, '201');
+  await a.client.issueToken({audience: a.app.identity.service_id, requested_scopes: ['session.read']});
+  assert.equal((await a.client.createRequestContext(request)).status, '403');
+  assert.equal((await a.client.logout()).status, '202');
+  await a.app.close();
+  const db = new Database(path.join(a.dir, 'controller.sqlite'), {fileMustExist: true});
+  try { assert.equal(db.prepare("SELECT count(*) FROM request_context WHERE state='closed'").pluck().get(), 2); }
+  finally { db.close(); }
+});
+
 test('SDK禁止并发刷新，旧Cookie正确复用撤销该session全部token', {timeout: 15000}, async t => {
   const a = await setup(t); await a.client.login(login);
   const oldCookie = a.browser.state.cookie;

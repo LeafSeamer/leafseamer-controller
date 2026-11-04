@@ -2,11 +2,13 @@ import crypto from 'node:crypto';
 import {TLSSocket} from 'node:tls';
 import {createHttpAdapter} from './sdk/http.mjs';
 import {contractSelection as selection} from './sdk/index.mjs';
+import {canonical} from './auth-clock-value.mjs';
 
 const routes = new Map([
   ['/auth/sessions', 'POST'], ['/auth/sessions/refresh', 'POST'],
   ['/auth/service-tokens', 'POST'], ['/api/v1/session', 'GET'],
   ['/auth/sessions/current', 'DELETE'],
+  ['/api/v1/request-contexts', 'POST'],
 ]);
 const maximumBody = 16384, maximumPending = 16, bodyDeadline = 2000;
 const rawPairs = flat => Array.from({length: flat.length / 2}, (_, i) => [flat[2 * i], flat[2 * i + 1]]);
@@ -24,6 +26,10 @@ function cookieInput(req) {
   if (values.length !== 1) reject('session_invalid');
   return {...credential(values[0].slice('leafseamer_session='.length)), csrf: req.headers['x-csrf-token']};
 }
+function tokenInput(req) {
+  const bearer = typeof req.headers.authorization === 'string' ? /^Bearer (.+)$/i.exec(req.headers.authorization) : null;
+  const decoded = credential(bearer?.[1]); return {token_id: decoded.credential_id, secret: decoded.secret};
+}
 const wireCredential = (id, secret) => 'v1.' + id + '.' + secret;
 const timestamp = (value, up = false) => new Date(Number((BigInt(value) + (up ? 999999n : 0n)) / 1000000n)).toISOString();
 function sessionView(session, permissions, revision, until = null) {
@@ -37,6 +43,11 @@ function failure(error) {
   if (['local_authorization_denied', 'local_authorization_audience', 'http_origin', 'http_tls', 'http_permission', 'http_extension'].includes(error?.code)) return [403, 'PERMISSION_DENIED'];
   if (['login_throttled', 'password_busy', 'token_capacity'].includes(error?.code)) return [429, 'CAPACITY_EXCEEDED'];
   if (error?.code === 'token_request_invalid') return [422, 'INVALID_REQUEST'];
+  if (['request_context_invalid', 'request_context_operation', 'request_context_time'].includes(error?.code)) return [422, 'INVALID_REQUEST'];
+  if (['request_context_denied', 'request_context_permission'].includes(error?.code)) return [403, 'PERMISSION_DENIED'];
+  if (['request_context_closed', 'request_context_expired'].includes(error?.code)) return [410, 'REQUEST_EXPIRED'];
+  if (error?.code === 'request_context_capacity') return [429, 'CAPACITY_EXCEEDED'];
+  if (error?.code === 'request_context_migration_required') return [503, 'WORKER_NOT_READY'];
   if (['local_authorization_unavailable', 'token_authority_unavailable'].includes(error?.code)) return [503, 'WORKER_NOT_READY'];
   return [503, 'CRITICAL_STORAGE_UNAVAILABLE'];
 }
@@ -102,9 +113,13 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
             target_id: record.session_id, revision_floor: record.revision_floor}, issuer_commit_revision: record.revision_floor,
           target_service_ids: record.target_service_ids, state: 'accepted', receipts: [], reason: 'logout', audit_id: record.tx_id}};
         await reply(res, request, 202, null, {data, extraHeaders: [clearCookie], beforeSend() { sessions.confirmLogout(result.operation_ref); }});
+      } else if (operation === 'createRequestContext') {
+        const proof = tokenInput(req), data = sessions.createRequestContext(proof, body);
+        await reply(res, request, 201, null, {data, beforeSend() {
+          if (canonical(sessions.getRequestContext(proof, data.context_id)) !== canonical(data)) reject('request_context_binding');
+        }});
       } else {
-        const bearer = typeof req.headers.authorization === 'string' ? /^Bearer (.+)$/i.exec(req.headers.authorization) : null;
-        const decoded = credential(bearer?.[1]), proof = {token_id: decoded.credential_id, secret: decoded.secret};
+        const proof = tokenInput(req);
         const view = () => {
           const v = sessions.verifyToken(proof, serviceId); if (!v.permissions.includes('session.read')) reject('http_permission');
           return sessionView({...v, not_before_ns: v.session_not_before_ns, expires_ns: v.session_expires_ns, idle_before_ns: v.session_idle_before_ns}, v.permissions, v.policy_revision, v.expires_ns);

@@ -102,7 +102,7 @@ schema 6 的会话服务增加内部 `issueToken(sessionInput, request)` 与 `ve
 
 ## 身份 HTTP 接收边界
 
-当前 `/auth/sessions`、`/auth/sessions/refresh`、`/auth/service-tokens`、`/api/v1/session` 和 `DELETE /auth/sessions/current` 已使用SDK的 `product1` 服务端校验器。默认CLI和缺少TLS装配时，完整合法请求返回结构化 `503 WORKER_NOT_READY` 和 `do_not_retry`；本地可信装配支持下述成功路径。SDK读取相同service／boot身份与契约选择。就绪及发现入口仍为503。当前全系统身份接受集仍待归并，不能据这些路径宣称完整首期契约已启用。
+当前 `/auth/sessions`、`/auth/sessions/refresh`、`/auth/service-tokens`、`/api/v1/session` 、`DELETE /auth/sessions/current` 和 `POST /api/v1/request-contexts` 已使用SDK的 `product1` 服务端校验器。默认CLI和缺少TLS装配时，完整合法请求返回结构化 `503 WORKER_NOT_READY` 和 `do_not_retry`；本地可信装配支持下述成功路径。SDK读取相同service／boot身份与契约选择。就绪及发现入口仍为503。当前全系统身份接受集仍待归并，不能据这些路径宣称完整首期契约已启用。
 
 原始头保留至信封校验，重复敏感头、错选择及不支持的编码拒绝；正文严格UTF-8／JSON／Schema校验，拒绝重复键和未知写字段。正文上限16 KiB，同时接收最多16项，接收期限为绝对2秒；分块累计、声明超限、断连和超时均释放容量。选择前失败不回显任意契约；选择后业务错误在发送前再校验。异常响应不包含密码、Cookie或原始报文。健康接口不占身份正文接收额度。
 
@@ -132,7 +132,7 @@ product1继承四个原有身份路径，支持登录201、刷新200、token签�
 
 SDK的 `createBrowserSessionClient` 管理内存CSRF与token，浏览器保管HttpOnly Cookie，拒绝并发刷新、错误选择及非法CSRF。清本地内存后到达的旧响应不能重新安装凭据；清内存不等于服务端注销。当前注销已进入新product1选择；主体与权限管理接口仍须归并，不向旧panel4偷加路径。
 
-当前64项Controller检查通过。七项HTTPS集成实际加载Windows原生模块，使用正常证书校验的本机HTTPS、真实密码库和文件权限库；验证SDK往返、Origin／Host／Cookie／CSRF、刷新复用、来源失效及迟到响应。证书仅在测试内存中临时生成，Cookie容器为测试模拟，环境批准引用与误差界仍为合成。独立安装包另验证相同HTTPS成功路径；真实浏览器、Linux、生产提供者、可信代理、完整跨服务鉴权、部署和设备未验收，业务就绪仍为503。
+当前70项Controller检查通过。八项HTTPS集成实际加载Windows原生模块，使用正常证书校验的本机HTTPS、真实密码库和文件权限库；验证SDK往返、Origin／Host／Cookie／CSRF、刷新复用、来源失效及迟到响应。证书仅在测试内存中临时生成，Cookie容器为测试模拟，环境批准引用与误差界仍为合成。独立安装包另验证相同HTTPS成功路径；真实浏览器、Linux、生产提供者、可信代理、完整跨服务鉴权、部署和设备未验收，业务就绪仍为503。
 
 ## 当前会话注销
 
@@ -141,6 +141,18 @@ SDK `logout()` 调用 `DELETE /auth/sessions/current`，只使用当前Cookie、
 202的operation_ref来自本服务／数据库及不可变操作身份；RevocationRecord的issuer_commit_revision取该session持久撤销floor，audit_id取同一持久事务身份。目标完整保留，receipts当前为空、state为accepted，未实现的传播消费者不会被冒充为applied。旧Cookie重试401并清Cookie，不借已撤凭据查询历史；响应丢失或503不自动重发，SDK清本地内存并保留错误。完整授权查询、传播确认及审计接口继续实施。
 
 最终独立包另验证注销后旧Cookie／token失效、拒绝body目标、数据库中的操作／floor／outbox与响应一致以及来源失信不伪报202。仍使用合成环境批准和模拟Cookie容器，真实浏览器、生产运行环境及远端屏障未验收。
+
+## 持久请求上下文
+
+schema 8增加 `request_context` 原件与关闭状态；显式迁移逐版备份，启动不自动升级。`POST /api/v1/request-contexts` 接受Bearer及精确Origin，使用已有product1请求／结果模型；SDK会话客户端提供 `createRequestContext({audience, operations, ttl_ms, max_unique_requests})` 并自动带入固定选择。服务当前只签发本Controller人员token的上下文，请求须有request.create以及每个目标操作的权限；任一操作未知、用途不符或越权时整项拒绝，不静默缩窄操作集合。
+
+签发与当前token重核在同一writer中完成，绑定服务／数据库、issuer三元组、当前boot和request_epoch、实际session／credential／token及授权／范围摘要。上下文最长60秒，截止同时不超过token；公开毫秒边界向内舍入。开发预算为每上下文至多256个新请求、同主体每60秒至多64次签发、全库至多4096条保留记录，满额拒绝且不自动删历史。这些数值不是经过生产负载验证的容量profile。
+
+内部 `getRequestContext(tokenInput, contextId, operation?)` 每次重核当前凭据及完整操作权限；期限等号关闭且保存终态，较早时间不能复活。token撤销／到期和session关闭同步关闭其活跃上下文；普通重启保留原件及request_epoch，但关闭旧上下文。响应经完整SDK校验后，用规范化内容比较再次确认当前绑定，字段排列不影响结果。
+
+当前只完成上下文签发与核验，尚未接入命令受理和唯一请求消耗；used_count不能解释为已受理动作数。下一步在实际命令writer中按完整RequestKey持久查原／冲突／拒绝与消耗，context_id不进入去重键。上下文本身不授设备持有权、RunGrant或发送资格，不自动重试网络请求。
+
+五项文件库用例验证凭据与权限绑定、期限及容量缩限、到期终态、注销、普通重启、签发预算、写故障回滚和v7升级；HTTPS用例另验证SDK签发、缺权限拒绝和注销后的持久关闭。成功测试仍使用合成环境批准，Cookie容器为模拟；生产提供者、真实浏览器、命令消费、完整跨服务生命周期及设备验收未完成，业务就绪仍为503。
 
 旧 NodeCG 实现及历史保留于 [leafseamer-legacy](https://github.com/ikenainanodesu/leafseamer-legacy)。本仓尚未导入旧业务源码；后续复用时逐项记录来源、历史映射和必要许可声明。
 
