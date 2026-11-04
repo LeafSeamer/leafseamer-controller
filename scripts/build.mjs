@@ -7,6 +7,7 @@ const names = ['cli.mjs', 'server.mjs', 'storage.mjs', 'storage.sql', 'identity.
 const files = await Promise.all(names.map(async name => [name, await fs.readFile(path.join(root, 'src', name))]));
 files.push(['process-host.mjs', await fs.readFile(path.join(root, 'src/process-host.mjs'))]);
 files.push(['auth-http.mjs', await fs.readFile(path.join(root, 'src/auth-http.mjs'))]);
+files.push(['gui-assets.mjs', await fs.readFile(path.join(root, 'src/gui-assets.mjs'))]);
 for (const name of ['local-permission-store.mjs', 'local-permission.sql']) files.push([name, await fs.readFile(path.join(root, 'src', name))]);
 for (const name of ['device-registry-store.mjs', 'device-registry.sql', 'command-admission-store.mjs', 'request-context-store.mjs', 'command-admission.sql', 'request-context.sql']) files.push([name, await fs.readFile(path.join(root, 'src', name))]);
 // SDK是构建输入；发行包内含经锁定清单核验的完整运行资产，不依赖邻仓路径。

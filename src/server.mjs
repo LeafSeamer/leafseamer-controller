@@ -5,11 +5,13 @@ import {openNativeClock} from './native-clock.mjs';
 import {startClockMonitor} from './clock-monitor.mjs';
 import {startAuthenticationClock} from './auth-clock.mjs';
 import {createAuthenticationHttp} from './auth-http.mjs';
+import {loadGuiAssets} from './gui-assets.mjs';
 
-export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null} = {}) {
+export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null} = {}) {
   if (!['127.0.0.1', '::1'].includes(host) || !Number.isInteger(port) || port < 0 || port > 65535) throw new Error('listen_options');
   if (authenticationProvider !== null && typeof authenticationProvider !== 'function') throw new Error('authentication_provider');
   if (tls !== null && (!tls || Object.keys(tls).sort().join(',') !== 'cert,key,origin' || typeof tls.origin !== 'string')) throw new Error('tls_options');
+  if (guiDirectory !== null && tls === null) throw new Error('gui_requires_https');
   const storage = openStorage(dataDir);
   let clock = null, authentication = null, sessions = null;
   if (storage.clockJournal) {
@@ -30,6 +32,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   }
   let server;
   try {
+    const gui = guiDirectory === null ? null : loadGuiAssets(guiDirectory, storage.identity, tls.origin);
     const authenticationHttp = createAuthenticationHttp({serviceId: storage.identity.service_id, databaseInstanceId: storage.identity.database_instance_id,
       serviceBootId: storage.serviceBootId, sessions, origin: tls?.origin ?? null});
     const options = {maxHeaderSize: 16384, requestTimeout: 5000, headersTimeout: 5000, keepAliveTimeout: 1000};
@@ -42,6 +45,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       res.writeHead(413, {Connection: 'close'}); res.end(); return;
     }
     if (!['GET', 'HEAD'].includes(req.method)) { res.writeHead(405, {Allow: 'GET, HEAD'}); res.end(); return; }
+    if (gui?.handle(req, res)) return;
     let status, body;
     if (req.url === '/health/live') { status = 200; body = {status: 'alive'}; }
     else if (req.url === '/health/ready') {
