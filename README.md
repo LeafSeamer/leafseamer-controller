@@ -37,7 +37,7 @@ SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 
 | 本机入口 | 当前结果 |
 | --- | --- |
 | `GET /health/live` | 200，最小存活状态 |
-| `GET /health/ready` | 503；旧库 `bootstrap_incomplete`，schema 3 为 `authentication_clock_unqualified` 或故障时 `authentication_clock_unavailable` |
+| `GET /health/ready` | 503；旧库 `bootstrap_incomplete`，schema 3/4 为 `authentication_clock_unqualified` 或故障时 `authentication_clock_unavailable` |
 | `GET /.well-known/leafseamer-contracts` | 503，无正文；尚无完整就绪的契约处理组合 |
 
 健康接口支持 HEAD，禁止缓存；不暴露数据库路径、版本或凭据。启动时的 JSON 输出包含本次 boot 身份与监听端口，`ready` 为 false。未知路由不进入业务处理，带正文请求不读入无界缓冲；当前没有命令发送、自动重放或自动布防路径。
@@ -50,7 +50,7 @@ SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 
 node --disallow-code-generation-from-strings dist/cli.mjs migrate-storage --data-dir /absolute/controller-data
 ```
 
-此操作逐步升级至 schema 3。每一步先通过 SQLite backup 生成同目录的独立旧版文件及 SHA-256，再同事务升级、保留服务 scope、启动历史和已有身份回执、登记迁移摘要和备份引用。成功响应 `steps` 列出本次各步，顶层备份字段指最后一步；已为 v3 时返回 `changed:false`。正在运行、未知版本或不完整迁移拒绝。每一步 DDL 失败只回滚该步；例如 v1→v2 已提交而 v2→v3 失败时保留 v2，不自动降级。旧 v1/v2 库仍可保护态启动，不自动升级。备份不能作为另一个活动实例直接使用，正式恢复仍需换 scope 和完整恢复流程。活动库与备份目录的安装 ACL、备份恢复和掉电耐久尚待平台验收。
+此操作逐步升级至 schema 4。每一步先通过 SQLite backup 生成同目录的独立旧版文件及 SHA-256，再同事务升级、保留服务 scope、启动历史和已有身份回执、登记迁移摘要和备份引用。成功响应 `steps` 列出本次各步，顶层备份字段指最后一步；已为 v4 时返回 `changed:false`。正在运行、未知版本或不完整迁移拒绝。每一步 DDL 失败只回滚该步；例如 v1→v2 已提交而 v2→v3 失败时保留 v2，不自动降级。旧 v1/v2/v3 库仍可保护态启动，不自动升级。备份不能作为另一个活动实例直接使用，正式恢复仍需换 scope 和完整恢复流程。活动库与备份目录的安装 ACL、备份恢复和掉电耐久尚待平台验收。
 
 `enroll-admin --data-dir <绝对目录>` 是供本机安装管理客户端使用的子进程入口。Windows 要求实际提升权限的管理员，首期系统工具固定标准 Windows 安装位置；Linux 要求有效 UID 0。没有在线角色、环境开关或命令参数可替代该检查。当前账户非管理员时，在打开业务库或发出能力前拒绝。父客户端必须用受控继承管道连接 stdin/stdout，终端和文件重定向拒绝；尚未提供交互安装向导。
 
@@ -66,7 +66,17 @@ schema 3 服务每500毫秒调用原生采集器。Windows 顺序为 `QueryInter
 
 采集括号超过20毫秒、两秒有效期到达等号、时间倒退、连续性变化或采集／存储失败均锁存故障，本 boot 新采样不能解除。Windows 注册电源通知以记录连续性变化；Linux 连续性监测仍未完成。每 boot 保存最新诊断与首故障，记录原生制品摘要；每32次诊断写入执行并核验 PASSIVE checkpoint。它只是当前保护态诊断的有限写入处理，不是完整业务 WAL 容量调度或不可变 AuthenticationClockAcquisition 日志。
 
-当前全部采样始终不具备认证资格：尚未装载获批准的环境误差、量化与速率界、宿主授时健康来源及 DF02 运行域，也尚未实现可信区间原件 writer。因此服务继续 `protected`，没有登录、会话或设备写入授权。重启只建立新 boot 的诊断，不能恢复或获得认证资格。
+当前服务采样仍不具备认证资格：尚未装载获批准的环境误差、量化与速率界、宿主授时健康来源及 DF02 运行域。schema 4 已实现下述可信区间和原件 writer，但服务未装配可信提供者，继续 `protected`，没有登录、会话或设备写入授权。重启只建立新 boot 的诊断，不能恢复或获得认证资格。
+
+## 认证时钟内部服务
+
+`auth-clock.mjs`、`auth-clock-value.mjs` 与 `auth-clock-store.mjs` 实现 DF06 §13 的服务级采集、区间计算与文件库事务。它们是本地服务内部接口，尚未作为 SDK 公开契约发布。所有纳秒运算使用有界 BigInt，固定向外舍入；政策完整绑定 service、运行 profile、原生制品、宿主来源、环境批准及健康 profile。原件摘要使用锁定的 [canonicalize 5.1.0](https://github.com/erdtman/canonicalize/tree/v5.1.0) JCS 与 SHA-256，原始平台采样重新归一化后才参加计算。
+
+受监督提供者的 `read()` 必须返回已从可信安装／运行时来源解析并验证的 `policy`、`runtime`、`health` 原件；原件自带摘要只能证明一致性，不能自证来源可信。提供者负责环境批准、profile、制品和健康／有限holdover引用的真实性及持续有效性。库逐项核对其摘要、scope、policy、运行域与有效期，采集前后和提交前重新读取；不得将HTTP输入、模块输出或普通配置文件直接适配成此提供者。当前没有产品提供者，也没有CLI／HTTP参数绕过它。
+
+每次采集同事务写入政策／运行／健康依赖、不可变 AuthenticationClockAcquisition 与域当前指针。同 ID 同内容只返回原引用，不刷新时间；换内容、区间不相交、连续性丢失和过期使域保护。后续有效区间保留此前预测上下界，不能借新采样收窄旧上界。每次 `current()` 重新核健康、运行域、真实读数和采样期限，返回期限取采样／运行／健康的交集；该返回值不允许被缓存成长期授权。数据库写入／提交失败立即停止本实例提供时间；故障事实也写失败时明确 `durable:false`，不报告安全关闭已完成。
+
+schema 4 的四表分别保存依赖原件、采集原件、当前指针及首故障；故障不可删除或更新。当前 writer 尚待接入完整 DF04 容量／保留调度、DF02 启停与域退役、实际环境／健康提供者以及身份请求事务；没有实际设备出口，因此没有生成 Controller 出口 Binding、关闭计划或宣称物理终止。测试中的合成提供者只用于隔离验收，不允许出现在安装配置中。
 
 `npm test` 使用真实文件库、密码库、SDK HTTP 客户端、自建子进程与本机构建的原生模块；覆盖身份事务、逐步迁移、整数边界、故障锁存、checkpoint复用及HTTP保护态。故障注入使用合成读数，不能替代真实休眠／恢复和系统跳变验收。因运行账户未提升权限，未验证管理员权限下完整CLI成功路径，事务成功与管道输入分别实际验证。Linux、真实休眠、掉电、生产认证时钟资格、TLS、网络登录／会话、部署和设备均未验收。源码与运行构建在本仓，测试数据和依赖不提交。
 

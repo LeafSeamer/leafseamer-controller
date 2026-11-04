@@ -25,7 +25,8 @@
   },
   "dependencies": {
     "argon2": "0.45.1",
-    "better-sqlite3": "13.0.3"
+    "better-sqlite3": "13.0.3",
+    "canonicalize": "5.1.0"
   },
   "devDependencies": {
     "@leafseamer/sdk": "file:../leafseamer-sdk"

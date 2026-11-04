@@ -115,7 +115,7 @@ test('v2身份升级v3不改身份与回执，第二步失败保留已提交v2',
     const {token_id, secret} = storage.enrollment.begin();
     result = await storage.enrollment.complete({token_id, secret, login: 'synthetic-clock-admin', password: 'synthetic-password-012345', mode: 'standalone'});
   } finally { storage.close(); }
-  const migrated = await migrateStorage(dir); assert.equal(migrated.steps.length, 1); assert.equal(migrated.schema_revision, '3');
+  const migrated = await migrateStorage(dir, 3); assert.equal(migrated.steps.length, 1); assert.equal(migrated.schema_revision, '3');
   const reopened = openStorage(dir);
   try { assert.deepEqual(reopened.enrollment.summary(), result); } finally { reopened.close(); }
   const failed = temporary(t); initializeStorage(failed);
@@ -126,7 +126,7 @@ test('v2身份升级v3不改身份与回执，第二步失败保留已提交v2',
 });
 
 test('schema3实际服务保存原生诊断并保持HTTP未就绪', async t => {
-  const dir = temporary(t); initializeStorage(dir); await migrateStorage(dir);
+  const dir = temporary(t); initializeStorage(dir); await migrateStorage(dir, 3);
   const app = await startController({dataDir: dir});
   try {
     const live = await fetch(`http://127.0.0.1:${app.address.port}/health/live`); assert.equal(live.status, 200);
