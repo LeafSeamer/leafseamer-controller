@@ -14,6 +14,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0} = 
       clock = startClockMonitor(source, storage.clockJournal);
       // 可信安装/监督提供者未接通；不从普通配置自报环境批准。
       if (storage.authenticationClock) authentication = startAuthenticationClock(source, storage.authenticationClock);
+      if (storage.identity.schema_revision === '5' && authentication) storage.sessions(authentication);
     }
     catch {
       try { storage.clockJournal.fault('native_clock_unavailable'); }

@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import Database from 'better-sqlite3';
 import {identityStore} from './identity-store.mjs';
 import {authenticationClockStore} from './auth-clock-store.mjs';
+import {sessionStore} from './session-store.mjs';
 
 const sql = fs.readFileSync(new URL('./storage.sql', import.meta.url), 'utf8');
 const scriptDigest = 'sha256:' + crypto.createHash('sha256').update(sql).digest('hex');
@@ -13,6 +14,8 @@ const clockSql = fs.readFileSync(new URL('./clock.sql', import.meta.url), 'utf8'
 const clockDigest = 'sha256:' + crypto.createHash('sha256').update(clockSql).digest('hex');
 const authClockSql = fs.readFileSync(new URL('./auth-clock.sql', import.meta.url), 'utf8');
 const authClockDigest = 'sha256:' + crypto.createHash('sha256').update(authClockSql).digest('hex');
+const sessionSql = fs.readFileSync(new URL('./session.sql', import.meta.url), 'utf8');
+const sessionDigest = 'sha256:' + crypto.createHash('sha256').update(sessionSql).digest('hex');
 const applicationId = 0x4c53434c;
 const engine = Object.freeze({version: '3.53.4', source: '2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc'});
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -80,18 +83,18 @@ export function initializeStorage(dataDir) {
 }
 function validateStorage(db) {
   const revision = pragma(db, 'user_version');
-  require(pragma(db, 'application_id') === applicationId && [1, 2, 3, 4].includes(revision), 'database_version_mismatch');
+  require(pragma(db, 'application_id') === applicationId && [1, 2, 3, 4, 5].includes(revision), 'database_version_mismatch');
   require(pragma(db, 'journal_mode') === 'wal', 'journal_mode_mismatch');
   pragma(db, 'synchronous = FULL');
   require(pragma(db, 'synchronous') === 2, 'synchronous_mismatch');
   require(pragma(db, 'quick_check') === 'ok' && rows(db, 'PRAGMA foreign_key_check').length === 0, 'database_integrity');
   const migrations = rows(db, 'SELECT * FROM schema_migration ORDER BY to_revision');
   require(migrations.length === revision && migrations[0].from_revision === '0' && migrations[0].to_revision === '1' && migrations[0].state === 'committed' && migrations[0].script_digest === scriptDigest, 'migration_mismatch');
-  for (let i = 1; i < revision; i++) require(migrations[i].from_revision === String(i) && migrations[i].to_revision === String(i + 1) && migrations[i].state === 'committed' && migrations[i].script_digest === [scriptDigest, identityDigest, clockDigest, authClockDigest][i] && /^sha256:[0-9a-f]{64}$/.test(migrations[i].backup_ref), 'migration_mismatch');
+  for (let i = 1; i < revision; i++) require(migrations[i].from_revision === String(i) && migrations[i].to_revision === String(i + 1) && migrations[i].state === 'committed' && migrations[i].script_digest === [scriptDigest, identityDigest, clockDigest, authClockDigest, sessionDigest][i] && /^sha256:[0-9a-f]{64}$/.test(migrations[i].backup_ref), 'migration_mismatch');
   return identity(db, String(revision));
 }
-export async function migrateStorage(dataDir, targetRevision = 4) {
-  require([2, 3, 4].includes(targetRevision), 'migration_target');
+export async function migrateStorage(dataDir, targetRevision = 5) {
+  require([2, 3, 4, 5].includes(targetRevision), 'migration_target');
   const file = filename(dataDir);
   let db;
   try {
@@ -110,9 +113,9 @@ export async function migrateStorage(dataDir, targetRevision = 4) {
       pragma(db, 'foreign_keys = OFF');
       require(pragma(db, 'foreign_keys') === 0, 'migration_setup_failed');
       db.transaction(() => {
-        db.exec([identitySql, clockSql, authClockSql][next - 2]);
+        db.exec([identitySql, clockSql, authClockSql, sessionSql][next - 2]);
         db.prepare("INSERT INTO schema_migration VALUES (?, ?, ?, ?, ?, 'committed', ?)")
-          .run(crypto.randomUUID(), String(next - 1), String(next), [identityDigest, clockDigest, authClockDigest][next - 2], backupRef, crypto.randomUUID());
+          .run(crypto.randomUUID(), String(next - 1), String(next), [identityDigest, clockDigest, authClockDigest, sessionDigest][next - 2], backupRef, crypto.randomUUID());
         pragma(db, 'user_version = ' + next);
         require(rows(db, 'PRAGMA foreign_key_check').length === 0, 'migration_integrity');
       }).immediate();
@@ -167,13 +170,18 @@ export function openStorage(dataDir) {
       if (state.schema_revision !== '1') db.prepare("UPDATE first_admin_challenge SET state = 'invalidated' WHERE state = 'pending'").run();
       if (Number(state.schema_revision) >= 3) db.prepare("INSERT INTO authentication_clock_diagnostic VALUES (?, 'unqualified', 'clock_not_sampled', 0, NULL, NULL)").run(bootId);
     }).immediate();
-    let closed = false;
+    let closed = false, sessions = null, sessionClock = null;
     return Object.freeze({identity: state, serviceBootId: bootId, engine,
       enrollment: state.schema_revision !== '1' ? identityStore(db, bootId) : null,
       clockJournal: Number(state.schema_revision) >= 3 ? clockJournal(db, bootId) : null,
-      authenticationClock: state.schema_revision === '4' ? authenticationClockStore(db, {service_id: state.service_id, service_boot_id: bootId}) : null,
+      authenticationClock: Number(state.schema_revision) >= 4 ? authenticationClockStore(db, {service_id: state.service_id, service_boot_id: bootId}) : null,
+      sessions(clock) {
+        require(state.schema_revision === '5' && !closed, 'session_migration_required');
+        require(clock && typeof clock.current === 'function' && (!sessionClock || sessionClock === clock), 'session_clock_binding');
+        sessionClock = clock; sessions ??= sessionStore(db, state.service_id, clock); return sessions;
+      },
       close() {
-        if (closed) return; closed = true;
+        if (closed) return; closed = true; sessions?.stop();
         try {
           db.transaction(() => {
             if (state.schema_revision !== '1') db.prepare("UPDATE first_admin_challenge SET state = 'invalidated' WHERE service_boot_id = ? AND state = 'pending'").run(bootId);
