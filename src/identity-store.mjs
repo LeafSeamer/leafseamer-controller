@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
 import {IdentityError, createOpaqueSecret, verifyOpaqueSecret, hashPassword, passwordProfile, validateLogin} from './identity-crypto.mjs';
+import {initializeLocalPermissions} from './local-permission-store.mjs';
 
 // 仅本地writer使用；HTTP处理器不得把调用本模块当作认证证明。
-export function identityStore(db, serviceBootId) {
+export function identityStore(db, serviceBootId, permissionService = null) {
   let current = null;
   const exists = () => db.prepare('SELECT count(*) FROM identity_initialization').pluck().get() !== 0;
   const reject = code => { throw new IdentityError(code); };
@@ -49,6 +50,7 @@ export function identityStore(db, serviceBootId) {
         db.prepare("UPDATE first_admin_challenge SET state = 'consumed', consumed_tx_id = ? WHERE token_id = ? AND state = 'pending'").run(txId, input.token_id);
         db.prepare('INSERT INTO identity_initialization VALUES (1, ?, ?, ?, ?, ?)').run(txId, input.token_id, principalId, issuerId, input.mode);
         db.prepare("INSERT INTO identity_receipt VALUES (?, 'first_admin', ?, ?)").run(txId, principalId, input.token_id);
+        if (permissionService) initializeLocalPermissions(db, permissionService);
       }).immediate();
       current = null;
       return Object.freeze(result);

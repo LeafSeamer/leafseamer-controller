@@ -50,7 +50,7 @@ SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 
 node --disallow-code-generation-from-strings dist/cli.mjs migrate-storage --data-dir /absolute/controller-data
 ```
 
-此操作逐步升级至 schema 6。每一步先通过 SQLite backup 生成同目录的独立旧版文件及 SHA-256，再同事务升级、保留服务 scope、启动历史和已有身份回执、登记迁移摘要和备份引用。成功响应 `steps` 列出本次各步，顶层备份字段指最后一步；已为 v6 时返回 `changed:false`。正在运行、未知版本或不完整迁移拒绝。每一步 DDL 失败只回滚该步；例如 v1→v2 已提交而 v2→v3 失败时保留 v2，不自动降级。旧 v1/v2/v3/v4/v5 库仍可保护态启动，不自动升级。备份不能作为另一个活动实例直接使用，正式恢复仍需换 scope 和完整恢复流程。活动库与备份目录的安装 ACL、备份恢复和掉电耐久尚待平台验收。
+此操作逐步升级至 schema 7。每一步先通过 SQLite backup 生成同目录的独立旧版文件及 SHA-256，再同事务升级、保留服务 scope、启动历史和已有身份回执、登记迁移摘要和备份引用。成功响应 `steps` 列出本次各步，顶层备份字段指最后一步；已为 v7 时返回 `changed:false`。正在运行、未知版本或不完整迁移拒绝。每一步 DDL 失败只回滚该步；例如 v1→v2 已提交而 v2→v3 失败时保留 v2，不自动降级。旧 v1/v2/v3/v4/v5/v6 库仍可保护态启动，不自动升级。备份不能作为另一个活动实例直接使用，正式恢复仍需换 scope 和完整恢复流程。活动库与备份目录的安装 ACL、备份恢复和掉电耐久尚待平台验收。
 
 `enroll-admin --data-dir <绝对目录>` 是供本机安装管理客户端使用的子进程入口。Windows 要求实际提升权限的管理员，首期系统工具固定标准 Windows 安装位置；Linux 要求有效 UID 0。没有在线角色、环境开关或命令参数可替代该检查。当前账户非管理员时，在打开业务库或发出能力前拒绝。父客户端必须用受控继承管道连接 stdin/stdout，终端和文件重定向拒绝；尚未提供交互安装向导。
 
@@ -92,7 +92,7 @@ schema 5 的 `storage.sessions(clock)` 将同库人员会话服务绑定到唯�
 
 ## 人员定向访问令牌
 
-schema 6 的会话服务增加内部 `issueToken(sessionInput, request)` 与 `verifyToken(tokenInput, audience)`。同一storage在装配 `sessions(clock, authority)` 时固定当前授权提供者，不能在运行中换成另一来源；缺提供者直接拒绝。当前产品启动没有装配该提供者，也没有公开token路由。`authority.resolve()` 必须从当前本地权限、对象范围和实际配对来源同步解析不可变授权原件；调用在writer内，不能执行网络等待。它须稳定绑定issuer三元组、session／credential、主体／会话／策略修订、单audience、权限交集、对象范围摘要及有限期限。摘要仅校验原件一致性，不能使HTTP自报权限或配对变可信。
+schema 6 的会话服务增加内部 `issueToken(sessionInput, request)` 与 `verifyToken(tokenInput, audience)`。同一storage在装配 `sessions(clock, authority)` 时固定当前授权提供者，不能在运行中换成另一来源；缺提供者直接拒绝。schema 7默认装配本地持久权限提供者；更早schema及显式null仍无提供者。公开token路由目前仅返回保护态拒绝。`authority.resolve()` 必须从当前本地权限、对象范围和实际配对来源同步解析不可变授权原件；调用在writer内，不能执行网络等待。它须稳定绑定issuer三元组、session／credential、主体／会话／策略修订、单audience、权限交集、对象范围摘要及有限期限。摘要仅校验原件一致性，不能使HTTP自报权限或配对变可信。
 
 签发使用 `access_token` 分域的32随机字节，验证值、完整父链、请求身份和session audience同事务写入。每父credential最多8个活跃token，最长60秒，并取会话绝对／空闲及当前授权更早截止；容量不足不产生部分记录。相同credential／request_id及内容只返回非秘密原结果，重复响应的 `secret:null` 不是新签发；不同内容拒绝。秘密只在首次内存响应交付，不写DB或幂等记录。
 
@@ -109,6 +109,18 @@ schema 6 的会话服务增加内部 `issueToken(sessionInput, request)` 与 `ve
 构建从开发依赖 SDK 的产物读入清单，按 [sdk-runtime.json](sdk-runtime.json) 固定清单、选择及许可摘要，再逐文件核验；复制运行文件和许可到 Controller 包内。独立安装不需要SDK邻仓或开发依赖，旧SQLite迁移原件不变。50项测试包含新增的实际SDK／HTTP收发、严格拒绝、两类正文超限、慢请求、并发容量与断连回收。
 
 这是网络拒绝路径的交付。公开成功响应所需的权限投影、同版身份接受集、可信运行来源、Cookie／Origin／TLS和跨服务对端认证仍待实施；不能将回环测试视为浏览器、生产部署或设备验收。
+
+## 本地持久权限
+
+schema 7将本地权限版本、当前选择、管理操作、固定传播目标和outbox纳入同库writer。首次管理员初始化与初始权限同事务；已有v6管理员在显式迁移时从已保存的administrator角色建立权限，普通查询或登录不自动补建。初始明确授予 `auth.manage`、`auth.read`、`identity.read`、`request.create`、`session.read`、`status.read` 六项本地身份管理／读取权限；当前目录另支持显式授予 `control.read`、`device.read`、`extension.read`。这些权限不自动产生设备控制权、内部配对权或远端服务权限。完整业务权限目录、对象级范围和其它人员角色仍按既定首期范围实施。
+
+`storage.sessions(clock)` 默认使用当前同库权限版本签发及复核token；请求范围必须全部获准，audience必须为本Controller。当前父session、credential、issuer三元组和主体状态重新从库读取，授权原件有限期限取父会话绝对边界，token另取空闲与60秒更早截止。权限来源已是实际持久数据；环境资格尚未落实，时钟成功测试仍明确使用合成提供者。
+
+内部 `localPermissions(sessionInput)` 读取本人当前权限；`replaceLocalPermissions(sessionInput, request)` 核当前auth.manage、CSRF及5分钟近期认证，request包含request_id、principal_id、expected_revision和完整permissions。修订采用精确uint64字符串，写新不可变版本并CAS推进当前选择。每次变更同事务终止该主体已有活跃token、保存操作和全部session audience／执行／订阅关联目标；相同凭据／请求及内容查原，不再递增，异内容拒绝。变更不关闭人员会话，不释放设备holder，也不撤独立服务运行。
+
+纯增收允许按新版本重新取token；减收或混合变更将新权限版本保持pending，阻止重新签发。所有传播目标目前均pending，尚无远端屏障／receipt消费者或减收完成激活入口，不声称applied，也不自动回退旧授权。管理响应丢失后须按现有权限核对，已失管理资格的旧会话不能借幂等请求绕过权限。权限写失败回滚版本、当前选择、token撤销、操作与outbox并停止失败的会话服务实例。
+
+57项检查通过，新增七项覆盖默认持久授权、身份与授权初始化原子性、精确版本／幂等、增收、减收、目标并集、近期认证、v6迁移和逐写点回滚。公开权限管理接口、完整身份接受集、Cookie／Origin／TLS、可信运行环境及跨服务配对仍待接通，当前网络入口保持保护态。
 
 旧 NodeCG 实现及历史保留于 [leafseamer-legacy](https://github.com/ikenainanodesu/leafseamer-legacy)。本仓尚未导入旧业务源码；后续复用时逐项记录来源、历史映射和必要许可声明。
 

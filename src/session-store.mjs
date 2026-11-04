@@ -99,6 +99,20 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
   const deliver = result => { if (result.denied) fail(result.denied); return result; };
   return Object.freeze({
     ...accessTokenService({db, serviceId, authority, enabled: tokensEnabled, writer, time, authenticated, terminal, rows, pad}),
+    localPermissions(input) {
+      if (!authority?.current) fail('local_authorization_unavailable');
+      return deliver(writer(() => { const found = authenticated(input, time()); return found.denied ? found : authority.current(found.session.principal_id); }));
+    },
+    replaceLocalPermissions(input, request) {
+      if (!authority?.replace) fail('local_authorization_unavailable');
+      const result = writer(() => {
+        const now = time(), found = authenticated(input, now); if (found.denied) return found;
+        const operation = authority.replace(found, request, now);
+        const last = time(); if (last.upper >= BigInt(found.session.recent_before_ns)) fail('local_authorization_management_denied');
+        return operation;
+      });
+      deliver(result); time(); return result;
+    },
     async login(input) {
       live(); time();
       if (!input || Object.keys(input).sort().join(',') !== 'login,password') fail('login_invalid');

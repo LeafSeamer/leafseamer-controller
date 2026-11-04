@@ -6,6 +6,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const names = ['cli.mjs', 'server.mjs', 'storage.mjs', 'storage.sql', 'identity.sql', 'identity-crypto.mjs', 'identity-store.mjs', 'local-admin.mjs', 'native-clock.mjs', 'clock-monitor.mjs', 'clock.sql', 'auth-clock.sql', 'auth-clock.mjs', 'auth-clock-value.mjs', 'auth-clock-store.mjs', 'session-store.mjs', 'session.sql', 'access-token-store.mjs', 'access-token.sql'];
 const files = await Promise.all(names.map(async name => [name, await fs.readFile(path.join(root, 'src', name))]));
 files.push(['auth-http.mjs', await fs.readFile(path.join(root, 'src/auth-http.mjs'))]);
+for (const name of ['local-permission-store.mjs', 'local-permission.sql']) files.push([name, await fs.readFile(path.join(root, 'src', name))]);
 // SDK是构建输入；发行包内含经锁定清单核验的完整运行资产，不依赖邻仓路径。
 const sdkRoot = new URL('./', import.meta.resolve('@leafseamer/sdk'));
 const sdkLock = JSON.parse(await fs.readFile(path.join(root, 'sdk-runtime.json'), 'utf8'));
