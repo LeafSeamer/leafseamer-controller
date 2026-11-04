@@ -9,7 +9,7 @@ const emit = value => process.stdout.write(JSON.stringify(value) + '\n');
 let app;
 try {
   const [command, ...args] = process.argv.slice(2);
-  const allowed = ['init-storage', 'migrate-storage', 'enroll-admin', 'identity-status'].includes(command) ? ['--data-dir'] : command === 'start' ? ['--data-dir', '--host', '--port'] : [];
+  const allowed = ['init-storage', 'migrate-storage', 'enroll-admin', 'identity-status', 'register-device'].includes(command) ? ['--data-dir'] : command === 'start' ? ['--data-dir', '--host', '--port'] : [];
   if (!allowed.length || args.length % 2) throw new Error('arguments');
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
@@ -22,6 +22,11 @@ try {
     emit({event: 'storage_initialized', ...identity, ready: false});
   } else if (command === 'migrate-storage') {
     emit({event: 'storage_migrated', ...await migrateStorage(options['--data-dir']), ready: false});
+  } else if (command === 'register-device') {
+    requireLocalAdministrator(); requirePrivatePipes();
+    const storage = openStorage(options['--data-dir']);
+    try { emit({event: 'device_registered', ...storage.registerDevice(await readEnrollmentInput()), ready: false}); }
+    finally { storage.close(); }
   } else if (command === 'enroll-admin' || command === 'identity-status') {
     requireLocalAdministrator();
     if (command === 'enroll-admin') requirePrivatePipes();

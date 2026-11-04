@@ -50,7 +50,7 @@ SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 
 node --disallow-code-generation-from-strings dist/cli.mjs migrate-storage --data-dir /absolute/controller-data
 ```
 
-此操作逐步升级至 schema 7。每一步先通过 SQLite backup 生成同目录的独立旧版文件及 SHA-256，再同事务升级、保留服务 scope、启动历史和已有身份回执、登记迁移摘要和备份引用。成功响应 `steps` 列出本次各步，顶层备份字段指最后一步；已为 v7 时返回 `changed:false`。正在运行、未知版本或不完整迁移拒绝。每一步 DDL 失败只回滚该步；例如 v1→v2 已提交而 v2→v3 失败时保留 v2，不自动降级。旧 v1/v2/v3/v4/v5/v6 库仍可保护态启动，不自动升级。备份不能作为另一个活动实例直接使用，正式恢复仍需换 scope 和完整恢复流程。活动库与备份目录的安装 ACL、备份恢复和掉电耐久尚待平台验收。
+此操作逐步升级至 schema 10。每一步先通过 SQLite backup 生成同目录的独立旧版文件及 SHA-256，再同事务升级、保留服务 scope、启动历史和已有身份回执、登记迁移摘要和备份引用。成功响应 `steps` 列出本次各步，顶层备份字段指最后一步；已为 v10 时返回 `changed:false`。正在运行、未知版本或不完整迁移拒绝。每一步 DDL 失败只回滚该步；例如 v1→v2 已提交而 v2→v3 失败时保留 v2，不自动降级。旧 v1—v9 库仍可保护态启动，不自动升级。备份不能作为另一个活动实例直接使用，正式恢复仍需换 scope 和完整恢复流程。活动库与备份目录的安装 ACL、备份恢复和掉电耐久尚待平台验收。
 
 `enroll-admin --data-dir <绝对目录>` 是供本机安装管理客户端使用的子进程入口。Windows 要求实际提升权限的管理员，首期系统工具固定标准 Windows 安装位置；Linux 要求有效 UID 0。没有在线角色、环境开关或命令参数可替代该检查。当前账户非管理员时，在打开业务库或发出能力前拒绝。父客户端必须用受控继承管道连接 stdin/stdout，终端和文件重定向拒绝；尚未提供交互安装向导。
 
@@ -132,7 +132,7 @@ product1继承四个原有身份路径，支持登录201、刷新200、token签�
 
 SDK的 `createBrowserSessionClient` 管理内存CSRF与token，浏览器保管HttpOnly Cookie，拒绝并发刷新、错误选择及非法CSRF。清本地内存后到达的旧响应不能重新安装凭据；清内存不等于服务端注销。当前注销已进入新product1选择；主体与权限管理接口仍须归并，不向旧panel4偷加路径。
 
-当前身份与命令账本检查通过。九项HTTPS集成实际加载Windows原生模块，使用正常证书校验的本机HTTPS、真实密码库和文件权限库；验证SDK往返、Origin／Host／Cookie／CSRF、刷新复用、来源失效及迟到响应。证书仅在测试内存中临时生成，Cookie容器为测试模拟，环境批准引用与误差界仍为合成。独立安装包另验证相同HTTPS成功路径；真实浏览器、Linux、生产提供者、可信代理、完整跨服务鉴权、部署和设备未验收，业务就绪仍为503。
+当前身份与命令账本检查通过。十项HTTPS集成实际加载Windows原生模块，使用正常证书校验的本机HTTPS、真实密码库和文件权限库；验证SDK往返、Origin／Host／Cookie／CSRF、刷新复用、来源失效及迟到响应。证书仅在测试内存中临时生成，Cookie容器为测试模拟，环境批准引用与误差界仍为合成。独立安装包另验证相同HTTPS成功路径；真实浏览器、Linux、生产提供者、可信代理、完整跨服务鉴权、部署和设备未验收，业务就绪仍为503。
 
 ## 当前会话注销
 
@@ -167,6 +167,20 @@ schema 9采用[请求裁决布局](https://github.com/LeafSeamer/leafseamer-suit
 当前submitCommand仅在当前读取权限下返回已存在的原裁决，迟到提交换context也不能绕过墓碑。新动作受理缺少真实控制、准备、资源及运行来源，返回503；数据库另禁止写入accepted，保留的初始命令／预留结构不表示受理已启用。后续完整准入实现须在同一账本追加accepted路径，完成实际门控及上下文额度消费后，才能移除该数据库限制。没有202、设备排队或发送路径，业务就绪继续503。
 
 SDK三种方法使用已有product1类型；命令成功响应是具名裁决或LookupResult正文，错误为该契约的code／request_id，不能套用身份接口的data信封。客户端不自动重试，拒收不等于已受理动作停止。验证包含真实文件库、七个写点故障、跨context查原、重启后当前授权及实际HTTPS往返；环境批准仍合成，真实浏览器、生产资格、跨服务和设备未验收。
+
+## 持久设备目录与初始控制状态
+
+schema 10提供本机安装管理使用的 `register-device --data-dir /absolute/controller-data`，要求当前OS管理员身份、受控stdin/stdout管道及已完成首次管理员初始化。服务须先停止，运行中的排他数据库连接不能被工具绕过。stdin接收单个JSON对象 `{request_id, device_kind, display_name}`；request_id应由调用方持久保存。命令只登记待配置元数据，不接受网络端点、秘密、能力、当前holder或ready状态，也不连接设备。内部可信安装代码可调用 `storage.registerDevice(input)`，普通HTTP没有登记或导入任意控制状态的入口。
+
+服务分配稳定device_id、新控制epoch及不可变回执。同request_id同内容查原，异内容拒绝；设备、初始控制记录、登记回执、审计与观察通知同事务，四写点任一失败连目录修订一起回滚。开发容量为4096个保留设备记录，满额拒绝且不自动删除历史。当前只提供首次登记；显示名编辑、端点配置、模块绑定、删除及依赖核对仍须按既定生命周期实施。
+
+新设备的初始控制状态固定 `automatic`、holder=null、effective_version=reserved_version=0、gate_state=protected。它表示没有人员持有且不允许发送，不表示自动化已经布防。普通重启保留device_id、control_epoch及控制原件；当前没有导入或修改holder、effective或ready的旁路。后续控制变更须在同一设备权威下追加版本化历史，完成完整切点／屏障与当前授权后才生效。
+
+`GET /api/v1/devices` 使用真实目录并核当前device.read；`GET /api/v1/devices/{device_id}/control` 核当前control.read。权限须显式授予；前者返回标准data信封，后者按已有控制契约返回具名ControlRecord正文。SDK分别调用 `listDevices(cursor?)` 和 `getControl(deviceId)`。读取失败不创建观测或控制记录，发响应前重新核权限及原结果。
+
+分页每页至多64项、描述正文合计不超过48 KiB；游标绑定服务／数据库、目录修订及位置。目录变化返回409，调用方须重新列举；伪造或错格式游标拒绝，不能拼接不同修订当作一个快照。当前只保存待配置描述：connection_state=disconnected、actions／triggers为空，state_schema为false。device_kind是配置分类，不是已验证型号支持；没有虚构provider_boot、设备session、能力或新鲜观测。
+
+四项文件库检查覆盖幂等／冲突、重启、分页修订与权限、逐写回滚及v9→v10显式升级；迁移排序按数值处理，避免版本10排在2前。实际HTTPS另验证目录和保护状态读取、缺权与未知设备；独立包和类型检查另行验证。本机未运行提升权限后的新CLI成功全链；真实模块、连接采样、控制变更、准备／资源来源、浏览器和设备均未验收，业务就绪仍为503。
 
 旧 NodeCG 实现及历史保留于 [leafseamer-legacy](https://github.com/ikenainanodesu/leafseamer-legacy)。本仓尚未导入旧业务源码；后续复用时逐项记录来源、历史映射和必要许可声明。
 

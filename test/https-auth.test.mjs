@@ -17,21 +17,23 @@ import crypto from 'node:crypto';
 import {certificate, supervisedFixture, browserFetch} from './https-auth-fixture.mjs';
 
 const material = certificate(), login = {login: 'synthetic-https-admin', password: 'synthetic-https-password-012345'};
-async function setup(t, qualified = true, commandPermissions = false) {
+async function setup(t, qualified = true, commandPermissions = false, registerDevices = false) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'leafseamer-https-')); let app;
   t.after(async () => { await app?.close(); assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir())); fs.rmSync(dir, {recursive: true, force: true}); });
   initializeStorage(dir); await migrateStorage(dir);
-  const storage = openStorage(dir); let enrolled;
+  const storage = openStorage(dir); let enrolled; const devices = [];
   try {
     const capability = storage.enrollment.begin(); enrolled = await storage.enrollment.complete({...login, mode: 'standalone', token_id: capability.token_id, secret: capability.secret});
-    if (commandPermissions) {
+    if (commandPermissions || registerDevices) {
       const f = fixture(storage.authenticationClock.scope), clock = startAuthenticationClock(f.source, storage.authenticationClock, f.provider, {schedule: false});
       try {
         const sessions = storage.sessions(clock), logged = await sessions.login(login), input = {credential_id: logged.credential_id, secret: logged.secret, csrf: logged.csrf};
-        sessions.replaceLocalPermissions(input, {request_id: crypto.randomUUID(), principal_id: logged.session.principal_id, expected_revision: '1', permissions: [...localIdentityPermissions, 'command.read', 'command.cancel']});
+        sessions.replaceLocalPermissions(input, {request_id: crypto.randomUUID(), principal_id: logged.session.principal_id, expected_revision: '1', permissions: [...localIdentityPermissions,
+          ...(commandPermissions ? ['command.read', 'command.cancel'] : []), ...(registerDevices ? ['device.read', 'control.read'] : [])]});
         sessions.logout(input);
       } finally { clock.stop(); }
     }
+    if (registerDevices) devices.push(storage.registerDevice({request_id: crypto.randomUUID(), device_kind: 'synthetic-device', display_name: '测试设备'}));
   }
   finally { storage.close(); }
   const reservation = net.createServer(); await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
@@ -43,7 +45,7 @@ async function setup(t, qualified = true, commandPermissions = false) {
     headers: new Headers({'X-LeafSeamer-Contract': selection.contract_id, 'X-LeafSeamer-Contract-Digest': selection.contract_digest,
       ...(body === undefined ? {} : {'Content-Type': 'application/json'}), Origin: origin, ...headers}),
     body: body === undefined ? undefined : Buffer.from(JSON.stringify(body))});
-  return {app, dir, origin, trust, browser, client, send, enrolled};
+  return {app, dir, origin, trust, browser, client, send, enrolled, devices};
 }
 
 test('实际Controller原生采样加HTTPS：SDK登录、刷新、定向token和会话读取闭环', {timeout: 15000}, async t => {
@@ -128,6 +130,20 @@ test('实际HTTPS永久拒收和迟到提交查原：同键异内容409，新动
     assert.equal(db.prepare('SELECT count(*) FROM ca_command_initial').pluck().get(), 0);
     assert.equal(db.prepare('SELECT count(*) FROM ca_audit').pluck().get(), 1);
   } finally { db.close(); }
+});
+
+test('实际HTTPS读取持久设备目录及受保护控制状态，SDK区分公开响应和权限', {timeout: 15000}, async t => {
+  const a = await setup(t, true, false, true); await a.client.login(login);
+  await a.client.issueToken({audience: a.app.identity.service_id, requested_scopes: ['device.read', 'control.read']});
+  const page = await a.client.listDevices(); assert.equal(page.status, '200');
+  assert.equal(page.body.data.items[0].device_id, a.devices[0].device_id); assert.equal(page.body.data.items[0].connection_state, 'disconnected');
+  const control = await a.client.getControl(a.devices[0].device_id); assert.equal(control.status, '200');
+  assert.equal(control.body.record_digest, a.devices[0].control_ref.digest); assert.equal(control.body.gate_state, 'protected'); assert.equal(control.body.holder, null);
+  assert.equal((await a.client.getControl(crypto.randomUUID())).status, '404');
+  await a.client.issueToken({audience: a.app.identity.service_id, requested_scopes: ['device.read']});
+  assert.equal((await a.client.getControl(a.devices[0].device_id)).status, '403');
+  assert.equal((await a.client.listDevices('invalid')).status, '422');
+  assert.equal((await a.send('GET', '/health/ready')).status, 503);
 });
 
 test('SDK禁止并发刷新，旧Cookie正确复用撤销该session全部token', {timeout: 15000}, async t => {

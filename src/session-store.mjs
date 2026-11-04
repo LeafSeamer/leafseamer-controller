@@ -5,6 +5,7 @@ import {seal, ref, canonical} from './auth-clock-value.mjs';
 import {accessTokenService} from './access-token-store.mjs';
 import {requestContextService} from './request-context-store.mjs';
 import {commandAdmissionStore} from './command-admission-store.mjs';
+import {deviceRegistryReader} from './device-registry-store.mjs';
 
 const HOUR = 3600000000000n, MINUTE = 60000000000n, MAX = (1n << 64n) - 1n;
 const fail = code => { throw new IdentityError(code); };
@@ -108,8 +109,20 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
   const {authorizeToken, ...tokens} = accessTokenService({db, serviceId, authority, enabled: tokensEnabled, writer, time, authenticated, terminal, rows, pad});
   const contexts = requestContextService({db, binding: contextBinding, writer, time, authorizeToken, rows, pad});
   const commands = commandAdmissionStore({db, binding: contextBinding, writer, time, authorizeToken, rows});
+  const devices = deviceRegistryReader(db, contextBinding?.service);
+  function readDevice(input, permission, read) {
+    return deliver(writer(() => {
+      const proof = authorizeToken(input, serviceId); if (proof.denied) return proof;
+      if (!proof.permissions.includes(permission)) fail('device_read_denied');
+      const result = read();
+      const last = authorizeToken(input, serviceId); if (last.denied) return last;
+      if (!last.permissions.includes(permission)) fail('device_read_denied'); return result;
+    }));
+  }
   return Object.freeze({
     ...tokens, ...contexts, ...commands,
+    listDevices(input, cursor) { return readDevice(input, 'device.read', () => devices.list(cursor)); },
+    getControl(input, deviceId) { return readDevice(input, 'control.read', () => devices.control(deviceId)); },
     localPermissions(input) {
       if (!authority?.current) fail('local_authorization_unavailable');
       return deliver(writer(() => { const found = authenticated(input, time()); return found.denied ? found : authority.current(found.session.principal_id); }));

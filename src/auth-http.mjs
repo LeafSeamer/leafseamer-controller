@@ -10,9 +10,11 @@ const routes = new Map([
   ['/auth/sessions/current', 'DELETE'],
   ['/api/v1/request-contexts', 'POST'],
   ['/api/v1/commands', 'POST'], ['/api/v1/commands/lookup', 'POST'], ['/api/v1/commands/reject', 'POST'],
+  ['/api/v1/devices', 'GET'],
 ]);
 const maximumBody = 16384, maximumPending = 16, bodyDeadline = 2000;
 const commandOperations = ['submitCommand', 'lookupCommandAdmission', 'rejectCommandAdmission'];
+const readOperations = ['getSession', 'listDevices', 'getControl'];
 const rawPairs = flat => Array.from({length: flat.length / 2}, (_, i) => [flat[2 * i], flat[2 * i + 1]]);
 const credentialPattern = /^v1\.([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([A-Za-z0-9_-]{43})$/;
 const cookieFlags = '; Path=/auth; Secure; HttpOnly; SameSite=Strict';
@@ -50,6 +52,11 @@ function failure(error) {
   if (error?.code === 'command_conflict') return [409, 'IDEMPOTENCY_CONFLICT'];
   if (error?.code === 'command_capacity') return [429, 'CAPACITY_EXCEEDED'];
   if (error?.code === 'command_admission_unavailable') return [503, 'WORKER_NOT_READY'];
+  if (error?.code === 'device_read_denied') return [403, 'PERMISSION_DENIED'];
+  if (error?.code === 'device_not_found') return [404, 'NOT_FOUND'];
+  if (error?.code === 'device_cursor_invalid') return [422, 'INVALID_REQUEST'];
+  if (error?.code === 'device_cursor_stale') return [409, 'REVISION_CONFLICT'];
+  if (error?.code === 'device_migration_required') return [503, 'WORKER_NOT_READY'];
   if (['request_context_invalid', 'request_context_operation', 'request_context_time'].includes(error?.code)) return [422, 'INVALID_REQUEST'];
   if (['request_context_denied', 'request_context_permission'].includes(error?.code)) return [403, 'PERMISSION_DENIED'];
   if (['request_context_closed', 'request_context_expired'].includes(error?.code)) return [410, 'REQUEST_EXPIRED'];
@@ -78,7 +85,8 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
         details: {}, existing_command_id: null, existing_operation_id: null, retry_advice: 'do_not_retry'}} : {data})};
     // 命令裁决契约使用具名原结果及独立Error，不能套用身份信封。
     const commandError = {400: 'invalid', 401: 'unauthenticated', 403: 'forbidden', 409: 'conflict', 413: 'invalid', 422: 'invalid', 429: 'capacity', 503: 'unavailable'};
-    const body = Buffer.from(JSON.stringify(commandOperations.includes(request.operation_id) ?
+    const body = Buffer.from(JSON.stringify(request.operation_id === 'getControl' ?
+      (code ? {code, message: code.toLowerCase(), retry_instruction: 'query_original'} : data) : commandOperations.includes(request.operation_id) ?
       (code ? {code: commandError[status] ?? 'unavailable', request_id: requestId} : data) : envelope));
     const headers = [['content-type', 'application/json'], ['content-length', String(body.length)],
       ['x-leafseamer-contract', selection.contract_id], ['x-leafseamer-contract-digest', selection.contract_digest],
@@ -93,7 +101,7 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
     const operation = request.operation_id;
     try {
       if (!(req.socket instanceof TLSSocket) || req.socket.encrypted !== true || !['TLSv1.2', 'TLSv1.3'].includes(req.socket.getProtocol())) reject('http_tls');
-      if (req.headers.host !== site.host || (operation !== 'getSession' || req.headers.origin !== undefined) && req.headers.origin !== origin ||
+      if (req.headers.host !== site.host || (!readOperations.includes(operation) || req.headers.origin !== undefined) && req.headers.origin !== origin ||
           req.headers['sec-fetch-site'] === 'cross-site') reject('http_origin');
       if (operation === 'login' || operation === 'refreshSession') {
         const old = operation === 'refreshSession' ? cookieInput(req) : null;
@@ -124,6 +132,11 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
             target_id: record.session_id, revision_floor: record.revision_floor}, issuer_commit_revision: record.revision_floor,
           target_service_ids: record.target_service_ids, state: 'accepted', receipts: [], reason: 'logout', audit_id: record.tx_id}};
         await reply(res, request, 202, null, {data, extraHeaders: [clearCookie], beforeSend() { sessions.confirmLogout(result.operation_ref); }});
+      } else if (operation === 'listDevices' || operation === 'getControl') {
+        const proof = tokenInput(req);
+        const view = () => operation === 'listDevices' ? sessions.listDevices(proof, request.parameters.query.cursor) : sessions.getControl(proof, request.parameters.path.device_id);
+        const data = view();
+        await reply(res, request, 200, null, {data, beforeSend() { if (canonical(view()) !== canonical(data)) reject('device_registry_integrity'); }});
       } else if (commandOperations.includes(operation)) {
         const proof = tokenInput(req), data = await sessions[operation](proof, body);
         const identity = operation === 'lookupCommandAdmission' ? body : data.identity;
@@ -180,7 +193,8 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
     } finally { pending--; }
   }
   return Object.freeze({handle(req, res) {
-    const method = routes.get(req.url?.split('?')[0]);
+    const pathname = req.url?.split('?')[0];
+    const method = routes.get(pathname) ?? (/^\/api\/v1\/devices\/[^/]+\/control$/.test(pathname) ? 'GET' : null);
     if (!method) return false;
     if (req.method !== method) { empty(res, 405, {Allow: method}); return true; }
     void serve(req, res).catch(() => empty(res, 503)); return true;
