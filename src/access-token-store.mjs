@@ -105,6 +105,9 @@ export function accessTokenService({db, serviceId, authority, enabled, writer, t
         return {active: true, principal_kind: 'human', issuer_id: session.issuer_id, issuer_epoch: session.issuer_epoch,
           principal_id: session.principal_id, session_id: session.session_id, credential_id: row.credential_id, audience,
           permissions: original.permissions, scope_digest: original.scope_digest, expires_ns: String(BigInt(row.expires_ns)),
+          policy_revision: original.policy_revision, authorization_revision: original.revision,
+          session_not_before_ns: String(BigInt(session.not_before_ns)), session_expires_ns: String(BigInt(session.expires_ns)),
+          session_idle_before_ns: String(BigInt(session.idle_before_ns)),
           acquisition_ref: last.acquisition, authorization_digest: original.digest};
       }));
     }

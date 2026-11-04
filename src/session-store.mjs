@@ -97,11 +97,23 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
     return {session, credential};
   }
   const deliver = result => { if (result.denied) fail(result.denied); return result; };
+  function authorization(session) {
+    if (!authority?.current) fail('local_authorization_unavailable');
+    const value = authority.current(session.principal_id);
+    if (value.state !== 'active' || value.issuer_id !== session.issuer_id || value.issuer_epoch !== session.issuer_epoch) fail('local_authorization_denied');
+    return value;
+  }
   return Object.freeze({
     ...accessTokenService({db, serviceId, authority, enabled: tokensEnabled, writer, time, authenticated, terminal, rows, pad}),
     localPermissions(input) {
       if (!authority?.current) fail('local_authorization_unavailable');
       return deliver(writer(() => { const found = authenticated(input, time()); return found.denied ? found : authority.current(found.session.principal_id); }));
+    },
+    presentation(input) {
+      return deliver(writer(() => {
+        const now = time(), found = authenticated(input, now); if (found.denied) return found;
+        return {session: view(found.session), authorization: authorization(found.session)};
+      }));
     },
     replaceLocalPermissions(input, request) {
       if (!authority?.replace) fail('local_authorization_unavailable');
@@ -127,6 +139,7 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
         const result = writer(() => {
           const now = time(), current = principal(input.login);
           if (!current || current.principal_id !== original.principal_id || current.revision !== original.revision || current.password_phc !== original.password_phc || current.state !== 'active') fail('login_invalid');
+          if (authority?.current) authorization(current);
           const tx = crypto.randomUUID();
           db.prepare("INSERT INTO auth_session VALUES (?, ?, ?, ?, 'active', 1, ?, ?, ?, ?, ?, ?, ?, NULL)")
             .run(sessionId, current.principal_id, current.issuer_id, current.issuer_epoch, pad(now.lower), pad(now.lower + 8n * HOUR), pad(now.lower + 30n * MINUTE), pad(now.lower + 5n * MINUTE), csrfHash(csrf), now.acquisition.id, tx);
@@ -147,6 +160,7 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
       const credential = createOpaqueSecret('session_refresh'), id = crypto.randomUUID();
       const result = writer(() => {
         const now = time(), found = authenticated(input, now, true); if (found.denied) return found;
+        if (authority?.current) authorization(found.session);
         const tx = crypto.randomUUID(), expiry = BigInt(found.session.expires_ns), proposed = now.lower + 30n * MINUTE;
         const candidate = proposed < expiry ? proposed : expiry;
         const idle = candidate > BigInt(found.session.idle_before_ns) ? candidate : BigInt(found.session.idle_before_ns);
