@@ -4,6 +4,7 @@ import {clockInteger} from './native-clock.mjs';
 import {seal, ref, canonical} from './auth-clock-value.mjs';
 import {accessTokenService} from './access-token-store.mjs';
 import {requestContextService} from './request-context-store.mjs';
+import {commandAdmissionStore} from './command-admission-store.mjs';
 
 const HOUR = 3600000000000n, MINUTE = 60000000000n, MAX = (1n << 64n) - 1n;
 const fail = code => { throw new IdentityError(code); };
@@ -106,8 +107,9 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
   }
   const {authorizeToken, ...tokens} = accessTokenService({db, serviceId, authority, enabled: tokensEnabled, writer, time, authenticated, terminal, rows, pad});
   const contexts = requestContextService({db, binding: contextBinding, writer, time, authorizeToken, rows, pad});
+  const commands = commandAdmissionStore({db, binding: contextBinding, writer, time, authorizeToken, rows});
   return Object.freeze({
-    ...tokens, ...contexts,
+    ...tokens, ...contexts, ...commands,
     localPermissions(input) {
       if (!authority?.current) fail('local_authorization_unavailable');
       return deliver(writer(() => { const found = authenticated(input, time()); return found.denied ? found : authority.current(found.session.principal_id); }));

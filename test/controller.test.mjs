@@ -103,8 +103,10 @@ test('实际Controller与SDK连通，存活和业务就绪分开', {timeout: 100
     assert.equal(discovery.status, '503'); assert.equal(discovery.body, null);
     const live = await fetch(baseUrl + '/health/live'); assert.equal(live.status, 200); assert.deepEqual(await live.json(), {status: 'alive'});
     const ready = await fetch(baseUrl + '/health/ready'); assert.equal(ready.status, 503); assert.deepEqual(await ready.json(), {ready: false, reason: 'bootstrap_incomplete'});
-    assert.equal((await fetch(baseUrl + '/api/v1/commands', {method: 'POST', body: '{}'})).status, 413);
-    assert.equal((await fetch(baseUrl + '/api/v1/commands', {method: 'POST'})).status, 405);
+    assert.equal((await fetch(baseUrl + '/api/v1/commands', {method: 'POST', body: '{}'})).status, 400);
+    assert.equal((await fetch(baseUrl + '/api/v1/commands', {method: 'POST'})).status, 400);
+    assert.equal((await fetch(baseUrl + '/api/v1/not-implemented', {method: 'POST', body: '{}'})).status, 413);
+    assert.equal((await fetch(baseUrl + '/api/v1/not-implemented', {method: 'POST'})).status, 405);
     assert.equal((await fetch(baseUrl + '/health/live?extra=1')).status, 404);
     const head = await fetch(baseUrl + '/health/live', {method: 'HEAD'}); assert.equal(head.status, 200); assert.equal((await head.arrayBuffer()).byteLength, 0);
     const duplicate = await run('start', '--data-dir', dir); assert.equal(duplicate.code, 1); assert.equal(JSON.parse(duplicate.stderr).error, 'database_in_use');

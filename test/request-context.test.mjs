@@ -116,7 +116,7 @@ test('v7显式升级v8保留身份、备份和原权限；未升级不能签发�
   const a = await setup(t, 7), identity = a.storage.identity;
   try { assert.throws(() => a.sessions.createRequestContext(a.token(), a.request), e => e.code === 'request_context_migration_required'); }
   finally { a.close(); }
-  const migrated = await migrateStorage(a.dir); assert.equal(migrated.schema_revision, '8');
+  const migrated = await migrateStorage(a.dir, 8); assert.equal(migrated.schema_revision, '8');
   const reopened = openStorage(a.dir);
   try { assert.equal(reopened.identity.service_id, identity.service_id); }
   finally { reopened.close(); }

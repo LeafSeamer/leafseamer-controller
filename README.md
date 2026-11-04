@@ -132,7 +132,7 @@ product1继承四个原有身份路径，支持登录201、刷新200、token签�
 
 SDK的 `createBrowserSessionClient` 管理内存CSRF与token，浏览器保管HttpOnly Cookie，拒绝并发刷新、错误选择及非法CSRF。清本地内存后到达的旧响应不能重新安装凭据；清内存不等于服务端注销。当前注销已进入新product1选择；主体与权限管理接口仍须归并，不向旧panel4偷加路径。
 
-当前70项Controller检查通过。八项HTTPS集成实际加载Windows原生模块，使用正常证书校验的本机HTTPS、真实密码库和文件权限库；验证SDK往返、Origin／Host／Cookie／CSRF、刷新复用、来源失效及迟到响应。证书仅在测试内存中临时生成，Cookie容器为测试模拟，环境批准引用与误差界仍为合成。独立安装包另验证相同HTTPS成功路径；真实浏览器、Linux、生产提供者、可信代理、完整跨服务鉴权、部署和设备未验收，业务就绪仍为503。
+当前身份与命令账本检查通过。九项HTTPS集成实际加载Windows原生模块，使用正常证书校验的本机HTTPS、真实密码库和文件权限库；验证SDK往返、Origin／Host／Cookie／CSRF、刷新复用、来源失效及迟到响应。证书仅在测试内存中临时生成，Cookie容器为测试模拟，环境批准引用与误差界仍为合成。独立安装包另验证相同HTTPS成功路径；真实浏览器、Linux、生产提供者、可信代理、完整跨服务鉴权、部署和设备未验收，业务就绪仍为503。
 
 ## 当前会话注销
 
@@ -150,9 +150,23 @@ schema 8增加 `request_context` 原件与关闭状态；显式迁移逐版备�
 
 内部 `getRequestContext(tokenInput, contextId, operation?)` 每次重核当前凭据及完整操作权限；期限等号关闭且保存终态，较早时间不能复活。token撤销／到期和session关闭同步关闭其活跃上下文；普通重启保留原件及request_epoch，但关闭旧上下文。响应经完整SDK校验后，用规范化内容比较再次确认当前绑定，字段排列不影响结果。
 
-当前只完成上下文签发与核验，尚未接入命令受理和唯一请求消耗；used_count不能解释为已受理动作数。下一步在实际命令writer中按完整RequestKey持久查原／冲突／拒绝与消耗，context_id不进入去重键。上下文本身不授设备持有权、RunGrant或发送资格，不自动重试网络请求。
+当前只完成上下文签发与核验，尚未接入命令受理和唯一请求消耗；used_count不能解释为已受理动作数。完整RequestKey的持久查原／冲突／拒收已按下节接入，实际新命令writer及上下文唯一请求消耗继续实施，context_id不进入去重键。上下文本身不授设备持有权、RunGrant或发送资格，不自动重试网络请求。
 
 五项文件库用例验证凭据与权限绑定、期限及容量缩限、到期终态、注销、普通重启、签发预算、写故障回滚和v7升级；HTTPS用例另验证SDK签发、缺权限拒绝和注销后的持久关闭。成功测试仍使用合成环境批准，Cookie容器为模拟；生产提供者、真实浏览器、命令消费、完整跨服务生命周期及设备验收未完成，业务就绪仍为503。
+
+## 命令请求查原与永久拒收
+
+schema 9采用[请求裁决布局](https://github.com/LeafSeamer/leafseamer-suite/blob/main/docs/contracts/c02-admission/STORAGE.md)的同库唯一键、不可变裁决、拒收操作、提交、审计及通知约束。显式迁移保留旧上下文及身份，升级过程中在同一事务重建依赖服务身份表的触发器；旧迁移原件保持不变。连接启用并核验recursive_triggers，禁止通过REPLACE删除墓碑。
+
+`POST /api/v1/commands/lookup`、`POST /api/v1/commands/reject` 和 `POST /api/v1/commands` 已接入现有HTTPS接收边界。前两者分别要求明确授予的command.read和command.cancel，范围仅限当前人员在本库可验证的自身请求命名空间；初始管理员权限不自动增加这两项。它们不授设备控制权、不取消已执行动作，也不支持服务主体或面板委托。原namespace归属来自本库保存的签发上下文及完整issuer三元组，不接受客户端自报归属；当前token和权限仍须有效，旧context到期或普通重启本身不阻止当前有权人员查询／收紧拒收。
+
+完整RequestKey包含目标服务／数据库、issuer／epoch／principal、request_epoch、固定createCommand和idempotency_key；context_id、request_digest不进入唯一键。CommandContent摘要只排除顶层context_id、idempotency_key、correlation_id，嵌套同名业务字段保留。相同key同摘要查原，异摘要409；拒收操作另按当前actor及rejection_operation_id幂等，换目标或内容也409。
+
+首次拒收同writer保存原内容、不可变rejected裁决、真实commit_ref、拒收操作及审计／通知，任一写点失败全部回滚；成功返回200，command_ref为null。相同拒收操作不追加记录，新拒收操作指向已有裁决时保留原裁决并单独留痕。查原确定不存在返回not_found，存储未知返回503，均不等于永久拒收证明。通知只保存观察事实，尚无传播消费者，不能发送设备动作。开发保留预算为4096个请求键、8192个拒收操作，满额拒绝且不删历史；该预算不是生产测量profile。
+
+当前submitCommand仅在当前读取权限下返回已存在的原裁决，迟到提交换context也不能绕过墓碑。新动作受理缺少真实控制、准备、资源及运行来源，返回503；数据库另禁止写入accepted，保留的初始命令／预留结构不表示受理已启用。后续完整准入实现须在同一账本追加accepted路径，完成实际门控及上下文额度消费后，才能移除该数据库限制。没有202、设备排队或发送路径，业务就绪继续503。
+
+SDK三种方法使用已有product1类型；命令成功响应是具名裁决或LookupResult正文，错误为该契约的code／request_id，不能套用身份接口的data信封。客户端不自动重试，拒收不等于已受理动作停止。验证包含真实文件库、七个写点故障、跨context查原、重启后当前授权及实际HTTPS往返；环境批准仍合成，真实浏览器、生产资格、跨服务和设备未验收。
 
 旧 NodeCG 实现及历史保留于 [leafseamer-legacy](https://github.com/ikenainanodesu/leafseamer-legacy)。本仓尚未导入旧业务源码；后续复用时逐项记录来源、历史映射和必要许可声明。
 

@@ -9,15 +9,30 @@ import Database from 'better-sqlite3';
 import {createBrowserSessionClient, contractSelection as selection} from '@leafseamer/sdk';
 import {initializeStorage, migrateStorage, openStorage} from '../dist/storage.mjs';
 import {startController} from '../dist/server.mjs';
+import {startAuthenticationClock} from '../dist/auth-clock.mjs';
+import {digest} from '../dist/auth-clock-value.mjs';
+import {localIdentityPermissions} from '../dist/local-permission-store.mjs';
+import {fixture} from './auth-clock-fixture.mjs';
+import crypto from 'node:crypto';
 import {certificate, supervisedFixture, browserFetch} from './https-auth-fixture.mjs';
 
 const material = certificate(), login = {login: 'synthetic-https-admin', password: 'synthetic-https-password-012345'};
-async function setup(t, qualified = true) {
+async function setup(t, qualified = true, commandPermissions = false) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'leafseamer-https-')); let app;
   t.after(async () => { await app?.close(); assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir())); fs.rmSync(dir, {recursive: true, force: true}); });
   initializeStorage(dir); await migrateStorage(dir);
   const storage = openStorage(dir); let enrolled;
-  try { const capability = storage.enrollment.begin(); enrolled = await storage.enrollment.complete({...login, mode: 'standalone', token_id: capability.token_id, secret: capability.secret}); }
+  try {
+    const capability = storage.enrollment.begin(); enrolled = await storage.enrollment.complete({...login, mode: 'standalone', token_id: capability.token_id, secret: capability.secret});
+    if (commandPermissions) {
+      const f = fixture(storage.authenticationClock.scope), clock = startAuthenticationClock(f.source, storage.authenticationClock, f.provider, {schedule: false});
+      try {
+        const sessions = storage.sessions(clock), logged = await sessions.login(login), input = {credential_id: logged.credential_id, secret: logged.secret, csrf: logged.csrf};
+        sessions.replaceLocalPermissions(input, {request_id: crypto.randomUUID(), principal_id: logged.session.principal_id, expected_revision: '1', permissions: [...localIdentityPermissions, 'command.read', 'command.cancel']});
+        sessions.logout(input);
+      } finally { clock.stop(); }
+    }
+  }
   finally { storage.close(); }
   const reservation = net.createServer(); await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
   const port = reservation.address().port; await new Promise(resolve => reservation.close(resolve));
@@ -87,6 +102,32 @@ test('实际HTTPS与SDK签发上下文，目标操作越权拒绝且注销关闭
   const db = new Database(path.join(a.dir, 'controller.sqlite'), {fileMustExist: true});
   try { assert.equal(db.prepare("SELECT count(*) FROM request_context WHERE state='closed'").pluck().get(), 2); }
   finally { db.close(); }
+});
+
+test('实际HTTPS永久拒收和迟到提交查原：同键异内容409，新动作503且不创建命令', {timeout: 15000}, async t => {
+  const a = await setup(t, true, true); await a.client.login(login);
+  await a.client.issueToken({audience: a.app.identity.service_id, requested_scopes: ['request.create', 'command.read', 'command.cancel']});
+  const context = (await a.client.createRequestContext({audience: a.app.identity.service_id, operations: ['lookupCommandAdmission', 'rejectCommandAdmission'], ttl_ms: 30000, max_unique_requests: 8})).body.data;
+  const content = {device_id: 'synthetic-device', action_id: 'synthetic.action', capability_version: '1.0.0', parameters: {value: 1},
+    expected_control: {epoch: 'synthetic-control', version: '1'}, origin: 'manual', automation_binding: null, required_completion: 'sent',
+    preconditions: [], dispatch: {mode: 'immediate', max_queue_ms: 1000}, evidence_timeout_ms: 1000};
+  const identity = {key: {target_scope: {authority_service_id: a.app.identity.service_id, database_instance_id: a.app.identity.database_instance_id}, issuer_id: context.issuer_id,
+    issuer_epoch: context.issuer_epoch, principal_id: context.principal_id, request_epoch: context.context_epoch, operation_id: 'createCommand', idempotency_key: crypto.randomUUID()}, request_digest: digest(content)};
+  assert.equal((await a.client.lookupCommandAdmission(identity)).body.state, 'not_found');
+  const request = {identity, content, rejection_operation_id: crypto.randomUUID()}, rejected = await a.client.rejectCommandAdmission(request);
+  assert.equal(rejected.status, '200'); assert.equal(rejected.body.decision, 'rejected');
+  assert.deepEqual((await a.client.rejectCommandAdmission(request)).body, rejected.body);
+  assert.deepEqual((await a.client.submitCommand({...content, context_id: context.context_id, idempotency_key: identity.key.idempotency_key})).body, rejected.body);
+  const changed = {...content, parameters: {value: 2}};
+  assert.equal((await a.client.rejectCommandAdmission({...request, rejection_operation_id: crypto.randomUUID(), content: changed, identity: {...identity, request_digest: digest(changed)}})).status, '409');
+  assert.equal((await a.client.submitCommand({...content, context_id: context.context_id, idempotency_key: crypto.randomUUID()})).status, '503');
+  await a.app.close();
+  const db = new Database(path.join(a.dir, 'controller.sqlite'), {fileMustExist: true});
+  try {
+    assert.equal(db.prepare('SELECT count(*) FROM ca_request_key').pluck().get(), 1);
+    assert.equal(db.prepare('SELECT count(*) FROM ca_command_initial').pluck().get(), 0);
+    assert.equal(db.prepare('SELECT count(*) FROM ca_audit').pluck().get(), 1);
+  } finally { db.close(); }
 });
 
 test('SDK禁止并发刷新，旧Cookie正确复用撤销该session全部token', {timeout: 15000}, async t => {

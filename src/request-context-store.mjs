@@ -19,7 +19,7 @@ export function requestContextService({db, binding, writer, time, authorizeToken
       let op;
       try { op = adapter.describe('controller', name); } catch { fail('request_context_operation'); }
       if (op.transport !== 'http-headers' || !op.security.some(group => Object.keys(group).some(k => k.endsWith('__bearerAuth'))) ||
-          !proof.permissions.includes(op.extensions['x-permission'])) fail('request_context_permission');
+          !proof.permissions.includes(op.extensions['x-permission'] ?? op.extensions['x-required-permission'])) fail('request_context_permission');
     }
     return [...names].sort();
   }

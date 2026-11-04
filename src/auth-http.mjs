@@ -9,8 +9,10 @@ const routes = new Map([
   ['/auth/service-tokens', 'POST'], ['/api/v1/session', 'GET'],
   ['/auth/sessions/current', 'DELETE'],
   ['/api/v1/request-contexts', 'POST'],
+  ['/api/v1/commands', 'POST'], ['/api/v1/commands/lookup', 'POST'], ['/api/v1/commands/reject', 'POST'],
 ]);
 const maximumBody = 16384, maximumPending = 16, bodyDeadline = 2000;
+const commandOperations = ['submitCommand', 'lookupCommandAdmission', 'rejectCommandAdmission'];
 const rawPairs = flat => Array.from({length: flat.length / 2}, (_, i) => [flat[2 * i], flat[2 * i + 1]]);
 const credentialPattern = /^v1\.([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([A-Za-z0-9_-]{43})$/;
 const cookieFlags = '; Path=/auth; Secure; HttpOnly; SameSite=Strict';
@@ -43,6 +45,11 @@ function failure(error) {
   if (['local_authorization_denied', 'local_authorization_audience', 'http_origin', 'http_tls', 'http_permission', 'http_extension'].includes(error?.code)) return [403, 'PERMISSION_DENIED'];
   if (['login_throttled', 'password_busy', 'token_capacity'].includes(error?.code)) return [429, 'CAPACITY_EXCEEDED'];
   if (error?.code === 'token_request_invalid') return [422, 'INVALID_REQUEST'];
+  if (error?.code === 'command_request_invalid') return [422, 'INVALID_REQUEST'];
+  if (['command_permission', 'command_namespace'].includes(error?.code)) return [403, 'PERMISSION_DENIED'];
+  if (error?.code === 'command_conflict') return [409, 'IDEMPOTENCY_CONFLICT'];
+  if (error?.code === 'command_capacity') return [429, 'CAPACITY_EXCEEDED'];
+  if (error?.code === 'command_admission_unavailable') return [503, 'WORKER_NOT_READY'];
   if (['request_context_invalid', 'request_context_operation', 'request_context_time'].includes(error?.code)) return [422, 'INVALID_REQUEST'];
   if (['request_context_denied', 'request_context_permission'].includes(error?.code)) return [403, 'PERMISSION_DENIED'];
   if (['request_context_closed', 'request_context_expired'].includes(error?.code)) return [410, 'REQUEST_EXPIRED'];
@@ -66,9 +73,13 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
   }
   async function reply(res, request, status, code, {data, extraHeaders = [], beforeSend = () => {}} = {}) {
     const requestId = crypto.randomUUID();
-    const body = Buffer.from(JSON.stringify({request_id: requestId, service_id: serviceId, service_boot_id: serviceBootId,
+    const envelope = {request_id: requestId, service_id: serviceId, service_boot_id: serviceBootId,
       protocol_version: selection.contract_id, selection, ...(code ? {error: {code, message_key: code.toLowerCase(), request_id: requestId,
-        details: {}, existing_command_id: null, existing_operation_id: null, retry_advice: 'do_not_retry'}} : {data})}));
+        details: {}, existing_command_id: null, existing_operation_id: null, retry_advice: 'do_not_retry'}} : {data})};
+    // 命令裁决契约使用具名原结果及独立Error，不能套用身份信封。
+    const commandError = {400: 'invalid', 401: 'unauthenticated', 403: 'forbidden', 409: 'conflict', 413: 'invalid', 422: 'invalid', 429: 'capacity', 503: 'unavailable'};
+    const body = Buffer.from(JSON.stringify(commandOperations.includes(request.operation_id) ?
+      (code ? {code: commandError[status] ?? 'unavailable', request_id: requestId} : data) : envelope));
     const headers = [['content-type', 'application/json'], ['content-length', String(body.length)],
       ['x-leafseamer-contract', selection.contract_id], ['x-leafseamer-contract-digest', selection.contract_digest],
       ['cache-control', 'no-store'], ['x-content-type-options', 'nosniff'], ['connection', 'close'], ...extraHeaders];
@@ -113,6 +124,11 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
             target_id: record.session_id, revision_floor: record.revision_floor}, issuer_commit_revision: record.revision_floor,
           target_service_ids: record.target_service_ids, state: 'accepted', receipts: [], reason: 'logout', audit_id: record.tx_id}};
         await reply(res, request, 202, null, {data, extraHeaders: [clearCookie], beforeSend() { sessions.confirmLogout(result.operation_ref); }});
+      } else if (commandOperations.includes(operation)) {
+        const proof = tokenInput(req), data = await sessions[operation](proof, body);
+        const identity = operation === 'lookupCommandAdmission' ? body : data.identity;
+        const permission = operation === 'rejectCommandAdmission' ? 'command.cancel' : 'command.read';
+        await reply(res, request, 200, null, {data, beforeSend() { sessions.confirmCommandResult(proof, identity, permission, data); }});
       } else if (operation === 'createRequestContext') {
         const proof = tokenInput(req), data = sessions.createRequestContext(proof, body);
         await reply(res, request, 201, null, {data, beforeSend() {
