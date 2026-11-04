@@ -8,7 +8,7 @@ import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {setTimeout as delay} from 'node:timers/promises';
 import Database from 'better-sqlite3';
-import {startProcessHost} from '../dist/process-host.mjs';
+import {startProcessHost, initializeProcessHost} from '../dist/process-host.mjs';
 import {initializeStorage} from '../dist/storage.mjs';
 
 const windows = process.platform === 'win32', options = {skip: !windows, timeout: 20000};
@@ -31,8 +31,9 @@ async function until(fn) {
 }
 const gone = pid => { try { process.kill(pid, 0); return false; } catch (e) { if (e.code === 'ESRCH') return true; throw e; } };
 async function tree(t) {
+  const dir = temporary(t); await initializeProcessHost(dir);
   const status = collector(), core = collector();
-  const child = spawn(path.join(dist, 'native/leafseamer_process_host.exe'), [process.execPath,
+  const child = spawn(path.join(dist, 'native/leafseamer_process_host.exe'), [dir, process.execPath,
     fileURLToPath(new URL('./fixtures/process-tree.mjs', import.meta.url))], {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true});
   const closed = once(child, 'close'); child.stdout.on('data', x => status.write(x)); child.stderr.on('data', x => core.write(x)); child.stdin.on('error', () => {});
   t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill(); await closed; });
@@ -43,7 +44,7 @@ async function tree(t) {
 }
 
 test('真实原生宿主启动Controller，停止后库正常关闭并确认空组', options, async t => {
-  const dir = temporary(t); initializeStorage(dir); const core = collector();
+  const dir = temporary(t); initializeStorage(dir); await initializeProcessHost(dir); const core = collector();
   const app = await startProcessHost({dataDir: dir, onCoreOutput: x => core.write(x)});
   t.after(() => app.close());
   assert.equal(app.containment.runtime_admitted, false);
@@ -59,7 +60,7 @@ test('真实原生宿主启动Controller，停止后库正常关闭并确认空�
 });
 
 test('核心启动失败仍回收整组，不建立缺失业务库', options, async t => {
-  const dir = temporary(t), output = collector();
+  const dir = temporary(t), output = collector(); await initializeProcessHost(dir);
   const app = await startProcessHost({dataDir: dir, onCoreOutput: x => output.write(x)});
   const result = await app.exited;
   assert.equal(result.exitCode, 1); assert.equal(result.active_processes, 0);
@@ -88,7 +89,7 @@ test('核心崩溃触发原生宿主回收全部后代', options, async t => {
 });
 
 test('实际supervise CLI消失后，控制管道关闭使宿主和核心退出', options, async t => {
-  const dir = temporary(t); initializeStorage(dir); const status = collector(), output = collector();
+  const dir = temporary(t); initializeStorage(dir); await initializeProcessHost(dir); const status = collector(), output = collector();
   const child = spawn(process.execPath, [path.join(dist, 'cli.mjs'), 'supervise', '--data-dir', dir], {stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true});
   const closed = once(child, 'close'); child.stdout.on('data', x => status.write(x)); child.stderr.on('data', x => output.write(x));
   t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill(); await closed; });
@@ -116,4 +117,80 @@ test('安装包资产漂移在创建进程前拒绝', options, async t => {
 
 test('非Windows平台拒绝用其它进程机制伪装已实现的Job宿主', {skip: windows}, async () => {
   await assert.rejects(startProcessHost({dataDir: '/tmp/controller'}), e => e.code === 'process_host_platform');
+});
+
+function journal(dir, read) {
+  const db = new Database(path.join(dir, 'supervisor-journal.db'), {fileMustExist: true});
+  try { return read(db); } finally { db.close(); }
+}
+
+test('日志必须显式安装，重复初始化不覆盖；正常两次启动保留不同尝试和退出原件', options, async t => {
+  const dir = temporary(t); initializeStorage(dir);
+  await assert.rejects(startProcessHost({dataDir: dir}), e => e.code === 'process_journal_missing');
+  assert.equal(fs.existsSync(path.join(dir, 'supervisor-journal.db')), false);
+  await initializeProcessHost(dir); const original = fs.readFileSync(path.join(dir, 'supervisor-journal.db'));
+  await assert.rejects(initializeProcessHost(dir), e => e.code === 'process_journal_exists');
+  assert.deepEqual(fs.readFileSync(path.join(dir, 'supervisor-journal.db')), original);
+  const ids = [];
+  for (let i = 0; i < 2; ++i) {
+    const core = collector(), app = await startProcessHost({dataDir: dir, onCoreOutput: x => core.write(x)});
+    t.after(() => app.close()); await until(() => core.frames.some(f => f.event === 'listening'));
+    ids.push(app.containment.containment_id); assert.equal((await app.close()).exitCode, 0);
+  }
+  assert.notEqual(...ids);
+  journal(dir, db => {
+    assert.equal(db.pragma('journal_mode', {simple: true}), 'delete');
+    for (const table of ['core_attempt','core_observation','core_exit']) assert.equal(db.prepare(`SELECT count(*) FROM ${table}`).pluck().get(), 2);
+    assert.equal(db.prepare('SELECT active_processes FROM core_exit LIMIT 1').pluck().get(), 0);
+    assert.throws(() => db.exec('DELETE FROM core_exit'));
+    assert.throws(() => db.exec('UPDATE core_attempt SET supervisor_pid=1'));
+  });
+});
+
+test('同目录及junction别名不能在已运行核心前创建第二组', options, async t => {
+  const root = temporary(t), dir = path.join(root, 'data'), alias = path.join(root, 'alias');
+  fs.mkdirSync(dir); fs.symlinkSync(dir, alias, 'junction'); initializeStorage(dir); await initializeProcessHost(dir);
+  const core = collector(), app = await startProcessHost({dataDir: dir, onCoreOutput: x => core.write(x)});
+  t.after(() => app.close()); await until(() => core.frames.some(f => f.event === 'listening'));
+  for (const dataDir of [dir, alias]) await assert.rejects(startProcessHost({dataDir}), e => e.code === 'instance_in_use');
+  assert.equal((await app.close()).exitCode, 0);
+  assert.equal(journal(dir, db => db.prepare('SELECT count(*) FROM core_attempt').pluck().get()), 1);
+});
+
+test('宿主崩溃保留未结束尝试，即使旧PID已退出也不能自动接替', options, async t => {
+  const dir = temporary(t); initializeStorage(dir); await initializeProcessHost(dir);
+  const core = collector(), app = await startProcessHost({dataDir: dir, onCoreOutput: x => core.write(x)});
+  await until(() => core.frames.some(f => f.event === 'listening'));
+  process.kill(app.containment.supervisor_pid);
+  await assert.rejects(app.exited, e => e.code === 'process_host_exit_unproven');
+  await until(() => gone(app.containment.core_pid));
+  await assert.rejects(startProcessHost({dataDir: dir}), e => e.code === 'process_recovery_required');
+  journal(dir, db => {
+    assert.equal(db.prepare('SELECT count(*) FROM core_attempt').pluck().get(), 1);
+    assert.equal(db.prepare('SELECT count(*) FROM core_exit').pluck().get(), 0);
+  });
+});
+
+test('复制目录、损坏日志及DDL漂移均不能作为健康新宿主启动', options, async t => {
+  const dir = temporary(t); initializeStorage(dir); await initializeProcessHost(dir);
+  const copied = temporary(t); fs.copyFileSync(path.join(dir, 'supervisor-journal.db'), path.join(copied, 'supervisor-journal.db'));
+  await assert.rejects(startProcessHost({dataDir: copied}), e => e.code === 'process_journal_identity');
+  journal(dir, db => db.exec('DROP TRIGGER attempt_no_delete'));
+  await assert.rejects(startProcessHost({dataDir: dir}), e => e.code === 'process_journal_schema');
+  const broken = temporary(t); fs.writeFileSync(path.join(broken, 'supervisor-journal.db'), 'synthetic invalid database');
+  await assert.rejects(startProcessHost({dataDir: broken}), e => e instanceof Error);
+  assert.equal(fs.readFileSync(path.join(broken, 'supervisor-journal.db'), 'utf8'), 'synthetic invalid database');
+});
+
+test('OS创建失败仍保留已消耗尝试，不允许重新运行该目录', options, async t => {
+  const dir = temporary(t); await initializeProcessHost(dir); const status = collector();
+  const child = spawn(path.join(dist, 'native/leafseamer_process_host.exe'), [dir, path.join(dir, 'missing-node.exe'),
+    path.join(dist, 'cli.mjs'), 'contained-core'], {stdio: ['pipe','pipe','pipe'], windowsHide: true});
+  const closed = once(child, 'close'); child.stdout.on('data', x => status.write(x)); child.stderr.resume(); child.stdin.end();
+  assert.equal((await closed)[0], 1); assert.equal(status.frames[0].code, 'process_create_failed');
+  await assert.rejects(startProcessHost({dataDir: dir}), e => e.code === 'process_recovery_required');
+  journal(dir, db => {
+    assert.equal(db.prepare('SELECT count(*) FROM core_attempt').pluck().get(), 1);
+    assert.equal(db.prepare('SELECT count(*) FROM core_observation').pluck().get(), 0);
+  });
 });

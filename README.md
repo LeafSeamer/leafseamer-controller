@@ -30,15 +30,15 @@ Windows 使用绝对目录参数，运行文件与业务数据分开存放。当
 
 ### Windows 进程容纳启动
 
-Windows x64 开发包另提供 `node --disallow-code-generation-from-strings dist/cli.mjs supervise --data-dir <绝对目录> --port 8081`。该入口先核验包内构建资产，再启动随包的原生进程宿主，由宿主创建 Controller 核心。Node 入口和参数固定解析，不经过 shell；子进程环境仅保留 Windows 系统及临时目录变量，不继承 Node 预加载／调试环境。核心仍使用原有排他业务库与保护态 HTTP，`/health/ready` 返回503。
+Windows x64 开发包须先显式执行 `node --disallow-code-generation-from-strings dist/cli.mjs init-process-host --data-dir <绝对目录>` 安装启动日志，然后使用 `node --disallow-code-generation-from-strings dist/cli.mjs supervise --data-dir <绝对目录> --port 8081`。该入口先核验包内构建资产，再启动随包的原生进程宿主，由宿主创建 Controller 核心。Node 入口和参数固定解析，不经过 shell；子进程环境仅保留 Windows 系统及临时目录变量，不继承 Node 预加载／调试环境。核心仍使用原有排他业务库与保护态 HTTP，`/health/ready` 返回503。
 
-原生宿主先创建不可继承的匿名 Job，启用并回读 `KILL_ON_JOB_CLOSE`，关闭 breakaway，使用 `PROC_THREAD_ATTRIBUTE_JOB_LIST` 在创建时纳管暂停的核心；核对实际 Job 归属和映像文件身份后才恢复线程。继承句柄白名单只有核心输入与输出，Job 句柄不交给核心。stdout 专用于宿主生命周期事实，核心的监听及错误输出走 stderr，两者不共享状态管道。`process_contained` 只表示本次 OS 容纳，`runtime_admitted` 始终为 false。（接口依据：[Microsoft 进程属性](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)、[Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)。）
+原生宿主先创建不可继承且每次独立命名的 Job，启用并回读 `KILL_ON_JOB_CLOSE`，关闭 breakaway，使用 `PROC_THREAD_ATTRIBUTE_JOB_LIST` 在创建时纳管暂停的核心；核对实际 Job 归属和映像文件身份后才恢复线程。继承句柄白名单只有核心输入与输出，Job 句柄不交给核心。stdout 专用于宿主生命周期事实，核心的监听及错误输出走 stderr，两者不共享状态管道。`process_contained` 只表示本次 OS 容纳，`runtime_admitted` 始终为 false。（接口依据：[Microsoft 进程属性](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)、[Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)。）
 
 本机装配代码也可调用包内 `startProcessHost({dataDir,host,port,onCoreOutput})`，使用返回的 `close()` 停止、`exited` 等待最终状态。正常停止或启动客户端消失时，宿主给核心两秒关闭库；随后终止残留进程并查询整个 Job 的活跃计数，最多等待五秒取得空组，再确认核心进程句柄退出。只有两项都成立才输出 `process_group_empty`；强停、异常核心退出或畸形控制输入返回失败退出码，即使之后已确认空组。宿主自身被强制终止依靠唯一 Job 句柄关闭终止组内进程，此时没有空组回执，不能从宿主退出推断已取得退役证据。（观察依据：[Job 活跃进程计数](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_accounting_information)、[TerminateJobObject](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-terminatejobobject)。）
 
-当前实现是 DF02 的 Windows 进程容纳基础，尚未完成监督 journal、跨会话原生单实例锁、保护配置／发行制品权威、bootstrap、子 Job、worker 运行准入和旧域恢复；匿名 Job 身份仅在本次进程中有效。构建清单不能替代发行签名与加载期间防替换，完整运行域未获批准。该入口没有设备出口、自动重启或任意 worker 启动接口，也不把组退出当作设备效果完成或资源释放。Linux cgroup 版本尚待实现，Linux 不生成该宿主且调用时明确拒绝。现有 `start` 保留用于保护态开发诊断。
+当前实现是 DF02 的 Windows 进程容纳基础，尚未完成完整监督 journal、保护配置／发行制品权威、bootstrap、子 Job、worker 运行准入和旧域恢复；跨交互会话的实际部署验收仍待完成。构建清单不能替代发行签名与加载期间防替换，完整运行域未获批准。该入口没有设备出口、自动重启或任意 worker 启动接口，也不把组退出当作设备效果完成或资源释放。Linux cgroup 版本尚待实现，Linux 不生成该宿主且调用时明确拒绝。现有 `start` 保留用于保护态开发诊断。
 
-本轮 Windows 真实进程测试覆盖正常数据库关闭、核心启动失败／崩溃、残留 detached 后代、宿主强停、启动客户端消失、控制管道断开／畸形及安装资产漂移。Controller 回归87项通过，另1项非Windows用例在当前平台跳过；没有以这些结果宣称 Linux、完整监督协议、浏览器或设备已验收。
+本轮 Windows 真实进程测试覆盖正常数据库关闭、核心启动失败／崩溃、残留 detached 后代、宿主强停、启动客户端消失、控制管道断开／畸形及安装资产漂移。新增日志与实例锁后，相关13项Windows用例通过，另1项非Windows用例在当前平台跳过；没有以这些结果宣称 Linux、完整监督协议、浏览器或设备已验收。
 
 `init-storage` 只创建服务存储，不创建管理员或设备权限。数据库已存在时拒绝覆盖；启动时数据库缺失、版本未知、迁移摘要不符或完整性检查失败均拒绝，不自动创建新身份或修复原库。初始化失败留下的文件须按故障检查处理，不能通过重复初始化静默替换。
 
@@ -53,6 +53,18 @@ SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 
 | `GET /.well-known/leafseamer-contracts` | 503，无正文；尚无完整就绪的契约处理组合 |
 
 健康接口支持 HEAD，禁止缓存；不暴露数据库路径、版本或凭据。启动时的 JSON 输出包含本次 boot 身份与监听端口，`ready` 为 false。未知路由不进入业务处理，带正文请求不读入无界缓冲；当前没有命令发送、自动重放或自动布防路径。
+
+### 实例锁与启动记录
+
+`init-process-host` 只安装当前本机开发身份的 `supervisor-journal.db`，目录须已存在，文件已存在就拒绝覆盖；也可由可信本机装配调用 `initializeProcessHost(dataDir)`。普通 `supervise` 不初始化或补建日志。安装没有创建人员权限、生产宿主批准或已认证运行域。已有开发目录需显式安装该日志后再使用 `supervise`，原 `start` 仍是无设备出口的保护态诊断入口。
+
+原生宿主按已打开目录的卷标识和128位文件ID取得 `Global` 命名互斥锁，显式DACL只允许当前账户和LocalSystem，句柄不继承。目录大小写／junction别名归并至同一实际目录，核心使用从目录句柄解析的路径。重复实例、无法取锁及abandoned均拒绝创建；本轮已验证同会话并发与junction，未验证另一交互会话、服务账户切换或真实abandoned恢复。（接口依据：[Microsoft CreateMutexW](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createmutexw)、[文件身份](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfileinformationbyhandleex)。）
+
+原生启动记录静态链接与业务驱动同源的SQLite 3.53.4，`native-inputs.json`额外锁定既有better-sqlite3包中的sqlite3.c／sqlite3.h；不在运行时下载或调用外部sqlite工具。日志单writer、DELETE／EXTRA，开启外键与递归触发器并回读设置；普通启动检查版本、完整DDL、完整性、外键、原安装目录身份和账户，不在线修复。四张初期表保存安装身份、核心创建尝试、实际进程观察及已确认退出，尚未填充完整DF02的runtime、fence、bootstrap和AdmissionReceipt。（SQLite配置依据：[官方PRAGMA](https://www.sqlite.org/pragma.html)。）
+
+顺序为：取得实例锁→验证日志→提交创建尝试→调用一次OS创建→持久保存实际PID、进程创建时间和映像文件身份→恢复核心。确认空组及核心退出后，提交退出原件再交付成功帧。创建失败、日志提交未知或宿主强停留下未结束尝试，随后返回`process_recovery_required`；即使PID已不存在也不自动清除。当前没有清锁、删记录、恢复重试或覆盖日志的工具；这些情况保留停机状态，等待完整旧域恢复实现。不得删除日志后初始化来绕过恢复。
+
+记录只增，保留最多4096次核心尝试，文件限制16MiB，达到容量停止新建，不删除历史腾空间。目录复制不能继承原宿主身份。该日志既不读取业务SQLite，也不判断设备效果、资源释放或授权状态；原生OS观察与完整运行准入继续分开。真实掉电耐久、存储介质故障、跨用户ACL和旧域恢复仍需各自验收。
 
 ## 首次管理员与数据库升级
 

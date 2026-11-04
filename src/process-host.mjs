@@ -8,11 +8,8 @@ export class ProcessHostError extends Error { constructor(code) { super(code); t
 const check = (condition, code) => { if (!condition) throw new ProcessHostError(code); };
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
-// 本机装配入口；输出仅是本次 OS 进程组事实，不是 DF02 AdmissionReceipt。
-export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, onCoreOutput = () => {}} = {}) {
+function prepareProcessHost() {
   check(process.platform === 'win32' && process.arch === 'x64', 'process_host_platform');
-  check(typeof dataDir === 'string' && path.isAbsolute(dataDir) && ['127.0.0.1', '::1'].includes(host) &&
-    Number.isInteger(port) && port >= 0 && port <= 65535 && typeof onCoreOutput === 'function', 'process_host_options');
   const root = fileURLToPath(new URL('./', import.meta.url));
   const executable = path.join(root, 'native/leafseamer_process_host.exe');
   try {
@@ -29,8 +26,39 @@ export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, o
   } catch (error) { if (error instanceof ProcessHostError) throw error; throw new ProcessHostError('process_host_artifact'); }
   // 不继承 Node 预加载、调试或动态库搜索设置；精确入口及参数不经 shell。
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => ['SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP'].includes(key.toUpperCase())));
-  const child = spawn(executable, [fs.realpathSync(process.execPath), path.join(root, 'cli.mjs'), 'contained-core',
-    '--data-dir', dataDir, '--host', host, '--port', String(port)], {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env});
+  return {root, executable, env};
+}
+
+// 显式本机开发安装，不覆盖已有日志；不产生生产宿主或运行域批准。
+export async function initializeProcessHost(dataDir) {
+  const {executable, env} = prepareProcessHost();
+  check(typeof dataDir === 'string' && path.isAbsolute(dataDir), 'process_host_options');
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, ['--initialize', dataDir], {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env});
+    let output = '', failed = null;
+    const timer = setTimeout(() => { failed = 'process_host_startup_timeout'; child.kill(); }, 10000);
+    child.stdin.on('error', () => {}); child.stdin.end(); child.stderr.resume();
+    child.stdout.setEncoding('utf8').on('data', chunk => { output += chunk; if (output.length > 4096) { failed = 'process_host_protocol'; child.kill(); } });
+    child.once('error', () => { failed = 'process_host_spawn'; });
+    child.once('close', code => {
+      clearTimeout(timer);
+      try {
+        if (failed) throw new ProcessHostError(failed);
+        const frame = JSON.parse(output);
+        if (code !== 0) throw new ProcessHostError(typeof frame.code === 'string' && /^[a-z_]{1,64}$/.test(frame.code) ? frame.code : 'process_host_failed');
+        check(frame.event === 'process_journal_initialized' && frame.runtime_admitted === false, 'process_host_protocol'); resolve(Object.freeze(frame));
+      } catch (error) { reject(error instanceof ProcessHostError ? error : new ProcessHostError('process_host_protocol')); }
+    });
+  });
+}
+
+// 本机装配入口；输出仅是本次 OS 进程组事实，不是 DF02 AdmissionReceipt。
+export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, onCoreOutput = () => {}} = {}) {
+  const {root, executable, env} = prepareProcessHost();
+  check(typeof dataDir === 'string' && path.isAbsolute(dataDir) && ['127.0.0.1', '::1'].includes(host) &&
+    Number.isInteger(port) && port >= 0 && port <= 65535 && typeof onCoreOutput === 'function', 'process_host_options');
+  const child = spawn(executable, [dataDir, fs.realpathSync(process.execPath), path.join(root, 'cli.mjs'), 'contained-core',
+    '--host', host, '--port', String(port)], {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env});
   let first, last, buffer = '', protocolError = null, closing = false;
   let startedResolve, startedReject, exitResolve, exitReject;
   const started = new Promise((resolve, reject) => { startedResolve = resolve; startedReject = reject; });

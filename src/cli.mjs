@@ -2,7 +2,7 @@
 import path from 'node:path';
 import {initializeStorage, migrateStorage, openStorage, StorageError} from './storage.mjs';
 import {startController} from './server.mjs';
-import {startProcessHost, ProcessHostError} from './process-host.mjs';
+import {startProcessHost, initializeProcessHost, ProcessHostError} from './process-host.mjs';
 import {IdentityError} from './identity-crypto.mjs';
 import {requireLocalAdministrator, requirePrivatePipes, readEnrollmentInput} from './local-admin.mjs';
 
@@ -10,7 +10,7 @@ const emit = value => process.stdout.write(JSON.stringify(value) + '\n');
 let app;
 try {
   const [command, ...args] = process.argv.slice(2);
-  const allowed = ['init-storage', 'migrate-storage', 'enroll-admin', 'identity-status', 'register-device'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core'].includes(command) ? ['--data-dir', '--host', '--port'] : [];
+  const allowed = ['init-storage', 'init-process-host', 'migrate-storage', 'enroll-admin', 'identity-status', 'register-device'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core'].includes(command) ? ['--data-dir', '--host', '--port'] : [];
   if (!allowed.length || args.length % 2) throw new Error('arguments');
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
@@ -18,7 +18,9 @@ try {
     options[args[i]] = args[i + 1];
   }
   if (!options['--data-dir'] || !path.isAbsolute(options['--data-dir'])) throw new Error('arguments');
-  if (command === 'init-storage') {
+  if (command === 'init-process-host') {
+    emit(await initializeProcessHost(options['--data-dir']));
+  } else if (command === 'init-storage') {
     const identity = initializeStorage(options['--data-dir']);
     emit({event: 'storage_initialized', ...identity, ready: false});
   } else if (command === 'migrate-storage') {

@@ -16,6 +16,10 @@ if (process.versions.node !== lock.node_version || !options['--headers']) throw 
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 for (const [name, digest] of Object.entries(lock.headers)) if (hash(fs.readFileSync(path.join(options['--headers'], name))) !== digest) throw new Error('native_headers_mismatch');
 if (process.platform === 'win32' && (!options['--node-library'] || hash(fs.readFileSync(options['--node-library'])) !== lock.windows_x64_node_lib)) throw new Error('native_library_mismatch');
+const sqliteSource = path.join(root, 'node_modules/better-sqlite3/deps/sqlite3');
+if (process.platform === 'win32') for (const [name, digest] of Object.entries(lock.sqlite_sources)) {
+  if (hash(fs.readFileSync(path.join(sqliteSource, name))) !== digest) throw new Error('native_sqlite_mismatch');
+}
 const output = path.join(root, 'logs/native-clock/build', process.platform + '-' + process.arch);
 const artifact = path.join(root, 'logs/native-clock/artifacts', process.platform + '-' + process.arch);
 function run(args) {
@@ -23,7 +27,7 @@ function run(args) {
   if (result.error || result.status !== 0) throw new Error('native_build_failed');
 }
 const configure = ['-S', path.join(root, 'native'), '-B', output, '-DCMAKE_BUILD_TYPE=Release', '-DNODE_INCLUDE_DIR=' + options['--headers']];
-if (process.platform === 'win32') configure.push('-G', 'Visual Studio 17 2022', '-A', 'x64', '-DNODE_LIBRARY=' + options['--node-library']);
+if (process.platform === 'win32') configure.push('-G', 'Visual Studio 17 2022', '-A', 'x64', '-DNODE_LIBRARY=' + options['--node-library'], '-DSQLITE_SOURCE_DIR=' + sqliteSource);
 run(configure); run(['--build', output, '--config', 'Release']);
 const binary = fs.readFileSync(path.join(output, process.platform === 'win32' ? 'Release' : '', 'leafseamer_clock.node'));
 fs.mkdirSync(artifact, {recursive: true});
@@ -41,5 +45,8 @@ if (process.platform === 'win32') {
   fs.writeFileSync(path.join(artifact, 'process-host-manifest.json'), JSON.stringify({format: 'leafseamer-process-host/1',
     platform: process.platform, arch: process.arch, binary_sha256: hash(host),
     source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-host.cc'))),
+    journal_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal.h'))),
+    journal_sql_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal.sql'))),
+    inputs_sha256: hash(fs.readFileSync(path.join(root, 'native-inputs.json'))),
     cmake_source_sha256: hash(fs.readFileSync(path.join(root, 'native/CMakeLists.txt')))}, null, 2) + '\n');
 }

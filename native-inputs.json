@@ -7,5 +7,9 @@
     "js_native_api.h": "82d3708ce120f8000ec34d72e1aa70b0d7d8a43027986293681374a71b2cb840",
     "js_native_api_types.h": "4f19cb90d240765cc0961d92a1ee20f65fdc50db7de1ab0a5cb6bc227224e1a0"
   },
-  "windows_x64_node_lib": "a0a84aa03917b578d286010b7521837e9ff1136ffb2e4a406c14316c33fd06f7"
+  "windows_x64_node_lib": "a0a84aa03917b578d286010b7521837e9ff1136ffb2e4a406c14316c33fd06f7",
+  "sqlite_sources": {
+    "sqlite3.c": "6a2805f8c1ef020a7086e62258519323cf98b219e9fe87a42065d916cfebaefc",
+    "sqlite3.h": "919e7f2e8ed1d8f56ac17b412b8971c76aa5d1a879752cc6058f75e7d5910e1d"
+  }
 }

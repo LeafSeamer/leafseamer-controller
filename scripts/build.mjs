@@ -40,6 +40,9 @@ if (process.platform === 'win32') {
   const host = JSON.parse(hostManifest), hostBinary = await fs.readFile(path.join(nativeDir, 'leafseamer_process_host.exe'));
   if (host.format !== 'leafseamer-process-host/1' || host.platform !== process.platform || host.arch !== process.arch ||
       host.binary_sha256 !== hash(hostBinary) || host.source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-host.cc'))) ||
+      host.journal_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-journal.h'))) ||
+      host.journal_sql_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-journal.sql'))) ||
+      host.inputs_sha256 !== hash(await fs.readFile(path.join(root, 'native-inputs.json'))) ||
       host.cmake_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/CMakeLists.txt')))) throw new Error('process_host_build_drift');
   files.push(['native/leafseamer_process_host.exe', hostBinary], ['native/process-host-manifest.json', hostManifest]);
 }

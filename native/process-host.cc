@@ -34,6 +34,7 @@ static std::string identifier() {
   const char* hex = "0123456789abcdef"; std::string s;
   for (auto b : bytes) { s += hex[b >> 4]; s += hex[b & 15]; } return s;
 }
+#include "process-journal.h"
 struct Attributes {
   std::vector<unsigned char> buffer; LPPROC_THREAD_ATTRIBUTE_LIST list = nullptr;
   Attributes() {
@@ -52,11 +53,15 @@ static DWORD active(HANDLE job) {
 int wmain(int argc, wchar_t** argv) {
   try {
     // 低层入口只由本机可信装配使用，不接受 shell 命令或环境指定的解释器。
-    require(argc >= 3 && absolute(argv[1]) && absolute(argv[2]), "process_arguments");
+    const bool initialize = argc == 3 && std::wstring(argv[1]) == L"--initialize";
+    require(initialize ? absolute(argv[2]) : (argc >= 4 && absolute(argv[1]) && absolute(argv[2]) && absolute(argv[3])), "process_arguments");
     require(GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_PIPE, "control_pipe_required");
     require(GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_PIPE, "status_pipe_required");
-    const std::string id = identifier();
-    Handle job(CreateJobObjectW(nullptr, nullptr)); require(job.value != nullptr, "job_create_failed");
+    Instance instance(initialize ? argv[2] : argv[1]); ProcessJournal journal(instance, initialize);
+    if (initialize) { printf("{\"event\":\"process_journal_initialized\",\"runtime_admitted\":false}\n"); fflush(stdout); return 0; }
+    const std::string id = identifier(); const std::wstring jobName = L"Global\\LeafSeamer.Core." + std::wstring(id.begin(), id.end());
+    Handle job(CreateJobObjectW(&instance.security, jobName.c_str())); const DWORD jobError = GetLastError();
+    require(job.value != nullptr && jobError != ERROR_ALREADY_EXISTS, "job_create_failed");
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     require(SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) != 0, "job_limits_failed");
@@ -75,22 +80,25 @@ int wmain(int argc, wchar_t** argv) {
     STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof(si); si.lpAttributeList = attributes.list;
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES; si.StartupInfo.hStdInput = coreInput.value;
     si.StartupInfo.hStdOutput = coreOutput.value; si.StartupInfo.hStdError = coreOutput.value;
-    std::wstring command = quote(argv[1]) + L" --disallow-code-generation-from-strings " + quote(argv[2]);
-    for (int i = 3; i < argc; ++i) { require(wcslen(argv[i]) <= 32768, "argument_capacity"); command += L" " + quote(argv[i]); }
+    std::wstring command = quote(argv[2]) + L" --disallow-code-generation-from-strings " + quote(argv[3]);
+    for (int i = 4; i < argc; ++i) { require(wcslen(argv[i]) <= 32768, "argument_capacity"); command += L" " + quote(argv[i]); }
+    command += L" --data-dir " + quote(instance.path);
     require(command.size() < 32767, "command_capacity"); PROCESS_INFORMATION pi{};
-    require(CreateProcessW(argv[1], command.data(), nullptr, nullptr, TRUE,
+    journal.begin(id, jobName);
+    require(CreateProcessW(argv[2], command.data(), nullptr, nullptr, TRUE,
       EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr, &si.StartupInfo, &pi) != 0, "process_create_failed");
     Handle process(pi.hProcess), thread(pi.hThread); coreInput.reset(); coreOutput.reset();
     BOOL belongs = FALSE;
     require(IsProcessInJob(process.value, job.value, &belongs) != 0 && belongs && active(job.value) == 1, "process_containment_failed");
     std::vector<wchar_t> image(32768); DWORD imageSize = static_cast<DWORD>(image.size());
     require(QueryFullProcessImageNameW(process.value, 0, image.data(), &imageSize) != 0, "process_image_failed");
-    Handle expected(CreateFileW(argv[1], FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr));
+    Handle expected(CreateFileW(argv[2], FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr));
     Handle loaded(CreateFileW(image.data(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr));
     BY_HANDLE_FILE_INFORMATION a{}, b{};
     require(expected.value != INVALID_HANDLE_VALUE && loaded.value != INVALID_HANDLE_VALUE &&
       GetFileInformationByHandle(expected.value, &a) && GetFileInformationByHandle(loaded.value, &b) &&
       a.dwVolumeSerialNumber == b.dwVolumeSerialNumber && a.nFileIndexHigh == b.nFileIndexHigh && a.nFileIndexLow == b.nFileIndexLow, "process_image_mismatch");
+    journal.observed(id, process.value, pi.dwProcessId, loaded.value);
     require(ResumeThread(thread.value) == 1, "process_resume_failed"); thread.reset();
     printf("{\"event\":\"process_contained\",\"containment_id\":\"%s\",\"supervisor_pid\":%lu,\"core_pid\":%lu,\"runtime_admitted\":false}\n",
       id.c_str(), GetCurrentProcessId(), pi.dwProcessId); fflush(stdout);
@@ -123,6 +131,7 @@ int wmain(int argc, wchar_t** argv) {
     while (active(job.value) != 0) { require(GetTickCount64() < deadline, "group_exit_unproven"); Sleep(10); }
     require(WaitForSingleObject(process.value, 5000) == WAIT_OBJECT_0, "core_exit_unproven");
     DWORD code = 1; require(GetExitCodeProcess(process.value, &code) != 0, "core_status_failed");
+    journal.retired(id, code, forced);
     printf("{\"event\":\"process_group_empty\",\"containment_id\":\"%s\",\"active_processes\":0,\"core_exit_code\":%lu,\"stop_requested\":%s,\"forced\":%s,\"runtime_admitted\":false}\n",
       id.c_str(), code, requested ? "true" : "false", forced ? "true" : "false"); fflush(stdout);
     return !invalid && code == 0 && !forced ? 0 : 1;
