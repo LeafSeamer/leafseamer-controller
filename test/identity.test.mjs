@@ -56,7 +56,7 @@ test('随机秘密按用途分域，非规范尾位与跨用途拒绝', () => {
 test('显式v2迁移保留scope与启动历史，并生成可校验v1备份', async t => {
   const dir = temporary(t), original = initializeStorage(dir);
   const first = openStorage(dir); first.close();
-  const migrated = await migrateStorage(dir);
+  const migrated = await migrateStorage(dir, 2);
   assert.equal(migrated.changed, true);
   const backup = fs.readFileSync(path.join(dir, migrated.backup_file));
   assert.equal(migrated.backup_ref, 'sha256:' + crypto.createHash('sha256').update(backup).digest('hex'));
@@ -75,7 +75,7 @@ test('显式v2迁移保留scope与启动历史，并生成可校验v1备份', as
     assert.deepEqual(second.enrollment.summary(), {initialized: false});
     await assert.rejects(migrateStorage(dir), e => e.code === 'database_in_use');
   } finally { second.close(); }
-  assert.deepEqual(await migrateStorage(dir), {schema_revision: '2', changed: false});
+  assert.deepEqual(await migrateStorage(dir, 2), {schema_revision: '2', changed: false});
   assert.equal(inspect(dir, db => db.prepare('SELECT count(*) FROM service_boot').pluck().get()), 2);
 });
 

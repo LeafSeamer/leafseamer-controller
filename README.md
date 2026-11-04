@@ -12,9 +12,12 @@
 
 ```sh
 npm ci --ignore-scripts
+npm run build:native -- --headers /absolute/node-v24.22.0/include/node --node-library /absolute/win-x64/node.lib
 npm test
 npm run build
 ```
+
+原生构建输入来自 [Node 24.22.0 官方发行目录](https://nodejs.org/dist/v24.22.0/) 的 headers 和 Windows x64 `node.lib`，下载后先核对官方 SHASUMS256.txt。构建脚本再按 `native-inputs.json` 校验四个 N-API 头文件和导入库，当前只接受 Node 24.22.0、x64。Windows 使用 CMake 与 Visual Studio 2022 C++ 工具链；Linux 使用 CMake/C++17，并省略 `--node-library`。先构建原生模块，再运行普通 build/test；源码摘要或制品摘要不符时拒绝打包，不静默退回 JavaScript 时钟。实际验证工具链为 Windows x64、CMake 4.2.1、MSVC 19.44.35222.0、Windows SDK 10.0.26100.0；Linux 构建尚未验证。原生构建清单仅证明本地制品与输入一致，不代替发行签名或运行域批准。
 
 首次显式创建业务库，再启动本机服务。`--data-dir` 必须是绝对路径；以下路径需替换为自己控制的独立目录。
 
@@ -34,7 +37,7 @@ SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 
 | 本机入口 | 当前结果 |
 | --- | --- |
 | `GET /health/live` | 200，最小存活状态 |
-| `GET /health/ready` | 503，`bootstrap_incomplete` |
+| `GET /health/ready` | 503；旧库 `bootstrap_incomplete`，schema 3 为 `authentication_clock_unqualified` 或故障时 `authentication_clock_unavailable` |
 | `GET /.well-known/leafseamer-contracts` | 503，无正文；尚无完整就绪的契约处理组合 |
 
 健康接口支持 HEAD，禁止缓存；不暴露数据库路径、版本或凭据。启动时的 JSON 输出包含本次 boot 身份与监听端口，`ready` 为 false。未知路由不进入业务处理，带正文请求不读入无界缓冲；当前没有命令发送、自动重放或自动布防路径。
@@ -47,7 +50,7 @@ SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 
 node --disallow-code-generation-from-strings dist/cli.mjs migrate-storage --data-dir /absolute/controller-data
 ```
 
-此操作先通过 SQLite backup 生成同目录的独立 v1 文件及 SHA-256，再同事务升级至 schema 2、保留全部服务 scope 与启动历史、登记迁移摘要和备份引用。已为 v2 时只返回 `changed:false`；正在运行、未知版本或不完整迁移拒绝。DDL 中途失败回滚，保留备份供诊断；这份备份不能作为另一个活动实例直接使用，正式恢复仍需换 scope 和完整恢复流程。活动库与备份目录的安装 ACL、备份恢复和掉电耐久尚待平台验收。
+此操作逐步升级至 schema 3。每一步先通过 SQLite backup 生成同目录的独立旧版文件及 SHA-256，再同事务升级、保留服务 scope、启动历史和已有身份回执、登记迁移摘要和备份引用。成功响应 `steps` 列出本次各步，顶层备份字段指最后一步；已为 v3 时返回 `changed:false`。正在运行、未知版本或不完整迁移拒绝。每一步 DDL 失败只回滚该步；例如 v1→v2 已提交而 v2→v3 失败时保留 v2，不自动降级。旧 v1/v2 库仍可保护态启动，不自动升级。备份不能作为另一个活动实例直接使用，正式恢复仍需换 scope 和完整恢复流程。活动库与备份目录的安装 ACL、备份恢复和掉电耐久尚待平台验收。
 
 `enroll-admin --data-dir <绝对目录>` 是供本机安装管理客户端使用的子进程入口。Windows 要求实际提升权限的管理员，首期系统工具固定标准 Windows 安装位置；Linux 要求有效 UID 0。没有在线角色、环境开关或命令参数可替代该检查。当前账户非管理员时，在打开业务库或发出能力前拒绝。父客户端必须用受控继承管道连接 stdin/stdout，终端和文件重定向拒绝；尚未提供交互安装向导。
 
@@ -57,7 +60,15 @@ node --disallow-code-generation-from-strings dist/cli.mjs migrate-storage --data
 
 密码采用 `identity-runtime/1`：Argon2id v19，65536 KiB、3轮、并行度1，独立16字节盐和32字节结果。仅执行登记成本的PHC；驱动0.45.1的参数顺序固定为 `m,p,t`。密码工作全进程同时2项、等待8项，超额报 `password_busy`，不占数据库事务等待计算。高熵opaque验证值按六种具名用途分域，不能代替人员密码。上述数值沿Suite既定profile；实现调用[官方node-argon2](https://github.com/ranisalt/node-argon2/tree/v0.45.1)，不自行实现密码算法。
 
-`npm test` 使用真实文件库、密码库、SDK HTTP 客户端和自建子进程。现有启动检查之外，覆盖迁移备份／回滚、管理员并发消费、每个身份写入故障、KDF期间到期、旧boot拒绝、秘密不落业务库、输入预算及非管理员拒绝。当前 Windows x64 下16项通过；因运行账户未提升权限，未验证管理员权限下完整CLI成功路径，事务成功与管道输入分别实际验证。Linux、掉电、生产认证时钟、TLS、网络登录／会话、部署和设备均未验收。源码与运行构建在本仓，测试数据和依赖不提交。
+## 原生时钟诊断
+
+schema 3 服务每500毫秒调用原生采集器。Windows 顺序为 `QueryInterruptTimePrecise → GetSystemTimePreciseAsFileTime → QueryInterruptTimePrecise`，FILETIME 用整数减纪元再转纳秒；Linux 实现使用 `CLOCK_BOOTTIME → CLOCK_REALTIME → CLOCK_BOOTTIME` 并检查时间命名空间。没有 `Date.now()` 或浮点秒替代路径。原生接口依据：[Microsoft 单调时间](https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-queryinterrupttimeprecise)、[精确系统时间](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemtimepreciseasfiletime)、[Linux clock_gettime](https://www.man7.org/linux/man-pages/man2/clock_gettime.2.html)。
+
+采集括号超过20毫秒、两秒有效期到达等号、时间倒退、连续性变化或采集／存储失败均锁存故障，本 boot 新采样不能解除。Windows 注册电源通知以记录连续性变化；Linux 连续性监测仍未完成。每 boot 保存最新诊断与首故障，记录原生制品摘要；每32次诊断写入执行并核验 PASSIVE checkpoint。它只是当前保护态诊断的有限写入处理，不是完整业务 WAL 容量调度或不可变 AuthenticationClockAcquisition 日志。
+
+当前全部采样始终不具备认证资格：尚未装载获批准的环境误差、量化与速率界、宿主授时健康来源及 DF02 运行域，也尚未实现可信区间原件 writer。因此服务继续 `protected`，没有登录、会话或设备写入授权。重启只建立新 boot 的诊断，不能恢复或获得认证资格。
+
+`npm test` 使用真实文件库、密码库、SDK HTTP 客户端、自建子进程与本机构建的原生模块；覆盖身份事务、逐步迁移、整数边界、故障锁存、checkpoint复用及HTTP保护态。故障注入使用合成读数，不能替代真实休眠／恢复和系统跳变验收。因运行账户未提升权限，未验证管理员权限下完整CLI成功路径，事务成功与管道输入分别实际验证。Linux、真实休眠、掉电、生产认证时钟资格、TLS、网络登录／会话、部署和设备均未验收。源码与运行构建在本仓，测试数据和依赖不提交。
 
 旧 NodeCG 实现及历史保留于 [leafseamer-legacy](https://github.com/ikenainanodesu/leafseamer-legacy)。本仓尚未导入旧业务源码；后续复用时逐项记录来源、历史映射和必要许可声明。
 

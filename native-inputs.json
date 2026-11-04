@@ -1,0 +1,11 @@
+{
+  "node_version": "24.22.0",
+  "napi_version": 8,
+  "headers": {
+    "node_api.h": "2d4560831e525b47b060ec8a0864ab73993df9e20215ce9f0fe7b24cd31af32a",
+    "node_api_types.h": "a25356630d3058f0a0c8937d9f297e9471e037fda58c2696d8a505c2bd99cb00",
+    "js_native_api.h": "82d3708ce120f8000ec34d72e1aa70b0d7d8a43027986293681374a71b2cb840",
+    "js_native_api_types.h": "4f19cb90d240765cc0961d92a1ee20f65fdc50db7de1ab0a5cb6bc227224e1a0"
+  },
+  "windows_x64_node_lib": "a0a84aa03917b578d286010b7521837e9ff1136ffb2e4a406c14316c33fd06f7"
+}

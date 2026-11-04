@@ -17,6 +17,7 @@
     "README.md"
   ],
   "scripts": {
+    "build:native": "node scripts/build-native.mjs",
     "build": "node scripts/build.mjs",
     "start": "node --disallow-code-generation-from-strings dist/cli.mjs start",
     "test": "npm run build && node --disallow-code-generation-from-strings --test test/*.test.mjs",
