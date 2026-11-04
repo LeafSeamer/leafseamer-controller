@@ -6,6 +6,7 @@ import {contractSelection as selection} from './sdk/index.mjs';
 const routes = new Map([
   ['/auth/sessions', 'POST'], ['/auth/sessions/refresh', 'POST'],
   ['/auth/service-tokens', 'POST'], ['/api/v1/session', 'GET'],
+  ['/auth/sessions/current', 'DELETE'],
 ]);
 const maximumBody = 16384, maximumPending = 16, bodyDeadline = 2000;
 const rawPairs = flat => Array.from({length: flat.length / 2}, (_, i) => [flat[2 * i], flat[2 * i + 1]]);
@@ -41,7 +42,7 @@ function failure(error) {
 }
 
 // origin与sessions只能由可信本地启动装配。代理身份头不能开启认证入口。
-export function createAuthenticationHttp({serviceId, serviceBootId, sessions = null, origin = null}) {
+export function createAuthenticationHttp({serviceId, databaseInstanceId, serviceBootId, sessions = null, origin = null}) {
   const adapter = createHttpAdapter(selection);
   let site = null;
   if (origin !== null) {
@@ -93,6 +94,14 @@ export function createAuthenticationHttp({serviceId, serviceBootId, sessions = n
         if (seconds < 1) reject('token_expired');
         await reply(res, request, 201, null, {data: {access_token: wireCredential(issued.token.token_id, issued.secret), token_type: 'Bearer', expires_in: seconds, audience: issued.token.audience},
           beforeSend() { sessions.verifyToken(proof, serviceId); }});
+      } else if (operation === 'logoutSession') {
+        const result = sessions.logout(cookieInput(req)), record = result.propagation;
+        const data = {operation_ref: {authority_service_id: serviceId, database_instance_id: databaseInstanceId,
+          kind: 'session_revocation', id: record.id, revision: record.revision}, local_session_state: 'revoked', propagation: {
+          operation_id: record.id, selector: {kind: 'session', issuer_id: record.issuer_id, issuer_epoch: record.issuer_epoch,
+            target_id: record.session_id, revision_floor: record.revision_floor}, issuer_commit_revision: record.revision_floor,
+          target_service_ids: record.target_service_ids, state: 'accepted', receipts: [], reason: 'logout', audit_id: record.tx_id}};
+        await reply(res, request, 202, null, {data, extraHeaders: [clearCookie], beforeSend() { sessions.confirmLogout(result.operation_ref); }});
       } else {
         const bearer = typeof req.headers.authorization === 'string' ? /^Bearer (.+)$/i.exec(req.headers.authorization) : null;
         const decoded = credential(bearer?.[1]), proof = {token_id: decoded.credential_id, secret: decoded.secret};

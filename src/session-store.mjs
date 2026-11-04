@@ -179,6 +179,16 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
         return {operation_ref: ref(operation), local_session_state: 'revoked', propagation: operation};
       }));
     },
+    confirmLogout(operationRef) {
+      return writer(() => {
+        time();
+        const original = rows(db, 'SELECT r.digest, r.body FROM session_revocation r JOIN auth_session s ON s.terminal_operation_id = r.operation_id WHERE r.operation_id = ? AND s.state = ?', operationRef.id, 'revoked')[0];
+        if (!original || original.digest !== operationRef.digest) fail('session_revocation_unavailable');
+        const body = JSON.parse(original.body.toString());
+        if (body.cause !== 'logout' || body.revision !== operationRef.revision) fail('session_revocation_unavailable');
+        return true;
+      });
+    },
     stop() { stopped = true; salt.fill(0); buckets.clear(); }
   });
 }

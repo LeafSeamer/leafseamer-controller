@@ -102,3 +102,44 @@ test('清除内存凭据后，迟到登录响应不能重新安装CSRF或token',
   await assert.rejects(a.client.refresh('browser'), e => e.code === 'session_credentials_missing');
   assert.equal(a.browser.state.requests.length, 1);
 });
+
+test('HTTPS注销只撤当前会话并返回真实固定目标，旧Cookie和token不能继续使用', {timeout: 15000}, async t => {
+  const a = await setup(t); const logged = await a.client.login(login);
+  const issued = await a.client.issueToken({audience: a.app.identity.service_id, requested_scopes: ['session.read']});
+  const oldCookie = a.browser.state.cookie, csrf = a.browser.state.requests.at(-1).headers['x-csrf-token'];
+  const bad = await a.send('DELETE', '/auth/sessions/current', {session_id: 'another-session'}, {'X-CSRF-Token': csrf});
+  assert.equal(bad.status, 400); assert.equal((await a.client.current()).status, '200');
+  const result = await a.client.logout(); assert.equal(result.status, '202');
+  const {operation_ref: ref, propagation: record} = result.body.data;
+  assert.equal(ref.authority_service_id, a.app.identity.service_id); assert.equal(ref.database_instance_id, a.app.identity.database_instance_id);
+  assert.equal(record.selector.target_id, logged.body.data.session_id); assert.equal(record.selector.revision_floor, '2');
+  assert.deepEqual(record.target_service_ids, [a.app.identity.service_id]); assert.equal(record.state, 'accepted'); assert.deepEqual(record.receipts, []);
+  assert.equal(a.browser.state.cookie, null); assert.match(a.browser.state.cookies.at(-1), /Max-Age=0$/);
+  const count = a.browser.state.requests.length;
+  await assert.rejects(a.client.current(), e => e.code === 'session_credentials_missing');
+  await assert.rejects(a.client.refresh('browser'), e => e.code === 'session_credentials_missing');
+  assert.equal(a.browser.state.requests.length, count);
+  assert.equal((await a.send('GET', '/api/v1/session', undefined, {Authorization: 'Bearer ' + issued.body.data.access_token})).status, 401);
+  a.browser.state.cookie = oldCookie;
+  assert.equal((await a.send('DELETE', '/auth/sessions/current', undefined, {'X-CSRF-Token': csrf})).status, 401);
+  assert.equal(a.browser.state.cookie, null);
+  await a.app.close();
+  const db = new Database(path.join(a.dir, 'controller.sqlite'), {fileMustExist: true});
+  try {
+    const [id, floor, tx] = db.prepare('SELECT operation_id, revision_floor, tx_id FROM session_revocation').raw().get();
+    assert.equal(id, ref.id); assert.equal(tx, record.audit_id); assert.equal(floor, 2);
+    assert.equal(db.prepare('SELECT count(*) FROM session_revocation_outbox').pluck().get(), 1);
+    assert.equal(db.prepare("SELECT count(*) FROM session_revocation_target WHERE state = 'pending'").pluck().get(), 1);
+    assert.equal(db.prepare("SELECT count(*) FROM access_token WHERE state = 'active'").pluck().get(), 0);
+  } finally { db.close(); }
+});
+
+test('注销来源失信返回503并清SDK内存，不伪报本地或传播完成', {timeout: 15000}, async t => {
+  const a = await setup(t); await a.client.login(login); a.trust.state.failed = true;
+  const result = await a.client.logout(); assert.equal(result.status, '503'); assert.equal(result.body.error.code, 'CLOCK_UNTRUSTED');
+  await assert.rejects(a.client.refresh('browser'), e => e.code === 'session_credentials_missing');
+  await a.app.close();
+  const db = new Database(path.join(a.dir, 'controller.sqlite'), {fileMustExist: true});
+  try { assert.equal(db.prepare('SELECT count(*) FROM session_revocation').pluck().get(), 0); }
+  finally { db.close(); }
+});

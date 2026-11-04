@@ -30,7 +30,8 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   }
   let server;
   try {
-    const authenticationHttp = createAuthenticationHttp({serviceId: storage.identity.service_id, serviceBootId: storage.serviceBootId, sessions, origin: tls?.origin ?? null});
+    const authenticationHttp = createAuthenticationHttp({serviceId: storage.identity.service_id, databaseInstanceId: storage.identity.database_instance_id,
+      serviceBootId: storage.serviceBootId, sessions, origin: tls?.origin ?? null});
     const options = {maxHeaderSize: 16384, requestTimeout: 5000, headersTimeout: 5000, keepAliveTimeout: 1000};
     const listener = (req, res) => {
     res.setHeader('Cache-Control', 'no-store');

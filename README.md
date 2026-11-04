@@ -1,6 +1,6 @@
 # LeafSeamer Controller
 
-> **施工中 / Work in progress。** 已提供保护状态的服务启动、持久服务身份、本机健康检查，以及首次管理员的存储事务和受限本机工具。已接通本地可信装配下的 HTTPS 登录、刷新、定向 token 和会话读取；生产认证资格、完整身份接口、命令受理、监督器及设备出口尚未完成，不能用于实际直播控制。
+> **施工中 / Work in progress。** 已提供保护状态的服务启动、持久服务身份、本机健康检查，以及首次管理员的存储事务和受限本机工具。已接通本地可信装配下的 HTTPS 登录、刷新、定向 token、会话读取和注销；生产认证资格、完整身份接口、命令受理、监督器及设备出口尚未完成，不能用于实际直播控制。
 
 可独立使用的直播软硬件控制平台：设备模块、连接、手动控制、资源协调、接管、凭据和状态采集。
 
@@ -80,7 +80,7 @@ schema 4 的四表分别保存依赖原件、采集原件、当前指针及首�
 
 ## 人员会话内部服务
 
-schema 5 的 `storage.sessions(clock)` 将同库人员会话服务绑定到唯一认证时钟实例，提供 `login/current/refresh/logout`。内部接口本身不是公开契约；下述四个 HTTPS 路径通过锁定 SDK 投影公开 Session，完整身份接受集及受控代理仍待实施。没有环境资格时无法登录，不用诊断时间代替认证时钟。服务主体不能通过这条人员密码路径取得身份。
+schema 5 的 `storage.sessions(clock)` 将同库人员会话服务绑定到唯一认证时钟实例，提供 `login/current/refresh/logout`。内部接口本身不是公开契约；下述 HTTPS 路径通过固定产品 SDK 投影公开 Session 和注销结果，完整身份接受集及受控代理仍待实施。没有环境资格时无法登录，不用诊断时间代替认证时钟。服务主体不能通过这条人员密码路径取得身份。
 
 登录使用真实 Argon2id，未知账户也计算同成本的虚拟密码摘要；异步计算期间不持写锁，提交前重读人员状态、修订和密码。每账户最多5次失败／分钟、全入口60次失败／分钟，计算中的尝试预留额度；未认证账户桶最多4096个，达到总界统一节流。该限速当前仅为进程内防护，不是跨重启持久封禁。撤销独立于登录失败预算。人员会话绝对8小时、刷新空闲30分钟、近期认证5分钟；刷新不延长绝对期限或近期认证期限。
 
@@ -102,7 +102,7 @@ schema 6 的会话服务增加内部 `issueToken(sessionInput, request)` 与 `ve
 
 ## 身份 HTTP 接收边界
 
-当前 `/auth/sessions`、`/auth/sessions/refresh`、`/auth/service-tokens` 和 `/api/v1/session` 已使用 SDK 的锁定 `panel4` 服务端校验器。默认CLI和缺少TLS装配时，完整合法请求返回结构化 `503 WORKER_NOT_READY` 和 `do_not_retry`；本地可信装配支持下述成功路径。SDK读取相同service／boot身份与契约选择。就绪及发现入口仍为503。当前全系统身份接受集仍待归并，不能据这四个路径宣称完整契约已启用。
+当前 `/auth/sessions`、`/auth/sessions/refresh`、`/auth/service-tokens`、`/api/v1/session` 和 `DELETE /auth/sessions/current` 已使用SDK的 `product1` 服务端校验器。默认CLI和缺少TLS装配时，完整合法请求返回结构化 `503 WORKER_NOT_READY` 和 `do_not_retry`；本地可信装配支持下述成功路径。SDK读取相同service／boot身份与契约选择。就绪及发现入口仍为503。当前全系统身份接受集仍待归并，不能据这些路径宣称完整首期契约已启用。
 
 原始头保留至信封校验，重复敏感头、错选择及不支持的编码拒绝；正文严格UTF-8／JSON／Schema校验，拒绝重复键和未知写字段。正文上限16 KiB，同时接收最多16项，接收期限为绝对2秒；分块累计、声明超限、断连和超时均释放容量。选择前失败不回显任意契约；选择后业务错误在发送前再校验。异常响应不包含密码、Cookie或原始报文。健康接口不占身份正文接收额度。
 
@@ -126,13 +126,21 @@ schema 7将本地权限版本、当前选择、管理操作、固定传播目标
 
 `startController({dataDir, port, tls: {key, cert, origin}, authenticationProvider})` 是供可信本地监督代码使用的装配入口，仍只监听回环地址。`origin` 必须为精确 HTTPS origin，TLS固定1.2或1.3，密钥及证书由调用方安全供应。提供者工厂接收冻结的 `{scope, source}`，其中source始终为实际原生采样器；必须返回前述可信原件提供者。该工厂不是部署配置或远程插件入口，测试构造不能替代生产批准。普通CLI保持保护态；TLS证书本身不授认证资格。
 
-四个既有panel4路径支持登录201、刷新200、token签发201和会话读取200。公开Session来自当前文件库权限及有效会话，响应经SDK完整校验后、发送秘密前再次核当前权限和认证时钟。时间下界向上、上界向下换算为毫秒。Host必须精确匹配配置，写操作Origin必须精确匹配；读取若携Origin也须一致，cross-site请求拒绝。成功路径要求真实TLSSocket，不采信代理自报头。
+product1继承四个原有身份路径，支持登录201、刷新200、token签发201和会话读取200，并增加签发方注销202。公开Session来自当前文件库权限及有效会话，响应经SDK完整校验后、发送秘密前再次核当前权限和认证时钟。时间下界向上、上界向下换算为毫秒。Host必须精确匹配配置，写操作Origin必须精确匹配；读取若携Origin也须一致，cross-site请求拒绝。成功路径要求真实TLSSocket，不采信代理自报头。
 
-刷新Cookie使用 `leafseamer_session`，固定 `Path=/auth; Secure; HttpOnly; SameSite=Strict`，不设Domain。Cookie中的凭据和X-CSRF-Token需同时有效；重复目标Cookie拒绝。刷新只交付一次新秘密，正确复用已消费的旧凭据撤销该session全部token。GET会话只接受Bearer，并核本服务audience及session.read；Cookie不能代替它。当前不签扩展委托token。`expires_in` 为签发期限向下取整的秒数提示，服务器始终按原绝对截止重核，响应耗时不续期。旧panel4的签发请求没有客户端request_id，网络调用不自动重试；不能把内部幂等接口宣称为HTTP查原已完成。
+刷新Cookie使用 `leafseamer_session`，固定 `Path=/auth; Secure; HttpOnly; SameSite=Strict`，不设Domain。Cookie中的凭据和X-CSRF-Token需同时有效；重复目标Cookie拒绝。刷新只交付一次新秘密，正确复用已消费的旧凭据撤销该session全部token。GET会话只接受Bearer，并核本服务audience及session.read；Cookie不能代替它。当前不签扩展委托token。`expires_in` 为签发期限向下取整的秒数提示，服务器始终按原绝对截止重核，响应耗时不续期。当前沿用的签发请求没有客户端request_id，网络调用不自动重试；不能把内部幂等接口宣称为HTTP查原已完成。
 
-SDK的 `createBrowserSessionClient` 管理内存CSRF与token，浏览器保管HttpOnly Cookie，拒绝并发刷新、错误选择及非法CSRF。清本地内存后到达的旧响应不能重新安装凭据；清内存不等于服务端注销。完整注销、主体与权限管理接口须进入新身份接受集，不能向旧panel4偷加路径。
+SDK的 `createBrowserSessionClient` 管理内存CSRF与token，浏览器保管HttpOnly Cookie，拒绝并发刷新、错误选择及非法CSRF。清本地内存后到达的旧响应不能重新安装凭据；清内存不等于服务端注销。当前注销已进入新product1选择；主体与权限管理接口仍须归并，不向旧panel4偷加路径。
 
-当前62项Controller检查通过。新增五项实际加载Windows原生模块，使用正常证书校验的本机HTTPS、真实密码库和文件权限库；验证SDK往返、Origin／Host／Cookie／CSRF、刷新复用、来源失效及迟到响应。证书仅在测试内存中临时生成，Cookie容器为测试模拟，环境批准引用与误差界仍为合成。独立安装包另验证相同HTTPS成功路径；真实浏览器、Linux、生产提供者、可信代理、完整跨服务鉴权、部署和设备未验收，业务就绪仍为503。
+当前64项Controller检查通过。七项HTTPS集成实际加载Windows原生模块，使用正常证书校验的本机HTTPS、真实密码库和文件权限库；验证SDK往返、Origin／Host／Cookie／CSRF、刷新复用、来源失效及迟到响应。证书仅在测试内存中临时生成，Cookie容器为测试模拟，环境批准引用与误差界仍为合成。独立安装包另验证相同HTTPS成功路径；真实浏览器、Linux、生产提供者、可信代理、完整跨服务鉴权、部署和设备未验收，业务就绪仍为503。
+
+## 当前会话注销
+
+SDK `logout()` 调用 `DELETE /auth/sessions/current`，只使用当前Cookie、CSRF和精确Origin，不接受目标body，不要求auth.manage或近期认证。既有会话writer同事务撤销当前session及其token、保存拒绝floor、固定audience与执行／订阅目标并写outbox；响应校验后再次核已提交事实和认证时钟才发送202。Cookie随202清除，操作结果不证明远端撤销已应用，不影响独立组织授权或设备holder。
+
+202的operation_ref来自本服务／数据库及不可变操作身份；RevocationRecord的issuer_commit_revision取该session持久撤销floor，audit_id取同一持久事务身份。目标完整保留，receipts当前为空、state为accepted，未实现的传播消费者不会被冒充为applied。旧Cookie重试401并清Cookie，不借已撤凭据查询历史；响应丢失或503不自动重发，SDK清本地内存并保留错误。完整授权查询、传播确认及审计接口继续实施。
+
+最终独立包另验证注销后旧Cookie／token失效、拒绝body目标、数据库中的操作／floor／outbox与响应一致以及来源失信不伪报202。仍使用合成环境批准和模拟Cookie容器，真实浏览器、生产运行环境及远端屏障未验收。
 
 旧 NodeCG 实现及历史保留于 [leafseamer-legacy](https://github.com/ikenainanodesu/leafseamer-legacy)。本仓尚未导入旧业务源码；后续复用时逐项记录来源、历史映射和必要许可声明。
 
