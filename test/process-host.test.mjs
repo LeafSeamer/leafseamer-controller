@@ -1,0 +1,119 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {fileURLToPath, pathToFileURL} from 'node:url';
+import {spawn} from 'node:child_process';
+import {once} from 'node:events';
+import {setTimeout as delay} from 'node:timers/promises';
+import Database from 'better-sqlite3';
+import {startProcessHost} from '../dist/process-host.mjs';
+import {initializeStorage} from '../dist/storage.mjs';
+
+const windows = process.platform === 'win32', options = {skip: !windows, timeout: 20000};
+const dist = fileURLToPath(new URL('../dist/', import.meta.url));
+function temporary(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'leafseamer process '));
+  t.after(() => { assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir())); fs.rmSync(dir, {recursive: true, force: true}); });
+  return dir;
+}
+function collector() {
+  let pending = ''; const frames = [];
+  return {frames, write(chunk) { pending += chunk.toString();
+    while (pending.includes('\n')) { const i = pending.indexOf('\n'); const text = pending.slice(0, i); pending = pending.slice(i + 1); frames.push(JSON.parse(text)); }
+  }};
+}
+async function until(fn) {
+  const end = performance.now() + 7000;
+  while (!fn()) { assert(performance.now() < end, '等待实际进程状态超时'); await delay(20); }
+  return fn();
+}
+const gone = pid => { try { process.kill(pid, 0); return false; } catch (e) { if (e.code === 'ESRCH') return true; throw e; } };
+async function tree(t) {
+  const status = collector(), core = collector();
+  const child = spawn(path.join(dist, 'native/leafseamer_process_host.exe'), [process.execPath,
+    fileURLToPath(new URL('./fixtures/process-tree.mjs', import.meta.url))], {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true});
+  const closed = once(child, 'close'); child.stdout.on('data', x => status.write(x)); child.stderr.on('data', x => core.write(x)); child.stdin.on('error', () => {});
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill(); await closed; });
+  await until(() => core.frames.some(f => f.event === 'leaf_running'));
+  const parent = core.frames.find(f => f.event === 'tree_running'), leaf = core.frames.find(f => f.event === 'leaf_running');
+  assert.equal(parent.leaf_pid, leaf.pid); assert.equal(status.frames[0].core_pid, parent.pid);
+  return {child, closed, status, parent, leaf};
+}
+
+test('真实原生宿主启动Controller，停止后库正常关闭并确认空组', options, async t => {
+  const dir = temporary(t); initializeStorage(dir); const core = collector();
+  const app = await startProcessHost({dataDir: dir, onCoreOutput: x => core.write(x)});
+  t.after(() => app.close());
+  assert.equal(app.containment.runtime_admitted, false);
+  const listening = await until(() => core.frames.find(f => f.event === 'listening'));
+  const ready = await fetch(`http://127.0.0.1:${listening.port}/health/ready`);
+  assert.equal(ready.status, 503);
+  const result = await app.close();
+  assert.equal(result.exitCode, 0); assert.equal(result.forced, false); assert.equal(result.active_processes, 0);
+  assert.equal(result.containment_id, app.containment.containment_id); assert.equal(result.runtime_admitted, false);
+  assert(core.frames.some(f => f.event === 'stopped')); assert(gone(app.containment.core_pid));
+  const db = new Database(path.join(dir, 'controller.sqlite'), {fileMustExist: true});
+  try { assert.equal(db.prepare('SELECT state FROM service_boot').pluck().get(), 'stopped'); } finally { db.close(); }
+});
+
+test('核心启动失败仍回收整组，不建立缺失业务库', options, async t => {
+  const dir = temporary(t), output = collector();
+  const app = await startProcessHost({dataDir: dir, onCoreOutput: x => output.write(x)});
+  const result = await app.exited;
+  assert.equal(result.exitCode, 1); assert.equal(result.active_processes, 0);
+  assert(output.frames.some(f => f.error === 'database_unavailable'));
+  assert.equal(fs.existsSync(path.join(dir, 'controller.sqlite')), false);
+});
+
+test('核心退出后残留的detached后代仍被整组终止', options, async t => {
+  const run = await tree(t); run.child.stdin.end('stop\n');
+  const [code] = await run.closed; assert.equal(code, 1);
+  const result = run.status.frames.at(-1);
+  assert.equal(result.event, 'process_group_empty'); assert.equal(result.core_exit_code, 0); assert.equal(result.forced, true);
+  assert(gone(run.parent.pid)); assert(gone(run.leaf.pid));
+});
+
+test('宿主被强制终止时Job句柄关闭，核心和后代退出', options, async t => {
+  const run = await tree(t); run.child.kill(); await run.closed;
+  await until(() => gone(run.parent.pid) && gone(run.leaf.pid));
+  assert.equal(run.status.frames.some(f => f.event === 'process_group_empty'), false);
+});
+
+test('核心崩溃触发原生宿主回收全部后代', options, async t => {
+  const run = await tree(t); process.kill(run.parent.pid); await run.closed;
+  assert.equal(run.status.frames.at(-1).event, 'process_group_empty');
+  assert(gone(run.parent.pid)); assert(gone(run.leaf.pid));
+});
+
+test('实际supervise CLI消失后，控制管道关闭使宿主和核心退出', options, async t => {
+  const dir = temporary(t); initializeStorage(dir); const status = collector(), output = collector();
+  const child = spawn(process.execPath, [path.join(dist, 'cli.mjs'), 'supervise', '--data-dir', dir], {stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true});
+  const closed = once(child, 'close'); child.stdout.on('data', x => status.write(x)); child.stderr.on('data', x => output.write(x));
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill(); await closed; });
+  await until(() => output.frames.some(f => f.event === 'listening'));
+  const frame = status.frames.find(f => f.event === 'process_contained'); assert(frame);
+  child.kill(); await closed;
+  await until(() => gone(frame.supervisor_pid) && gone(frame.core_pid));
+});
+
+test('控制管道失效或畸形输入停止整组，不恢复创建', options, async t => {
+  for (const malformed of [false, true]) {
+    const run = await tree(t); run.child.stdin.end(malformed ? 'invalid\n' : undefined);
+    const [code] = await run.closed; assert.equal(code, 1);
+    assert.equal(run.status.frames.at(-1).event, 'process_group_empty');
+    assert(gone(run.parent.pid)); assert(gone(run.leaf.pid));
+  }
+});
+
+test('安装包资产漂移在创建进程前拒绝', options, async t => {
+  const dir = temporary(t), copy = path.join(dir, 'dist'); fs.cpSync(dist, copy, {recursive: true});
+  fs.appendFileSync(path.join(copy, 'cli.mjs'), '\n// synthetic drift\n');
+  const module = await import(pathToFileURL(path.join(copy, 'process-host.mjs')));
+  await assert.rejects(module.startProcessHost({dataDir: dir}), e => e.code === 'process_host_artifact');
+});
+
+test('非Windows平台拒绝用其它进程机制伪装已实现的Job宿主', {skip: windows}, async () => {
+  await assert.rejects(startProcessHost({dataDir: '/tmp/controller'}), e => e.code === 'process_host_platform');
+});

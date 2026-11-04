@@ -28,6 +28,18 @@ npm start -- --data-dir /absolute/controller-data --port 8081
 
 Windows 使用绝对目录参数，运行文件与业务数据分开存放。当前为开发启动入口，尚非 C12 的安装器或受监督生产启动流程；Windows 目录 ACL、Linux 服务账户、TLS 和发行制品仍需各自验收。监听仅允许 `127.0.0.1` 或 `::1`，没有将 HTTP 扩展到远端的开关。
 
+### Windows 进程容纳启动
+
+Windows x64 开发包另提供 `node --disallow-code-generation-from-strings dist/cli.mjs supervise --data-dir <绝对目录> --port 8081`。该入口先核验包内构建资产，再启动随包的原生进程宿主，由宿主创建 Controller 核心。Node 入口和参数固定解析，不经过 shell；子进程环境仅保留 Windows 系统及临时目录变量，不继承 Node 预加载／调试环境。核心仍使用原有排他业务库与保护态 HTTP，`/health/ready` 返回503。
+
+原生宿主先创建不可继承的匿名 Job，启用并回读 `KILL_ON_JOB_CLOSE`，关闭 breakaway，使用 `PROC_THREAD_ATTRIBUTE_JOB_LIST` 在创建时纳管暂停的核心；核对实际 Job 归属和映像文件身份后才恢复线程。继承句柄白名单只有核心输入与输出，Job 句柄不交给核心。stdout 专用于宿主生命周期事实，核心的监听及错误输出走 stderr，两者不共享状态管道。`process_contained` 只表示本次 OS 容纳，`runtime_admitted` 始终为 false。（接口依据：[Microsoft 进程属性](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)、[Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)。）
+
+本机装配代码也可调用包内 `startProcessHost({dataDir,host,port,onCoreOutput})`，使用返回的 `close()` 停止、`exited` 等待最终状态。正常停止或启动客户端消失时，宿主给核心两秒关闭库；随后终止残留进程并查询整个 Job 的活跃计数，最多等待五秒取得空组，再确认核心进程句柄退出。只有两项都成立才输出 `process_group_empty`；强停、异常核心退出或畸形控制输入返回失败退出码，即使之后已确认空组。宿主自身被强制终止依靠唯一 Job 句柄关闭终止组内进程，此时没有空组回执，不能从宿主退出推断已取得退役证据。（观察依据：[Job 活跃进程计数](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_accounting_information)、[TerminateJobObject](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-terminatejobobject)。）
+
+当前实现是 DF02 的 Windows 进程容纳基础，尚未完成监督 journal、跨会话原生单实例锁、保护配置／发行制品权威、bootstrap、子 Job、worker 运行准入和旧域恢复；匿名 Job 身份仅在本次进程中有效。构建清单不能替代发行签名与加载期间防替换，完整运行域未获批准。该入口没有设备出口、自动重启或任意 worker 启动接口，也不把组退出当作设备效果完成或资源释放。Linux cgroup 版本尚待实现，Linux 不生成该宿主且调用时明确拒绝。现有 `start` 保留用于保护态开发诊断。
+
+本轮 Windows 真实进程测试覆盖正常数据库关闭、核心启动失败／崩溃、残留 detached 后代、宿主强停、启动客户端消失、控制管道断开／畸形及安装资产漂移。Controller 回归87项通过，另1项非Windows用例在当前平台跳过；没有以这些结果宣称 Linux、完整监督协议、浏览器或设备已验收。
+
 `init-storage` 只创建服务存储，不创建管理员或设备权限。数据库已存在时拒绝覆盖；启动时数据库缺失、版本未知、迁移摘要不符或完整性检查失败均拒绝，不自动创建新身份或修复原库。初始化失败留下的文件须按故障检查处理，不能通过重复初始化静默替换。
 
 库中固定 service_id、database_instance_id、control_epoch 和 request_epoch。普通重启保留它们，为每次启动生成新的 service_boot_id；它不充当 DF02 的已批准运行域。启动记录与迁移记录持久保存，正常关闭只结束本次启动记录；强停留下的旧记录不改写成成功关闭。记录中的 UTC 只供诊断，不是认证时钟、业务 NTP 或排序权威。备份恢复换 scope、完整身份生命周期和持久请求账本尚待实现。

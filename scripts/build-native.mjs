@@ -35,3 +35,11 @@ fs.writeFileSync(path.join(artifact, 'manifest.json'), JSON.stringify({format: '
   cmake_source_sha256: hash(fs.readFileSync(path.join(root, 'native/CMakeLists.txt'))),
   compiler: JSON.parse(fs.readFileSync(path.join(output, 'compiler.json'), 'utf8'))}, null, 2) + '\n');
 console.log(JSON.stringify({native_artifact: process.platform + '-' + process.arch, sha256: hash(binary)}));
+if (process.platform === 'win32') {
+  const host = fs.readFileSync(path.join(output, 'Release/leafseamer_process_host.exe'));
+  fs.writeFileSync(path.join(artifact, 'leafseamer_process_host.exe'), host);
+  fs.writeFileSync(path.join(artifact, 'process-host-manifest.json'), JSON.stringify({format: 'leafseamer-process-host/1',
+    platform: process.platform, arch: process.arch, binary_sha256: hash(host),
+    source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-host.cc'))),
+    cmake_source_sha256: hash(fs.readFileSync(path.join(root, 'native/CMakeLists.txt')))}, null, 2) + '\n');
+}

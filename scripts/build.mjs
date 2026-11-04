@@ -5,6 +5,7 @@ import {fileURLToPath} from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const names = ['cli.mjs', 'server.mjs', 'storage.mjs', 'storage.sql', 'identity.sql', 'identity-crypto.mjs', 'identity-store.mjs', 'local-admin.mjs', 'native-clock.mjs', 'clock-monitor.mjs', 'clock.sql', 'auth-clock.sql', 'auth-clock.mjs', 'auth-clock-value.mjs', 'auth-clock-store.mjs', 'session-store.mjs', 'session.sql', 'access-token-store.mjs', 'access-token.sql'];
 const files = await Promise.all(names.map(async name => [name, await fs.readFile(path.join(root, 'src', name))]));
+files.push(['process-host.mjs', await fs.readFile(path.join(root, 'src/process-host.mjs'))]);
 files.push(['auth-http.mjs', await fs.readFile(path.join(root, 'src/auth-http.mjs'))]);
 for (const name of ['local-permission-store.mjs', 'local-permission.sql']) files.push([name, await fs.readFile(path.join(root, 'src', name))]);
 for (const name of ['device-registry-store.mjs', 'device-registry.sql', 'command-admission-store.mjs', 'request-context-store.mjs', 'command-admission.sql', 'request-context.sql']) files.push([name, await fs.readFile(path.join(root, 'src', name))]);
@@ -34,6 +35,14 @@ if (native.platform !== process.platform || native.arch !== process.arch || nati
     native.cmake_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/CMakeLists.txt'))) ||
     native.inputs_sha256 !== hash(await fs.readFile(path.join(root, 'native-inputs.json')))) throw new Error('native_build_drift');
 files.push(['native/leafseamer_clock.node', binary], ['native/manifest.json', nativeManifest]);
+if (process.platform === 'win32') {
+  const hostManifest = await fs.readFile(path.join(nativeDir, 'process-host-manifest.json'));
+  const host = JSON.parse(hostManifest), hostBinary = await fs.readFile(path.join(nativeDir, 'leafseamer_process_host.exe'));
+  if (host.format !== 'leafseamer-process-host/1' || host.platform !== process.platform || host.arch !== process.arch ||
+      host.binary_sha256 !== hash(hostBinary) || host.source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-host.cc'))) ||
+      host.cmake_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/CMakeLists.txt')))) throw new Error('process_host_build_drift');
+  files.push(['native/leafseamer_process_host.exe', hostBinary], ['native/process-host-manifest.json', hostManifest]);
+}
 const output = path.resolve(root, 'dist');
 if (path.dirname(output) !== path.resolve(root)) throw new Error('output_path');
 await fs.rm(output, {recursive: true, force: true}); await fs.mkdir(path.join(output, 'native'), {recursive: true});
