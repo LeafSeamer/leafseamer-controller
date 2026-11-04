@@ -1,0 +1,19 @@
+{
+  "name": "@leafseamer/controller",
+  "version": "0.1.0-dev.1",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {"node": ">=24.22.0 <25"},
+  "packageManager": "npm@11.19.1",
+  "bin": {"leafseamer-controller": "dist/cli.mjs"},
+  "files": ["dist", "LICENSE", "README.md"],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node --disallow-code-generation-from-strings dist/cli.mjs start",
+    "test": "npm run build && node --disallow-code-generation-from-strings --test test/*.test.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": {"better-sqlite3": "13.0.3"},
+  "devDependencies": {"@leafseamer/sdk": "file:../leafseamer-sdk"}
+}
