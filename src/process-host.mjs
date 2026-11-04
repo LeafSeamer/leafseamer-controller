@@ -3,6 +3,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import canonicalize from 'canonicalize';
+import {validateBootstrapPolicy} from './core-bootstrap.mjs';
 
 export class ProcessHostError extends Error { constructor(code) { super(code); this.name = 'ProcessHostError'; this.code = code; } }
 const check = (condition, code) => { if (!condition) throw new ProcessHostError(code); };
@@ -30,11 +32,13 @@ function prepareProcessHost() {
 }
 
 // 显式本机开发安装，不覆盖已有日志；不产生生产宿主或运行域批准。
-export async function initializeProcessHost(dataDir) {
+export async function initializeProcessHost(dataDir) { return configureJournal(dataDir, false); }
+export async function upgradeProcessHost(dataDir) { return configureJournal(dataDir, true); }
+async function configureJournal(dataDir, upgrade) {
   const {executable, env} = prepareProcessHost();
   check(typeof dataDir === 'string' && path.isAbsolute(dataDir), 'process_host_options');
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, ['--initialize', dataDir], {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env});
+    const child = spawn(executable, [upgrade ? '--upgrade' : '--initialize', dataDir], {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env});
     let output = '', failed = null;
     const timer = setTimeout(() => { failed = 'process_host_startup_timeout'; child.kill(); }, 10000);
     child.stdin.on('error', () => {}); child.stdin.end(); child.stderr.resume();
@@ -46,19 +50,31 @@ export async function initializeProcessHost(dataDir) {
         if (failed) throw new ProcessHostError(failed);
         const frame = JSON.parse(output);
         if (code !== 0) throw new ProcessHostError(typeof frame.code === 'string' && /^[a-z_]{1,64}$/.test(frame.code) ? frame.code : 'process_host_failed');
-        check(frame.event === 'process_journal_initialized' && frame.runtime_admitted === false, 'process_host_protocol'); resolve(Object.freeze(frame));
+        check(frame.event === (upgrade ? 'process_journal_upgraded' : 'process_journal_initialized') && frame.runtime_admitted === false &&
+          (!upgrade || (frame.schema_revision === '2' && typeof frame.changed === 'boolean')), 'process_host_protocol'); resolve(Object.freeze(frame));
       } catch (error) { reject(error instanceof ProcessHostError ? error : new ProcessHostError('process_host_protocol')); }
     });
   });
 }
 
-// 本机装配入口；输出仅是本次 OS 进程组事实，不是 DF02 AdmissionReceipt。
-export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, onCoreOutput = () => {}} = {}) {
+// 安装内容的局部摘要；发行签名与加载防替换仍由安装层提供。
+export function installedCoreDigest() {
+  const {root} = prepareProcessHost();
+  return 'sha256:' + hash(canonicalize({controller_build_sha256: hash(fs.readFileSync(path.join(root, 'build-manifest.json'))),
+    node_sha256: hash(fs.readFileSync(fs.realpathSync(process.execPath)))}));
+}
+
+// bootstrapPolicy仅由可信本机装配选择；状态帧不替代持久化AdmissionReceipt或生产profile批准。
+export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, onCoreOutput = () => {}, bootstrapPolicy = null} = {}) {
   const {root, executable, env} = prepareProcessHost();
+  const policy = bootstrapPolicy === null ? null : validateBootstrapPolicy(bootstrapPolicy);
+  if (policy) check(policy.artifact_manifest_ref.digest === installedCoreDigest(), 'bootstrap_artifact');
   check(typeof dataDir === 'string' && path.isAbsolute(dataDir) && ['127.0.0.1', '::1'].includes(host) &&
     Number.isInteger(port) && port >= 0 && port <= 65535 && typeof onCoreOutput === 'function', 'process_host_options');
-  const child = spawn(executable, [dataDir, fs.realpathSync(process.execPath), path.join(root, 'cli.mjs'), 'contained-core',
-    '--host', host, '--port', String(port)], {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env});
+  const args = [dataDir, fs.realpathSync(process.execPath), path.join(root, 'cli.mjs'), policy ? 'contained-core-auth' : 'contained-core',
+    '--host', host, '--port', String(port)];
+  if (policy) args.push('--bootstrap-policy', canonicalize(policy));
+  const child = spawn(executable, args, {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env});
   let first, last, buffer = '', protocolError = null, closing = false;
   let startedResolve, startedReject, exitResolve, exitReject;
   const started = new Promise((resolve, reject) => { startedResolve = resolve; startedReject = reject; });
@@ -80,7 +96,7 @@ export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, o
         if (frame.event === 'process_host_failed') throw new ProcessHostError(typeof frame.code === 'string' && /^[a-z_]{1,64}$/.test(frame.code) ? frame.code : 'process_host_failed');
         if (!first) {
           check(frame.event === 'process_contained' && /^[0-9a-f]{32}$/.test(frame.containment_id) && frame.supervisor_pid === child.pid &&
-            Number.isInteger(frame.core_pid) && frame.core_pid > 0, 'process_host_protocol');
+            Number.isInteger(frame.core_pid) && frame.core_pid > 0 && frame.bootstrap_authenticated === Boolean(policy), 'process_host_protocol');
           first = Object.freeze(frame); clearTimeout(startupTimer); startedResolve(first);
         } else {
           check(!last && frame.event === 'process_group_empty' && frame.containment_id === first.containment_id && frame.active_processes === 0 &&
@@ -90,7 +106,7 @@ export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, o
       } catch (error) { fail(error instanceof ProcessHostError ? error.code : 'process_host_protocol'); }
     }
   });
-  const startupTimer = setTimeout(() => fail('process_host_startup_timeout'), 10000);
+  const startupTimer = setTimeout(() => fail('process_host_startup_timeout'), 10000 + (policy?.bootstrap_timeout_ms ?? 0));
   child.once('error', () => { protocolError ??= new ProcessHostError('process_host_spawn'); });
   child.once('close', (code, signal) => {
     clearTimeout(startupTimer);

@@ -108,11 +108,11 @@ test('旧库显式升级至两位schema版本保留身份和已有权限，旧sc
   const a = await setup(t, 9), original = a.storage.identity;
   try { assert.throws(() => a.storage.registerDevice(registration()), e => e.code === 'device_migration_required'); }
   finally { a.close(); }
-  const migrated = await migrateStorage(a.dir); assert.equal(migrated.schema_revision, '10');
+  const migrated = await migrateStorage(a.dir, 10); assert.equal(migrated.schema_revision, '10');
   const storage = openStorage(a.dir);
   try {
     assert.equal(storage.identity.service_id, original.service_id); assert.equal(storage.identity.database_instance_id, original.database_instance_id);
     assert(storage.registerDevice(registration()).device_id);
   } finally { storage.close(); }
-  assert.equal((await migrateStorage(a.dir)).changed, false);
+  assert.equal((await migrateStorage(a.dir, 10)).changed, false);
 });

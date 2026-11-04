@@ -110,6 +110,7 @@ test('控制管道失效或畸形输入停止整组，不恢复创建', options,
 
 test('安装包资产漂移在创建进程前拒绝', options, async t => {
   const dir = temporary(t), copy = path.join(dir, 'dist'); fs.cpSync(dist, copy, {recursive: true});
+  fs.cpSync(fileURLToPath(new URL('../node_modules/canonicalize/', import.meta.url)), path.join(dir, 'node_modules/canonicalize'), {recursive: true});
   fs.appendFileSync(path.join(copy, 'cli.mjs'), '\n// synthetic drift\n');
   const module = await import(pathToFileURL(path.join(copy, 'process-host.mjs')));
   await assert.rejects(module.startProcessHost({dataDir: dir}), e => e.code === 'process_host_artifact');

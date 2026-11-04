@@ -36,7 +36,7 @@ Windows x64 开发包须先显式执行 `node --disallow-code-generation-from-st
 
 本机装配代码也可调用包内 `startProcessHost({dataDir,host,port,onCoreOutput})`，使用返回的 `close()` 停止、`exited` 等待最终状态。正常停止或启动客户端消失时，宿主给核心两秒关闭库；随后终止残留进程并查询整个 Job 的活跃计数，最多等待五秒取得空组，再确认核心进程句柄退出。只有两项都成立才输出 `process_group_empty`；强停、异常核心退出或畸形控制输入返回失败退出码，即使之后已确认空组。宿主自身被强制终止依靠唯一 Job 句柄关闭终止组内进程，此时没有空组回执，不能从宿主退出推断已取得退役证据。（观察依据：[Job 活跃进程计数](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_accounting_information)、[TerminateJobObject](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-terminatejobobject)。）
 
-当前实现是 DF02 的 Windows 进程容纳基础，尚未完成完整监督 journal、保护配置／发行制品权威、bootstrap、子 Job、worker 运行准入和旧域恢复；跨交互会话的实际部署验收仍待完成。构建清单不能替代发行签名与加载期间防替换，完整运行域未获批准。该入口没有设备出口、自动重启或任意 worker 启动接口，也不把组退出当作设备效果完成或资源释放。Linux cgroup 版本尚待实现，Linux 不生成该宿主且调用时明确拒绝。现有 `start` 保留用于保护态开发诊断。
+当前实现是 DF02 的 Windows 进程容纳基础，已增加下节核心bootstrap与持久绑定，完整监督journal、保护配置／发行制品权威、子Job、worker运行准入和旧域恢复仍未完成；跨交互会话的实际部署验收仍待完成。构建清单不能替代发行签名与加载期间防替换，完整运行域未获批准。该入口没有设备出口、自动重启或任意 worker 启动接口，也不把组退出当作设备效果完成或资源释放。Linux cgroup 版本尚待实现，Linux 不生成该宿主且调用时明确拒绝。现有 `start` 保留用于保护态开发诊断。
 
 本轮 Windows 真实进程测试覆盖正常数据库关闭、核心启动失败／崩溃、残留 detached 后代、宿主强停、启动客户端消失、控制管道断开／畸形及安装资产漂移。新增日志与实例锁后，相关13项Windows用例通过，另1项非Windows用例在当前平台跳过；没有以这些结果宣称 Linux、完整监督协议、浏览器或设备已验收。
 
@@ -53,6 +53,20 @@ SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 
 | `GET /.well-known/leafseamer-contracts` | 503，无正文；尚无完整就绪的契约处理组合 |
 
 健康接口支持 HEAD，禁止缓存；不暴露数据库路径、版本或凭据。启动时的 JSON 输出包含本次 boot 身份与监听端口，`ready` 为 false。未知路由不进入业务处理，带正文请求不读入无界缓冲；当前没有命令发送、自动重放或自动布防路径。
+
+### 核心bootstrap与启动绑定
+
+可信本机装配可向 `startProcessHost` 提供 `bootstrapPolicy`，普通 `supervise` 不接受批准正文、环境开关或HTTP授权。政策精确包含 `format: leafseamer-core-bootstrap-policy/1`、service_id、database_instance_id、artifact_manifest_ref（manifest_id／revision／digest）、platform_profile_ref（profile_id／revision）、policy_revision、bootstrap_timeout_ms（1—60000整数）及clock_backend_revision。引用由装配者选定；结构合法和挑战成功不构成profile的生产批准。当前仅有集成测试的合成profile，生产可信安装提供者尚未接入。
+
+`installedCoreDigest()` 校验包内清单后返回当前安装输入的摘要：对 `{controller_build_sha256,node_sha256}` 的JCS正文计算SHA-256并加 `sha256:` 前缀。前者是Controller构建清单文件摘要，后者是实际Node可执行文件摘要；政策artifact引用必须与该值相同。该局部组合没有发行签名、完整动态加载闭包或运行期间防替换证明，不能当正式ArtifactManifest审批。
+
+原生宿主在核心创建前提交启动意图、时钟域描述和非秘密政策；核心恢复后，经两条定向继承管道发送ASSIGNMENT并接收PROOF。32字节随机秘密与nonce不进argv、环境或日志；PROOF采用Windows CNG／Node标准HMAC-SHA256、固定域前缀和15字段JCS投影。管道帧使用规范JSON加单个LF，正文上限16KiB，禁止多帧、重复证明和其它方向。期限为同源QueryInterruptTimePrecise的绝对窗口，创建及应答耗时不会续期。原生秘密缓冲区退出时清零；JavaScript字符串不承诺确定性内存擦除。
+
+宿主核证明、实际Job归属和截止后，先在DELETE／EXTRA监督库提交closed的AdmissionReceipt，再发送ADMISSION。核心用SDK解析帧，核服务／数据库、制品／profile、描述摘要与完整启动意图，再用本机原生tick重核窗口。业务schema 11将完整意图、描述、回执和政策与当前service_boot同库不可变绑定，receipt／bootstrap／member_boot禁止跨启动重用。此事务成功后才监听；写入失败关闭业务库，监督已提交的准入历史保留。`bootstrap_authenticated=true`仅描述已完成的握手，客户端仍需观察核心实际监听；`runtime_admitted=false`与ready503保持，不授worker、设备或发送权。
+
+业务库运行 `migrate-storage` 显式升级至11，每步保留备份；已有监督日志v1使用 `upgrade-process-host --data-dir <绝对目录>` 显式升级至2。升级在核DDL、完整性、目录及所有者和无未决尝试后创建唯一备份并同事务新增bootstrap／admission表，既有记录不变；重复升级返回changed=false。host_meta的format继续标识未改变的身份布局，PRAGMA user_version标识schema 2。普通启动拒绝v1，不自动修复；未决尝试不能借升级、PID消失或新的挑战绕过旧域恢复。
+
+当前真实Windows集成覆盖双库绑定后监听、正常退出、错误制品／服务、旧业务库、HMAC／角色／重复帧／EOF／超时拒绝、写入故障、历史迁移和重放拒绝。完整RuntimeBinding、worker子域、保护配置来源、旧域退役恢复、Linux、生产profile及设备验收继续实施。
 
 ### 实例锁与启动记录
 

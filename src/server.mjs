@@ -7,12 +7,19 @@ import {startAuthenticationClock} from './auth-clock.mjs';
 import {createAuthenticationHttp} from './auth-http.mjs';
 import {loadGuiAssets} from './gui-assets.mjs';
 
-export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null} = {}) {
+export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null, coreBootstrap = null} = {}) {
   if (!['127.0.0.1', '::1'].includes(host) || !Number.isInteger(port) || port < 0 || port > 65535) throw new Error('listen_options');
   if (authenticationProvider !== null && typeof authenticationProvider !== 'function') throw new Error('authentication_provider');
   if (tls !== null && (!tls || Object.keys(tls).sort().join(',') !== 'cert,key,origin' || typeof tls.origin !== 'string')) throw new Error('tls_options');
   if (guiDirectory !== null && tls === null) throw new Error('gui_requires_https');
   const storage = openStorage(dataDir);
+  try {
+    if (coreBootstrap !== null) {
+      if (typeof coreBootstrap !== 'function' || Number(storage.identity.schema_revision) < 11) throw new Error('core_runtime_migration_required');
+      const {binding, policy} = await coreBootstrap(storage.identity);
+      storage.bindCoreRuntime(binding, policy);
+    }
+  } catch (error) { storage.close(); throw error; }
   let clock = null, authentication = null, sessions = null;
   if (storage.clockJournal) {
     try {

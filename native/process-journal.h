@@ -82,7 +82,8 @@ class ProcessJournal {
     require(code == SQLITE_DONE, "process_journal_schema"); return out;
   }
 public:
-  ProcessJournal(Instance& instance, bool initialize) {
+  bool upgraded = false;
+  ProcessJournal(Instance& instance, bool initialize, bool upgrade = false) {
     const std::wstring filename = instance.path + L"\\supervisor-journal.db";
     file.value = CreateFileW(filename.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &instance.security,
       initialize ? CREATE_NEW : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
@@ -108,20 +109,38 @@ public:
       Statement meta(db.get(), "INSERT INTO host_meta VALUES(1,'leafseamer-process-journal/1',?,?,?)");
       meta.bind(1, identifier()); meta.bind(2, instance.directoryId); meta.bind(3, instance.owner); meta.done(); execute("COMMIT");
     }
-    require(scalar("PRAGMA application_id") == "1280528456" && scalar("PRAGMA user_version") == "1", "process_journal_version");
+    require(scalar("PRAGMA application_id") == "1280528456", "process_journal_version");
+    const auto version = scalar("PRAGMA user_version");
+    require(version == "2" || (upgrade && version == "1"), version == "1" ? "process_journal_migration_required" : "process_journal_version");
     require(scalar("PRAGMA integrity_check") == "ok", "process_journal_integrity");
     Statement foreignKeys(db.get(), "PRAGMA foreign_key_check"); require(sqlite3_step(foreignKeys.value) == SQLITE_DONE, "process_journal_foreign_key");
     sqlite3* memory = nullptr; require(sqlite3_open(":memory:", &memory) == SQLITE_OK, "process_journal_schema");
     std::unique_ptr<sqlite3, DatabaseCloser> reference(memory);
-    require(sqlite3_exec(memory, processJournalSql, nullptr, nullptr, nullptr) == SQLITE_OK && schema(memory) == schema(db.get()), "process_journal_schema");
+    require(sqlite3_exec(memory, version == "1" ? processJournalV1Sql : processJournalSql, nullptr, nullptr, nullptr) == SQLITE_OK && schema(memory) == schema(db.get()), "process_journal_schema");
     Statement meta(db.get(), "SELECT directory_id,owner_sid FROM host_meta WHERE singleton=1");
     require(sqlite3_step(meta.value) == SQLITE_ROW && meta.text(0) == instance.directoryId && meta.text(1) == instance.owner, "process_journal_identity");
     require(sqlite3_step(meta.value) == SQLITE_DONE, "process_journal_identity");
     require(scalar("SELECT count(*) FROM core_attempt a LEFT JOIN core_exit e USING(attempt_id) WHERE e.attempt_id IS NULL") == "0", "process_recovery_required");
+    if (version == "1") {
+      // 显式升级才备份并改变DDL；未结束尝试不能通过升级绕开恢复。
+      const auto suffix = identifier(); const auto backupPath = instance.path + L"\\supervisor-before-v2-" + std::wstring(suffix.begin(), suffix.end()) + L".db";
+      Handle backupFile(CreateFileW(backupPath.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &instance.security, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+      require(backupFile.value != INVALID_HANDLE_VALUE, "process_journal_backup");
+      sqlite3* copy = nullptr; require(sqlite3_open_v2(utf8(backupPath).c_str(), &copy, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, nullptr) == SQLITE_OK, "process_journal_backup");
+      std::unique_ptr<sqlite3, DatabaseCloser> backup(copy);
+      sqlite3_backup* transfer = sqlite3_backup_init(copy, "main", db.get(), "main"); require(transfer != nullptr, "process_journal_backup");
+      const auto step = sqlite3_backup_step(transfer, -1), finish = sqlite3_backup_finish(transfer);
+      require(step == SQLITE_DONE && finish == SQLITE_OK, "process_journal_backup");
+      execute("BEGIN IMMEDIATE"); execute(processJournalUpgradeSql); execute("COMMIT");
+      require(sqlite3_exec(memory, processJournalUpgradeSql, nullptr, nullptr, nullptr) == SQLITE_OK && schema(memory) == schema(db.get()), "process_journal_schema");
+      upgraded = true;
+    }
   }
-  void begin(const std::string& id, const std::wstring& job) {
+  void begin(const std::string& id, const std::wstring& job, const std::string& policy = "", const std::string& descriptor = "", const std::string& intent = "") {
     execute("BEGIN IMMEDIATE"); Statement q(db.get(), "INSERT INTO core_attempt VALUES(?,?,?)");
-    q.bind(1, id); q.bind(2, utf8(job)); q.bind(3, std::to_string(GetCurrentProcessId())); q.done(); execute("COMMIT");
+    q.bind(1, id); q.bind(2, utf8(job)); q.bind(3, std::to_string(GetCurrentProcessId())); q.done();
+    if (!policy.empty()) { Statement boot(db.get(), "INSERT INTO core_bootstrap VALUES(?,?,?,?)"); boot.bind(1, id); boot.bind(2, policy); boot.bind(3, descriptor); boot.bind(4, intent); boot.done(); }
+    execute("COMMIT");
   }
   void observed(const std::string& id, HANDLE process, DWORD pid, HANDLE image) {
     FILETIME created{}, exited{}, kernel{}, user{};
@@ -133,5 +152,9 @@ public:
   void retired(const std::string& id, DWORD exit, bool forced) {
     execute("BEGIN IMMEDIATE"); Statement q(db.get(), "INSERT INTO core_exit VALUES(?,?,0,?)");
     q.bind(1, id); q.bind(2, std::to_string(exit)); q.bind(3, forced ? "1" : "0"); q.done(); execute("COMMIT");
+  }
+  void admitted(const std::string& id, const std::string& receiptId, const std::string& receipt) {
+    execute("BEGIN IMMEDIATE"); Statement q(db.get(), "INSERT INTO core_admission VALUES(?,?,?)");
+    q.bind(1, id); q.bind(2, receiptId); q.bind(3, receipt); q.done(); execute("COMMIT");
   }
 };
