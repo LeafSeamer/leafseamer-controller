@@ -6,6 +6,7 @@ class CoreControl {
   runtime::Protected& protectedRuntime;
   bootstrap::Domain coreDomain;
   HANDLE rootJob=nullptr;
+  DWORD corePid=0;
   loading::Store loads;
   std::unique_ptr<installation::Client> installer;
   struct MaterializationJob {std::string launch,digest;bool done=false;installation::Observation result;};
@@ -26,7 +27,7 @@ class CoreControl {
       if(stored->state=="retired"){it=workers.erase(it);continue;}
       if(stored->state=="retiring"||stored->state=="indeterminate"){process.stop();++it;continue;}
       const bool permitted=fenceSynchronized&&journal.workerPermission(launch,it->first,stored->digest).empty();
-      if(!permitted||!process.alive()||(stored->state=="admitted_closed"&&!process.quiet())){fprintf(stderr,"{\"event\":\"worker_gate_failure\",\"permitted\":%d,\"alive\":%d}\n",permitted,process.alive());fflush(stderr);process.stop();journal.failWorker(launch,it->first);}
+      if(!permitted||!process.alive()||(stored->state=="admitted_closed"&&(!process.quiet()||!process.moduleCurrent()))){fprintf(stderr,"{\"event\":\"worker_gate_failure\",\"permitted\":%d,\"alive\":%d}\n",permitted,process.alive());fflush(stderr);process.stop();journal.failWorker(launch,it->first);}
       else if(stored->state=="awaiting_bootstrap"&&process.proofDone()){
         if(!process.qualified()){process.stop();journal.failWorker(launch,it->first);}
         else{const auto receipt=process.exchange.receipt(process.observationId);journal.admitWorker(launch,it->first,bootstrap::object(receipt));
@@ -248,7 +249,7 @@ class CoreControl {
                 if(failure.empty()){
                   const auto group=groups.find(target);if(group==groups.end()||!group->second->unusedAndEmpty())failure="invalid_binding";
                   else{
-                    auto process=std::make_unique<WorkerProcess>(owner,*group->second,rootJob,protectedRuntime,coreDomain,target,*stored);
+                    auto process=std::make_unique<WorkerProcess>(owner,*group->second,rootJob,protectedRuntime,coreDomain,target,*stored,*loaded->materials,corePid);
                     if(!grant.current()||tick()>=observation.result.expires)failure="expired";
                     else{
                       journal.beginWorkerCreation(launch,target,process->creationId,process->creation(grant.authorization,loadId,loaded->materials->rootIdentity));
@@ -376,7 +377,7 @@ public:
     require(admitted && GetTickCount64() < deadline, "control_timeout");
     BOOL belongs = FALSE;
     require(WaitForSingleObject(process, 0) == WAIT_TIMEOUT && IsProcessInJob(process, job, &belongs) && belongs, "control_process");
-    rootJob=job;pollWorkers(journal);
+    rootJob=job;corePid=pid;pollWorkers(journal);
     const auto wait = WaitForSingleObject(event.value, 0); if (wait == WAIT_TIMEOUT) return;
     require(wait == WAIT_OBJECT_0 && pending, "control_event"); DWORD count = 0;
     if (!connectedInline) require(GetOverlappedResult(pipe.value, &io, &count, FALSE) != 0, "control_closed");

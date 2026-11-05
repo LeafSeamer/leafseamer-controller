@@ -7,7 +7,9 @@ import {openNativeClock} from '../../dist/native-clock.mjs';
 import {createCoreBootstrapChannel,verifyCoreAdmission} from '../../dist/core-bootstrap.mjs';
 import {openStorage} from '../../dist/storage.mjs';
 import {authenticated} from './extension-auth.mjs';
-let business=null,intakeClient=null,manager=null;
+let business=null,intakeClient=null,manager=null,moduleClient=null,intakeTail=Promise.resolve();
+// 运行刷新与启动授权共享单请求安装连接；装配层串行查询，不重发或复用旧观察。
+function queryIntake(request){const result=intakeTail.then(()=>intakeClient.queryIntake(request));intakeTail=result.catch(()=>{});return result;}
 const args=process.argv.slice(3),options=Object.fromEntries(Array.from({length:args.length/2},(_,i)=>[args[i*2],args[i*2+1]]));
 const report=value=>process.stderr.write(JSON.stringify(value)+'\n');
 const boot=createCoreBootstrapChannel(process.stdin,process.stdout,{timeoutMs:10000});
@@ -41,7 +43,7 @@ if(input.runtime){
  const content=input.runtime.content;business.extensionInstallations.bindSource({identity:{host_installation_id:content.receipt.host_installation_id,authority_service_id:content.intake_ref.authority_service_id,database_instance_id:content.intake_ref.database_instance_id},
   async describeIntake(request){if(request.intake_id!==content.intake_ref.object_id||request.target_authority_service_id!==policy.service_id)throw new Error('fixture_intake_binding');
    // 实际独立安装IPC查询；回执绑定已封存manifest/inventory的摘要，无须先登记worker。
-   const response=await intakeClient.queryIntake(request);if(response.result?.status!=='available'||canonicalize(response.result.receipt)!==canonicalize(content.receipt))throw new Error('fixture_intake_unavailable');
+   const response=await queryIntake(request);if(response.result?.status!=='available'||canonicalize(response.result.receipt)!==canonicalize(content.receipt))throw new Error('fixture_intake_unavailable');
    return {status:'available',content};}});
  business.workerLaunches.runtime.bindSource(source);business.extensionInstallations.bindRuntimeSource(source);business.workerLaunches.authorization.bindSource(source);
  manager=await authenticated({after(){}},{store:business});
@@ -76,12 +78,24 @@ try{
     }
     report({event:'admitted',record:current});
     if(business){const adopted=await business.workerLaunches.runtime.adopt(key);business.workerLaunches.runtime.current(key);report({event:'runtime-adopted',binding:adopted});}
+    if(input.mode.startsWith('supervisor_create_module')){
+      moduleClient=await business.workerLaunches.openModule(key);const device=intent.object_scope.device_ids[0];
+      const connected=await moduleClient.connectReadOnly(device),first=await moduleClient.captureBaseline(device),second=await moduleClient.captureBaseline(device);
+      const disconnected=await moduleClient.stopReadOnly(device);
+      try{await moduleClient.captureBaseline(device);report({event:'module-disconnected-read',code:'unexpected_success'});}
+      catch(error){report({event:'module-disconnected-read',code:error.code});}
+      const reconnected=await moduleClient.connectReadOnly(device),third=await moduleClient.captureBaseline(device);
+      report({event:'module-samples',connected,first,second,disconnected,reconnected,third});
+    }
     let observed;if(current.state==='admitted_closed'){observed=await source.observeWorker(intent);source.assertWorkerObservation(observed);report({event:'observed',receipt:observed.receipt});
       try{source.assertWorkerObservation(structuredClone(observed));report({event:'copied-observation',code:'unexpected_success'});}catch(error){report({event:'copied-observation',code:error.code});}}
     try{if(business)await business.workerLaunches.authorization.create(key,{load_id:held.load_id,...proof});else await source.createWorker({key,authorization:authorization(),load_id:held.load_id,...proof});report({event:'duplicate',code:'unexpected_success'});}
     catch(error){report({event:'duplicate',code:error.code});}
     if(business){manager.sessions.revokeExtensionApproval(manager.token(),{request_id:'runtime.deny',approval_ref:input.runtime.approved.approval_ref,reason:'人员撤销'});await business.workerLaunches.authorization.synchronize();}
     else if(input.mode!=='supervisor_create_deny_pending')await source.putFence(fence('2','deny'));report({event:'denied',record:await source.queryLaunch(key)});
+    if(moduleClient){try{await moduleClient.captureBaseline(intent.object_scope.device_ids[0]);report({event:'module-revoked',code:'unexpected_success'});}
+      catch(error){report({event:'module-revoked',code:error.code});}}
+
     if(observed){try{source.assertWorkerObservation(observed);report({event:'withdrawn-observation',code:'unexpected_success'});}catch(error){report({event:'withdrawn-observation',code:error.code});}}
     if(business){try{business.workerLaunches.runtime.current(key);}catch{}report({event:'runtime-withdrawn',binding:business.workerLaunches.runtime.query(key)});}
     const retirementDeadline=performance.now()+5000;
@@ -105,6 +119,12 @@ try{
   await source.putFence(fence('2','deny'));
   try{await source.prepareWorkerMaterialization(key);report({event:'revoked',code:'unexpected_success'});}catch(error){report({event:'revoked',code:error.code});}
  }
-}catch(error){report({event:'unavailable',code:error.code,errors:error.errors?.map(e=>e.code)});}
+}catch(error){report({event:'unavailable',code:error.code,errors:error.errors?.map(e=>e.code)});
+ if(input.mode.startsWith('supervisor_create_module')){
+  const until=performance.now()+5000;
+  for(;;){try{report({event:'module-failed-retired',result:await source.retireWorker(intent,'revoked')});break;}
+   catch(error){if(error.code!=='supervisor_indeterminate'||performance.now()>=until)throw error;await delay(25);}}
+ }
+}
 report({event:'done',record:await source.queryLaunch(key)});
 process.stdin.setEncoding('utf8').on('data',data=>{if(data==='stop\n'){manager?.real.stop();intakeClient?.close();business?.close();source.close();process.stdin.destroy();}});process.stdin.resume();

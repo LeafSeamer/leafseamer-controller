@@ -106,6 +106,7 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
    available();const value=prepared(key),entry=value&&active.get(value.intent.launch_id);need(entry,'worker_runtime_unavailable');
    try{check(entry);return view(entry.row);}catch(error){withdraw(entry,error?.code?.startsWith('extension_')?'approval_changed':'source_changed');throw error;}
   },
+  invalidate(key){available();const value=prepared(key),entry=value&&active.get(value.intent.launch_id);if(entry)withdraw(entry,'source_changed');},
   close(){if(closed)return;closed=true;unsubscribe?.();for(const entry of [...active.values()])withdraw(entry,'closed');}
  });
 }

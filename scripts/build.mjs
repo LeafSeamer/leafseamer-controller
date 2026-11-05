@@ -12,6 +12,7 @@ for (const name of ['extension-installation-store.mjs','extension-installation.s
 for (const name of ['configuration-validator.mjs','configuration-worker.mjs','configuration-schema.mjs']) files.push([name,await fs.readFile(path.join(root,'src',name))]);
 for (const name of ['extension-configuration-store.mjs','extension-configuration.sql','extension-role-store.mjs','extension-role-resolution.mjs','extension-role.sql','extension-review-store.mjs','extension-review-permissions.mjs','extension-review.sql','extension-approval-store.mjs','extension-approval.sql','extension-capabilities.mjs','extension-capabilities.sql','extension-approval-state.mjs','extension-launch-binding.mjs','launch-content.mjs']) files.push([name,await fs.readFile(path.join(root,'src',name))]);
 files.push(['device-worker-entry.mjs',await fs.readFile(path.join(root,'src/device-worker-entry.mjs'))]);
+for(const name of ['device-module-channel.mjs','device-module-client.mjs','device-module-host.mjs','device-module-store.mjs','device-module.sql','simulator-module.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 files.push(['materialized-content.mjs', await fs.readFile(path.join(root, 'src/materialized-content.mjs'))]);
 files.push(['auth-http.mjs', await fs.readFile(path.join(root, 'src/auth-http.mjs'))]);
 files.push(['gui-assets.mjs', await fs.readFile(path.join(root, 'src/gui-assets.mjs'))]);
@@ -63,6 +64,7 @@ if (process.platform === 'win32') {
       host.binary_sha256 !== hash(hostBinary) || host.source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-host.cc'))) ||
       host.worker_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-worker.h'))) ||
       host.creation_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-creation.h'))) ||
+      host.module_link_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-module-link.h'))) ||
       host.journal_creation_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-journal-creation.sql'))) ||
       host.journal_v4_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-journal-v4.sql'))) ||
       host.runtime_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-runtime.h'))) ||

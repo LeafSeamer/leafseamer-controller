@@ -55,6 +55,7 @@ static DWORD active(HANDLE job) {
   require(QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &info, sizeof(info), nullptr) != 0, "group_observation_failed");
   return info.ActiveProcesses;
 }
+#include "process-module-link.h"
 #include "process-creation.h"
 #include "process-control.h"
 int wmain(int argc, wchar_t** argv) {

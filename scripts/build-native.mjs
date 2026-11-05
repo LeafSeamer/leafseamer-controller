@@ -55,6 +55,7 @@ if (process.platform === 'win32') {
     source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-host.cc'))),
     worker_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-worker.h'))),
     creation_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-creation.h'))),
+    module_link_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-module-link.h'))),
     journal_creation_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal-creation.sql'))),
     journal_v4_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal-v4.sql'))),
     runtime_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-runtime.h'))),

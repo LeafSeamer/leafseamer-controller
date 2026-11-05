@@ -30,7 +30,7 @@ inline std::string quote(sqlite3* db,const std::string& body,const std::string& 
 }
 struct Materials {
   std::unique_ptr<content::Pin> pin;
-  std::string rootIdentity,entryFile,policyFile,manifestDigest,artifactDigest;
+  std::string rootIdentity,entryFile,policyFile,manifestDigest,artifactDigest,moduleContext;
   std::wstring root,entryPath;
   Materials(const std::string& bytes,const std::string& intent){
     using namespace bootstrap;installation::Json json;installation::Fields f(json.db,bytes),target(json.db,intent);
@@ -57,6 +57,8 @@ struct Materials {
     }
     require(entryFound&&policyFound,"load_entry");pin=std::make_unique<content::Pin>(wide(rootPath),files,3000);
     require(utf8(pin->rootIdentity)==rootIdentity,"load_root_identity");root=pin->root;
+    moduleContext=object({{"root_path",quote(json.db,bytes,"$.root_path")},{"root_identity",string(rootIdentity)},
+      {"manifest",manifest},{"inventory",inventory}});
   }
 };
 struct Record {

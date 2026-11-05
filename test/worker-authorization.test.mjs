@@ -98,7 +98,7 @@ test('监督器已经退役的实例进入永久deny，审批仍有效也不能�
 });
 test('schema22备份升级23只保留受理准备历史，不补造授权或ACK',{timeout:20000},async t=>{
  const x=await ready(t,{revision:22});await x.accept();await x.f.store.workerLaunches.prepare(Buffer.from(JSON.stringify(x.intent)));close(x);
- assert.equal((await migrateStorage(x.f.dir)).schema_revision,'23');assert.ok(fs.readdirSync(x.f.dir).some(name=>name.startsWith('controller-before-v23-')));
+ assert.equal((await migrateStorage(x.f.dir,23)).schema_revision,'23');assert.ok(fs.readdirSync(x.f.dir).some(name=>name.startsWith('controller-before-v23-')));
  x.f.reopen();const key={launch_id:x.intent.launch_id,launch_intent_digest:hash(x.intent)};
  assert.throws(()=>x.f.store.workerLaunches.authorization.authorize(key),/preparation/);x.f.close();inspect(x.f.dir,db=>{
   assert.equal(db.prepare('SELECT count(*) FROM extension_activation').pluck().get(),1);

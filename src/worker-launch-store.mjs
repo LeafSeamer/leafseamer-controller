@@ -2,6 +2,8 @@ import crypto from 'node:crypto';
 import {workerDependencies,currentWorkerDependencies} from './worker-dependencies.mjs';
 import {workerRuntimeStore} from './worker-runtime-store.mjs';
 import {workerAuthorizationStore} from './worker-authorization-store.mjs';
+import {connectDeviceModule} from './device-module-client.mjs';
+import {deviceModuleJournal} from './device-module-store.mjs';
 import canonicalize from 'canonicalize';
 import {decodeWorkerIntent} from './sdk/worker-runtime.mjs';
 
@@ -16,7 +18,7 @@ const rows=(db,sql,...args)=>{const query=db.prepare(sql),names=query.columns().
 
 // 启动意图准备属于核心内部writer，不是安装审批或LaunchAuthorization提供者。
 export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attachStop){
-  let pending=0,acquiring=0,runtime=null,authorization=null;const contentPins=new Set();attachStop?.(()=>{runtime?.close();authorization?.close();for(const pin of contentPins)pin.close();});
+  let pending=0,acquiring=0,runtime=null,authorization=null;const modules=new Map(),contentPins=new Set();attachStop?.(()=>{for(const module of modules.values())module?.close();runtime?.close();authorization?.close();for(const pin of contentPins)pin.close();});
   const available=()=>{need(isOpen()&&db.open,'worker_launch_closed');need(!db.inTransaction,'worker_launch_outer_transaction');};
   const fields='launch_id,intent_digest,preparation_id,transaction_id,service_boot_id,intent_jcs';
   function view(row){
@@ -51,6 +53,18 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     prepared(value){const selected=key(value),row=find(selected.launch_id);if(row)need(row.intent_digest===selected.launch_intent_digest,'worker_launch_conflict');return view(row);},
     all(){return rows(db,'SELECT '+fields+' FROM worker_launch_preparation WHERE service_boot_id=? ORDER BY launch_id COLLATE BINARY',bootId).map(view);}}):null;
   return Object.freeze({runtime,authorization,
+    async openModule(value){
+      available();need(Number(service.schema_revision)>=24,'worker_module_migration_required');const selected=key(value),active=runtime.current(selected);need(!modules.has(selected.launch_id)&&modules.size<4,'worker_module_capacity');
+      const reference=active.binding.launch_intent.extension_binding.configuration_ref;
+      const row=db.prepare('SELECT body_jcs,body_digest FROM extension_configuration WHERE configuration_id=? AND revision=?').raw().get(reference.object_id,Number(reference.revision));
+      need(row&&row[1]===reference.digest,'worker_module_configuration');const body=JSON.parse(row[0]);need(canonicalize(body)===row[0]&&hash(body)===row[1],'worker_module_configuration');
+      modules.set(selected.launch_id,null);
+      const current=()=>runtime.current(selected);
+      let module;
+      try{module=await connectDeviceModule({current,invalidate:()=>runtime.invalidate(selected),configuration:{reference,value:body.configuration},journal:deviceModuleJournal(db,current),onClose:()=>modules.delete(selected.launch_id)});
+        available();current();modules.set(selected.launch_id,module);return module;
+      }catch(error){modules.delete(selected.launch_id);module?.close();try{runtime.invalidate(selected);}catch{}throw error;}
+    },
     async prepare(input){
       available();need(Buffer.isBuffer(input)&&input.length<=262144,'worker_launch_input');
       const bytes=Buffer.from(input);
