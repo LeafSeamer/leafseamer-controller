@@ -7,6 +7,9 @@ import {identityStore} from './identity-store.mjs';
 import {authenticationClockStore} from './auth-clock-store.mjs';
 import {registerDevice} from './device-registry-store.mjs';
 import {sessionStore} from './session-store.mjs';
+import {configureVirtualDevice} from './worker-dependencies.mjs';
+import {workerLaunchStore} from './worker-launch-store.mjs';
+import {extensionInstallationStore} from './extension-installation-store.mjs';
 import {initializeLocalPermissions, localPermissionStore} from './local-permission-store.mjs';
 
 const sql = fs.readFileSync(new URL('./storage.sql', import.meta.url), 'utf8');
@@ -31,6 +34,30 @@ const deviceSql = fs.readFileSync(new URL('./device-registry.sql', import.meta.u
 const deviceDigest = 'sha256:' + crypto.createHash('sha256').update(deviceSql).digest('hex');
 const runtimeSql = fs.readFileSync(new URL('./core-runtime.sql', import.meta.url), 'utf8');
 const runtimeDigest = 'sha256:' + crypto.createHash('sha256').update(runtimeSql).digest('hex');
+const workerSql = fs.readFileSync(new URL('./worker-launch.sql', import.meta.url), 'utf8');
+const workerDigest = 'sha256:' + crypto.createHash('sha256').update(workerSql).digest('hex');
+const extensionSql = fs.readFileSync(new URL('./extension-installation.sql', import.meta.url), 'utf8');
+const extensionDigest = 'sha256:' + crypto.createHash('sha256').update(extensionSql).digest('hex');
+const configurationSql = fs.readFileSync(new URL('./extension-configuration.sql', import.meta.url), 'utf8');
+const configurationDigest = 'sha256:' + crypto.createHash('sha256').update(configurationSql).digest('hex');
+const roleSql = fs.readFileSync(new URL('./extension-role.sql', import.meta.url), 'utf8');
+const roleDigest = 'sha256:' + crypto.createHash('sha256').update(roleSql).digest('hex');
+const reviewSql = fs.readFileSync(new URL('./extension-review.sql', import.meta.url), 'utf8');
+const reviewDigest = 'sha256:' + crypto.createHash('sha256').update(reviewSql).digest('hex');
+const approvalSql = fs.readFileSync(new URL('./extension-approval.sql', import.meta.url), 'utf8');
+const approvalDigest = 'sha256:' + crypto.createHash('sha256').update(approvalSql).digest('hex');
+const capabilitySql = fs.readFileSync(new URL('./extension-capabilities.sql', import.meta.url), 'utf8');
+const capabilityDigest = 'sha256:' + crypto.createHash('sha256').update(capabilitySql).digest('hex');
+const workerRuntimeSql=fs.readFileSync(new URL('./worker-runtime.sql',import.meta.url),'utf8');
+const workerRuntimeDigest='sha256:'+crypto.createHash('sha256').update(workerRuntimeSql).digest('hex');
+const dependencySql=fs.readFileSync(new URL('./worker-dependencies.sql',import.meta.url),'utf8');
+const dependencyDigest='sha256:'+crypto.createHash('sha256').update(dependencySql).digest('hex');
+const planSql=fs.readFileSync(new URL('./extension-plan.sql',import.meta.url),'utf8');
+const planDigest='sha256:'+crypto.createHash('sha256').update(planSql).digest('hex');
+const activationSql=fs.readFileSync(new URL('./extension-activation.sql',import.meta.url),'utf8');
+const activationDigest='sha256:'+crypto.createHash('sha256').update(activationSql).digest('hex');
+const authorizationSql=fs.readFileSync(new URL('./worker-authorization.sql',import.meta.url),'utf8');
+const authorizationDigest='sha256:'+crypto.createHash('sha256').update(authorizationSql).digest('hex');
 const applicationId = 0x4c53434c;
 const engine = Object.freeze({version: '3.53.4', source: '2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc'});
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -100,18 +127,18 @@ export function initializeStorage(dataDir) {
 }
 function validateStorage(db) {
   const revision = pragma(db, 'user_version');
-  require(pragma(db, 'application_id') === applicationId && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(revision), 'database_version_mismatch');
+  require(pragma(db, 'application_id') === applicationId && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23].includes(revision), 'database_version_mismatch');
   require(pragma(db, 'journal_mode') === 'wal', 'journal_mode_mismatch');
   pragma(db, 'synchronous = FULL');
   require(pragma(db, 'synchronous') === 2, 'synchronous_mismatch');
   require(pragma(db, 'quick_check') === 'ok' && rows(db, 'PRAGMA foreign_key_check').length === 0, 'database_integrity');
   const migrations = rows(db, 'SELECT * FROM schema_migration ORDER BY CAST(to_revision AS INTEGER)');
   require(migrations.length === revision && migrations[0].from_revision === '0' && migrations[0].to_revision === '1' && migrations[0].state === 'committed' && migrations[0].script_digest === scriptDigest, 'migration_mismatch');
-  for (let i = 1; i < revision; i++) require(migrations[i].from_revision === String(i) && migrations[i].to_revision === String(i + 1) && migrations[i].state === 'committed' && migrations[i].script_digest === [scriptDigest, identityDigest, clockDigest, authClockDigest, sessionDigest, tokenDigest, permissionDigest, contextDigest, admissionDigest, deviceDigest, runtimeDigest][i] && /^sha256:[0-9a-f]{64}$/.test(migrations[i].backup_ref), 'migration_mismatch');
+  for (let i = 1; i < revision; i++) require(migrations[i].from_revision === String(i) && migrations[i].to_revision === String(i + 1) && migrations[i].state === 'committed' && migrations[i].script_digest === [scriptDigest, identityDigest, clockDigest, authClockDigest, sessionDigest, tokenDigest, permissionDigest, contextDigest, admissionDigest, deviceDigest, runtimeDigest, workerDigest, extensionDigest, configurationDigest, roleDigest, reviewDigest, approvalDigest, capabilityDigest, workerRuntimeDigest, dependencyDigest, planDigest, activationDigest, authorizationDigest][i] && /^sha256:[0-9a-f]{64}$/.test(migrations[i].backup_ref), 'migration_mismatch');
   return identity(db, String(revision));
 }
-export async function migrateStorage(dataDir, targetRevision = 11) {
-  require([2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(targetRevision), 'migration_target');
+export async function migrateStorage(dataDir, targetRevision = 23) {
+  require([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23].includes(targetRevision), 'migration_target');
   const file = filename(dataDir);
   let db;
   try {
@@ -130,10 +157,10 @@ export async function migrateStorage(dataDir, targetRevision = 11) {
       pragma(db, 'foreign_keys = OFF');
       require(pragma(db, 'foreign_keys') === 0, 'migration_setup_failed');
       db.transaction(() => {
-        db.exec([identitySql, clockSql, authClockSql, sessionSql, tokenSql, permissionSql, contextSql, admissionSql, deviceSql, runtimeSql][next - 2]);
+        db.exec([identitySql, clockSql, authClockSql, sessionSql, tokenSql, permissionSql, contextSql, admissionSql, deviceSql, runtimeSql, workerSql, extensionSql, configurationSql, roleSql, reviewSql, approvalSql, capabilitySql, workerRuntimeSql, dependencySql, planSql, activationSql, authorizationSql][next - 2]);
         if (next === 7) initializeLocalPermissions(db, state);
         db.prepare("INSERT INTO schema_migration VALUES (?, ?, ?, ?, ?, 'committed', ?)")
-          .run(crypto.randomUUID(), String(next - 1), String(next), [identityDigest, clockDigest, authClockDigest, sessionDigest, tokenDigest, permissionDigest, contextDigest, admissionDigest, deviceDigest, runtimeDigest][next - 2], backupRef, crypto.randomUUID());
+          .run(crypto.randomUUID(), String(next - 1), String(next), [identityDigest, clockDigest, authClockDigest, sessionDigest, tokenDigest, permissionDigest, contextDigest, admissionDigest, deviceDigest, runtimeDigest, workerDigest, extensionDigest, configurationDigest, roleDigest, reviewDigest, approvalDigest, capabilityDigest, workerRuntimeDigest, dependencyDigest, planDigest, activationDigest, authorizationDigest][next - 2], backupRef, crypto.randomUUID());
         pragma(db, 'user_version = ' + next);
         require(rows(db, 'PRAGMA foreign_key_check').length === 0, 'migration_integrity');
       }).immediate();
@@ -191,7 +218,11 @@ export function openStorage(dataDir) {
     }).immediate();
     let closed = false, sessions = null, sessionClock = null, sessionAuthority = null;
     const localAuthority = Number(state.schema_revision) >= 7 ? localPermissionStore(db, state) : null;
+    let createExtensionManagement,workerExtensionSource,stopWorkerContent;
+    const extensionInstallations=Number(state.schema_revision)>=13?extensionInstallationStore(db,state,()=>!closed,create=>{createExtensionManagement=create;},source=>{workerExtensionSource=source;},bootId):null;
+    const workerLaunches=Number(state.schema_revision)>=12?workerLaunchStore(db,state,bootId,()=>!closed,workerExtensionSource,stop=>{stopWorkerContent=stop;}):null;
     return Object.freeze({identity: state, serviceBootId: bootId, engine,
+      configureVirtualDevice(input){require(!closed,'storage_closed');return configureVirtualDevice(db,state,input);},
       bindCoreRuntime(binding, policy) {
         require(!closed && Number(state.schema_revision) >= 11, 'core_runtime_migration_required');
         require(binding.intent.service_id === state.service_id && policy.service_id === state.service_id &&
@@ -204,6 +235,8 @@ export function openStorage(dataDir) {
         }).immediate();
       },
       registerDevice(input) { require(!closed && Number(state.schema_revision) >= 10, 'device_migration_required'); return registerDevice(db, state, input); },
+      workerLaunches,
+      extensionInstallations,
       enrollment: state.schema_revision !== '1' ? identityStore(db, bootId, localAuthority ? state : null) : null,
       clockJournal: Number(state.schema_revision) >= 3 ? clockJournal(db, bootId) : null,
       authenticationClock: Number(state.schema_revision) >= 4 ? authenticationClockStore(db, {service_id: state.service_id, service_boot_id: bootId}) : null,
@@ -213,10 +246,10 @@ export function openStorage(dataDir) {
         require(!sessions || sessionAuthority === authority, 'session_authority_binding');
         sessionClock = clock; sessionAuthority = authority;
         sessions ??= sessionStore(db, state.service_id, clock, authority, Number(state.schema_revision) >= 6,
-          Number(state.schema_revision) >= 8 ? {service: state, bootId} : null); return sessions;
+          Number(state.schema_revision) >= 8 ? {service: state, bootId} : null,authority===localAuthority?createExtensionManagement:null); return sessions;
       },
       close() {
-        if (closed) return; closed = true; sessions?.stop();
+        if (closed) return; closed = true; stopWorkerContent?.(); sessions?.stop();
         try {
           db.transaction(() => {
             if (state.schema_revision !== '1') db.prepare("UPDATE first_admin_challenge SET state = 'invalidated' WHERE service_boot_id = ? AND state = 'pending'").run(bootId);

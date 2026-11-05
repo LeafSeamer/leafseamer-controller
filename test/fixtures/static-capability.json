@@ -1,0 +1,150 @@
+{
+  "template_version": "extension-capability-template/1",
+  "template_id": "synthetic.device",
+  "device_role": "device",
+  "device_kind": "simulator",
+  "actions": [
+    {
+      "action_id": "get",
+      "capability_version": "1.0.0",
+      "parameters_schema": {
+        "schema_id": "empty.object",
+        "dialect": "https://json-schema.org/draft/2020-12/schema",
+        "document": {
+          "type": "object",
+          "additionalProperties": false
+        },
+        "digest": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e"
+      },
+      "result_schema": {
+        "schema_id": "empty.object",
+        "dialect": "https://json-schema.org/draft/2020-12/schema",
+        "document": {
+          "type": "object",
+          "additionalProperties": false
+        },
+        "digest": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e"
+      },
+      "resources": [
+        "device"
+      ],
+      "completion": {
+        "supported": [
+          "sent"
+        ],
+        "default": "sent",
+        "evidence_policy_id": "synthetic.sent"
+      },
+      "cancel": {
+        "mode": "before_dispatch_only"
+      },
+      "retry": {
+        "mode": "never"
+      },
+      "preconditions_schema": {
+        "schema_id": "empty.object",
+        "dialect": "https://json-schema.org/draft/2020-12/schema",
+        "document": {
+          "type": "object",
+          "additionalProperties": false
+        },
+        "digest": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e"
+      },
+      "read_set": [],
+      "write_set": [
+        "device"
+      ],
+      "evidence_timeout_ms": 1000,
+      "limits_profile": "synthetic.limits",
+      "platforms": [
+        {
+          "os": "linux",
+          "arch": "x64",
+          "status": "untested"
+        },
+        {
+          "os": "windows",
+          "arch": "x64",
+          "status": "untested"
+        }
+      ],
+      "dependencies": []
+    },
+    {
+      "action_id": "set",
+      "capability_version": "1.0.0",
+      "parameters_schema": {
+        "schema_id": "empty.object",
+        "dialect": "https://json-schema.org/draft/2020-12/schema",
+        "document": {
+          "type": "object",
+          "additionalProperties": false
+        },
+        "digest": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e"
+      },
+      "result_schema": {
+        "schema_id": "empty.object",
+        "dialect": "https://json-schema.org/draft/2020-12/schema",
+        "document": {
+          "type": "object",
+          "additionalProperties": false
+        },
+        "digest": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e"
+      },
+      "resources": [
+        "device"
+      ],
+      "completion": {
+        "supported": [
+          "sent"
+        ],
+        "default": "sent",
+        "evidence_policy_id": "synthetic.sent"
+      },
+      "cancel": {
+        "mode": "before_dispatch_only"
+      },
+      "retry": {
+        "mode": "never"
+      },
+      "preconditions_schema": {
+        "schema_id": "empty.object",
+        "dialect": "https://json-schema.org/draft/2020-12/schema",
+        "document": {
+          "type": "object",
+          "additionalProperties": false
+        },
+        "digest": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e"
+      },
+      "read_set": [],
+      "write_set": [
+        "device"
+      ],
+      "evidence_timeout_ms": 1000,
+      "limits_profile": "synthetic.limits",
+      "platforms": [
+        {
+          "os": "linux",
+          "arch": "x64",
+          "status": "untested"
+        },
+        {
+          "os": "windows",
+          "arch": "x64",
+          "status": "untested"
+        }
+      ],
+      "dependencies": []
+    }
+  ],
+  "triggers": [],
+  "state_schema": {
+    "schema_id": "empty.object",
+    "dialect": "https://json-schema.org/draft/2020-12/schema",
+    "document": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "digest": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e"
+  }
+}

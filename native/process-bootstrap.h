@@ -29,7 +29,7 @@ struct Hash {
   }
   ~Hash() { if (state) BCryptDestroyHash(state); if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0); }
   std::array<unsigned char, 32> finish(const std::string& bytes) {
-    require(bytes.size() <= 65536 && BCryptHashData(state, reinterpret_cast<PUCHAR>(const_cast<char*>(bytes.data())), static_cast<ULONG>(bytes.size()), 0) == 0, "bootstrap_crypto");
+    require(bytes.size() <= 8388608 && BCryptHashData(state, reinterpret_cast<PUCHAR>(const_cast<char*>(bytes.data())), static_cast<ULONG>(bytes.size()), 0) == 0, "bootstrap_crypto");
     std::array<unsigned char, 32> value{}; require(BCryptFinishHash(state, value.data(), static_cast<ULONG>(value.size()), 0) == 0, "bootstrap_crypto"); return value;
   }
 };
@@ -117,6 +117,12 @@ static bool equal(const std::string& a, const std::string& b) {
   for (size_t i = 0; i < a.size(); ++i) difference |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
   return difference == 0;
 }
+struct Domain {
+  const Policy& policy;
+  std::string supervisor,generation,descriptor,domainId,descriptorDigest;
+  Domain(const Policy& p,const std::string& instance,const std::string& currentGeneration,const std::string& body,const std::string& id,const std::string& digest)
+    :policy(p),supervisor(instance),generation(currentGeneration),descriptor(body),domainId(id),descriptorDigest(digest){}
+};
 struct Exchange {
   const Policy& policy; Secret secret, nonce;
   std::string supervisor, generation, member, memberBoot, bootstrapId, channel, challenge, receiptId, descriptor, intent, containment;
@@ -143,6 +149,15 @@ struct Exchange {
     common = {{"bootstrap_version", string("bootstrap/0.1.0-draft.1")}, {"bootstrap_id", string(bootstrapId)}, {"launch_id", string(attempt)},
       {"launch_intent_digest", string(intentDigest)}, {"member_id", string(member)}, {"member_boot_id", string(memberBoot)}, {"role", string("core")},
       {"artifact_manifest_ref", policy.manifest}, {"channel_binding_id", string(channel)}, {"challenge_id", string(challenge)}};
+  }
+  Exchange(const Domain& parent,const std::string& launch,const std::string& body,const std::string& memberId,const std::string& group):policy(parent.policy){
+    supervisor=parent.supervisor;generation=parent.generation;descriptor=parent.descriptor;domainId=parent.domainId;descriptorDigest=parent.descriptorDigest;
+    member=memberId;memberBoot=identifier();bootstrapId=identifier();channel=identifier();challenge=identifier();receiptId=identifier();
+    intent=body;intentDigest=digest(body);containment=group;issued=tick();
+    require(issued<=std::numeric_limits<unsigned long long>::max()-policy.timeout*1000000,"bootstrap_clock");expires=issued+policy.timeout*1000000;
+    common={{"bootstrap_version",string("bootstrap/0.1.0-draft.1")},{"bootstrap_id",string(bootstrapId)},{"launch_id",string(launch)},
+      {"launch_intent_digest",string(intentDigest)},{"member_id",string(member)},{"member_boot_id",string(memberBoot)},{"role",string("worker")},
+      {"artifact_manifest_ref",policy.manifest},{"channel_binding_id",string(channel)},{"challenge_id",string(challenge)}};
   }
   static std::string frame(const char* type, const Object& payload) {
     return object({{"version", string("bootstrap/0.1.0-draft.1")}, {"type", string(type)}, {"payload", object(payload)}});

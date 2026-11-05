@@ -37,7 +37,7 @@ function policyFor(identity) {
 
 test('真实CNG挑战、Node证明、双库回执与监听形成闭环，设备闸门保持关闭', options, async t => {
   const dir = temporary(t), identity = initializeStorage(dir);
-  const migration = await migrateStorage(dir); assert.equal(migration.schema_revision, '11');
+  const migration = await migrateStorage(dir); assert.equal(migration.schema_revision, '23');
   assert(fs.existsSync(path.join(dir, migration.backup_file)));
   await initializeProcessHost(dir);
   let output = '';
@@ -101,10 +101,14 @@ test('错误制品在创建前拒绝，错服务和旧业务库不能进入监�
   }
 });
 
+function dropWorkerCreation(db){
+  db.exec('DROP TRIGGER worker_creating_evidence; DROP TRIGGER worker_observed_evidence; DROP TABLE worker_observation; DROP TABLE worker_creation');
+}
 test('监督日志v1必须显式备份迁移，保留历史且重复升级幂等', options, async t => {
   const dir = temporary(t); await initializeProcessHost(dir);
   inspect(dir, 'supervisor-journal.db', db => {
-    for (const name of ['core_admission', 'core_bootstrap']) db.exec('DROP TABLE ' + name);
+    dropWorkerCreation(db);
+    for (const name of ['worker_retirement', 'worker_group', 'worker_state', 'worker_launch', 'launch_fence_current', 'launch_fence_item', 'launch_fence', 'core_admission', 'core_bootstrap']) db.exec('DROP TABLE ' + name);
     db.pragma('user_version = 1');
     db.prepare('INSERT INTO core_attempt VALUES(?,?,?)').run('a'.repeat(32), 'old-job', '1');
     db.prepare('INSERT INTO core_observation VALUES(?,?,?,?)').run('a'.repeat(32), 1, '1', 'synthetic-image');
@@ -112,10 +116,47 @@ test('监督日志v1必须显式备份迁移，保留历史且重复升级幂等
   });
   await assert.rejects(startProcessHost({dataDir: dir}), e => e.code === 'process_journal_migration_required');
   assert.equal((await upgradeProcessHost(dir)).changed, true);
-  const backups = fs.readdirSync(dir).filter(n => n.startsWith('supervisor-before-v2-')); assert.equal(backups.length, 1);
+  const backups = fs.readdirSync(dir).filter(n => n.startsWith('supervisor-before-v5-')); assert.equal(backups.length, 1);
   inspect(dir, backups[0], db => { assert.equal(db.pragma('user_version', {simple: true}), 1); assert.equal(db.prepare('SELECT attempt_id FROM core_attempt').pluck().get(), 'a'.repeat(32)); });
   assert.equal((await upgradeProcessHost(dir)).changed, false);
-  inspect(dir, 'supervisor-journal.db', db => { assert.equal(db.pragma('user_version', {simple: true}), 2); assert.equal(db.prepare('SELECT attempt_id FROM core_exit').pluck().get(), 'a'.repeat(32)); });
+  inspect(dir, 'supervisor-journal.db', db => { assert.equal(db.pragma('user_version', {simple: true}), 5); assert.equal(db.prepare('SELECT attempt_id FROM core_exit').pluck().get(), 'a'.repeat(32)); });
+});
+
+test('监督日志v2显式迁移到启动快照布局，保留原准入表与备份', options, async t => {
+  const dir = temporary(t); await initializeProcessHost(dir);
+  inspect(dir, 'supervisor-journal.db', db => {
+    dropWorkerCreation(db);
+    for (const name of ['worker_retirement', 'worker_group', 'worker_state', 'worker_launch', 'launch_fence_current', 'launch_fence_item', 'launch_fence']) db.exec('DROP TABLE ' + name);
+    db.pragma('user_version = 2');
+  });
+  await assert.rejects(startProcessHost({dataDir: dir}), e => e.code === 'process_journal_migration_required');
+  assert.equal((await upgradeProcessHost(dir)).schema_revision, '5');
+  const backups = fs.readdirSync(dir).filter(n => n.startsWith('supervisor-before-v5-')); assert.equal(backups.length, 1);
+  inspect(dir, backups[0], db => assert.equal(db.pragma('user_version', {simple: true}), 2));
+  inspect(dir, 'supervisor-journal.db', db => {
+    assert.equal(db.pragma('user_version', {simple: true}), 5);
+    assert.equal(db.prepare('SELECT count(*) FROM core_admission').pluck().get(), 0);
+    assert.equal(db.prepare('SELECT count(*) FROM launch_fence').pluck().get(), 0);
+  });
+  assert.equal((await upgradeProcessHost(dir)).changed, false);
+});
+
+test('监督日志v3显式升级增加组观察及退役原件，保留备份且不隐式迁移', options, async t => {
+  const dir = temporary(t); await initializeProcessHost(dir);
+  inspect(dir, 'supervisor-journal.db', db => {
+    dropWorkerCreation(db);
+    db.exec('DROP TRIGGER worker_retired_evidence; DROP TABLE worker_retirement; DROP TABLE worker_group; DROP INDEX worker_state_retirement_key');
+    db.pragma('user_version = 3');
+  });
+  await assert.rejects(startProcessHost({dataDir: dir}), e => e.code === 'process_journal_migration_required');
+  assert.equal((await upgradeProcessHost(dir)).schema_revision, '5');
+  const backups = fs.readdirSync(dir).filter(n => n.startsWith('supervisor-before-v5-')); assert.equal(backups.length, 1);
+  inspect(dir, backups[0], db => assert.equal(db.pragma('user_version', {simple: true}), 3));
+  inspect(dir, 'supervisor-journal.db', db => {
+    assert.equal(db.pragma('user_version', {simple: true}), 5);
+    assert.equal(db.prepare('SELECT count(*) FROM worker_retirement').pluck().get(), 0);
+  });
+  assert.equal((await upgradeProcessHost(dir)).changed, false);
 });
 
 test('真实管道拒绝错误HMAC、角色、重复帧、EOF和超时，未决尝试阻止重启', options, async t => {
@@ -140,4 +181,17 @@ test('真实管道拒绝错误HMAC、角色、重复帧、EOF和超时，未决�
     await assert.rejects(startProcessHost({dataDir: dir}), e => e.code === 'process_recovery_required');
     await assert.rejects(upgradeProcessHost(dir), e => e.code === 'process_recovery_required');
   }
+});
+
+
+test('监督日志v4显式升级到一次创建证据布局，保留原日志且不补造创建记录',options,async t=>{
+  const dir=temporary(t);await initializeProcessHost(dir);
+  inspect(dir,'supervisor-journal.db',db=>{dropWorkerCreation(db);db.pragma('user_version=4');});
+  await assert.rejects(startProcessHost({dataDir:dir}),e=>e.code==='process_journal_migration_required');
+  assert.equal((await upgradeProcessHost(dir)).schema_revision,'5');
+  const backups=fs.readdirSync(dir).filter(n=>n.startsWith('supervisor-before-v5-'));assert.equal(backups.length,1);
+  inspect(dir,backups[0],db=>assert.equal(db.pragma('user_version',{simple:true}),4));
+  inspect(dir,'supervisor-journal.db',db=>{assert.equal(db.pragma('user_version',{simple:true}),5);
+    for(const name of ['worker_creation','worker_observation'])assert.equal(db.prepare('SELECT count(*) FROM '+name).pluck().get(),0);});
+  assert.equal((await upgradeProcessHost(dir)).changed,false);
 });

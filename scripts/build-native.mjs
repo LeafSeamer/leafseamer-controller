@@ -40,13 +40,33 @@ fs.writeFileSync(path.join(artifact, 'manifest.json'), JSON.stringify({format: '
   compiler: JSON.parse(fs.readFileSync(path.join(output, 'compiler.json'), 'utf8'))}, null, 2) + '\n');
 console.log(JSON.stringify({native_artifact: process.platform + '-' + process.arch, sha256: hash(binary)}));
 if (process.platform === 'win32') {
+  const materialization = fs.readFileSync(path.join(output, 'Release/leafseamer_materialization.node'));
+  fs.writeFileSync(path.join(artifact, 'leafseamer_materialization.node'), materialization);
+  fs.writeFileSync(path.join(artifact, 'materialization-manifest.json'), JSON.stringify({format: 'leafseamer-materialization-artifact/1',
+    platform: process.platform, arch: process.arch, node_version: lock.node_version, napi_version: lock.napi_version,
+    binary_sha256: hash(materialization), source_sha256: hash(fs.readFileSync(path.join(root, 'native/materialization.cc'))),
+    content_source_sha256: hash(fs.readFileSync(path.join(root, 'native/content-root.h'))),
+    inputs_sha256: hash(fs.readFileSync(path.join(root, 'native-inputs.json'))),
+    cmake_source_sha256: hash(fs.readFileSync(path.join(root, 'native/CMakeLists.txt')))}, null, 2) + '\n');
   const host = fs.readFileSync(path.join(output, 'Release/leafseamer_process_host.exe'));
   fs.writeFileSync(path.join(artifact, 'leafseamer_process_host.exe'), host);
   fs.writeFileSync(path.join(artifact, 'process-host-manifest.json'), JSON.stringify({format: 'leafseamer-process-host/1',
     platform: process.platform, arch: process.arch, binary_sha256: hash(host),
     source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-host.cc'))),
+    worker_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-worker.h'))),
+    creation_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-creation.h'))),
+    journal_creation_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal-creation.sql'))),
+    journal_v4_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal-v4.sql'))),
+    runtime_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-runtime.h'))),
+    loading_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-loading.h'))),
+    content_source_sha256: hash(fs.readFileSync(path.join(root, 'native/content-root.h'))),
+    installation_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-installation.h'))),
     control_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-control.h'))),
     bootstrap_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-bootstrap.h'))),
+    journal_v2_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal-v2.sql'))),
+    journal_v3_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal-v3.sql'))),
+    journal_retirement_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal-retirement.sql'))),
+    journal_fence_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal-fence.sql'))),
     journal_v1_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal-v1.sql'))),
     journal_upgrade_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal-upgrade.sql'))),
     journal_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal.h'))),

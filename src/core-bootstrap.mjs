@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import canonicalize from 'canonicalize';
+import canonicalize from './runtime/canonicalize.mjs';
 import {decodeBootstrap, decodeProtectedLaunchIntent, bootstrapVersion} from './sdk/bootstrap.mjs';
 
 export class BootstrapError extends Error { constructor(code) { super(code); this.name = 'BootstrapError'; this.code = code; } }
@@ -40,7 +40,7 @@ export function verifyCoreAssignment(assignment, policy, identity) {
     BigInt(assignment.expires_tick_ns) - BigInt(assignment.issued_tick_ns) === BigInt(policy.bootstrap_timeout_ms) * 1000000n, 'bootstrap_window');
 }
 
-export function coreProof(assignment) {
+export function bootstrapProof(assignment) {
   const base = Object.fromEntries(proofFields.map(name => [name, assignment[name]]));
   const descriptor = assignment.clock_domain_descriptor;
   const domain = {clock_domain_id: descriptor.clock_domain_id, descriptor_digest: descriptor.descriptor_digest};
@@ -52,6 +52,7 @@ export function coreProof(assignment) {
     return {version: bootstrapVersion, type: 'PROOF', payload: {...base, ...domain, proof}};
   } finally { key.fill(0); }
 }
+export const coreProof = bootstrapProof;
 
 export async function verifyCoreAdmission(assignment, receipt, policy) {
   for (const name of proofFields.filter(n => !['bootstrap_version', 'challenge_id'].includes(n))) check(same(receipt[name], assignment[name]), 'bootstrap_receipt_binding');
@@ -66,7 +67,7 @@ export async function verifyCoreAdmission(assignment, receipt, policy) {
   return Object.freeze({intent, descriptor, receipt});
 }
 
-export function createCoreBootstrapChannel(input, output, {timeoutMs}) {
+export function createBootstrapChannel(input, output, {timeoutMs}) {
   check(Number.isInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60000, 'bootstrap_timeout');
   let pending = null, buffer = Buffer.alloc(0), state = 'await_assignment', failed = null;
   const stop = error => { failed ??= error; const call = pending; pending = null; if (call) { clearTimeout(call.timer); call.reject(failed); } };
@@ -90,7 +91,7 @@ export function createCoreBootstrapChannel(input, output, {timeoutMs}) {
     async assignment() { check(state === 'await_assignment', 'bootstrap_state'); state = 'reading_assignment'; const frame = await read('ASSIGNMENT'); state = 'assignment_received'; return frame.payload; },
     async proveAndReceive(assignment) {
       check(state === 'assignment_received', 'bootstrap_state'); state = 'proof_sent';
-      const proof = canonicalize(coreProof(assignment));
+      const proof = canonicalize(bootstrapProof(assignment));
       const received = read('ADMISSION');
       output.write(proof + '\n', error => { if (error) stop(new BootstrapError('bootstrap_channel_closed')); });
       const frame = await received; state = 'admitted_closed'; return frame.payload;
@@ -100,3 +101,4 @@ export function createCoreBootstrapChannel(input, output, {timeoutMs}) {
     close() { stop(new BootstrapError('bootstrap_channel_closed')); input.removeListener('data', onData); input.removeListener('end', onEnd); input.removeListener('error', onEnd); output.removeListener('error', onEnd); },
   });
 }
+export const createCoreBootstrapChannel = createBootstrapChannel;

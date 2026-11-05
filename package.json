@@ -24,6 +24,8 @@
     "prepack": "npm run build"
   },
   "dependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
     "argon2": "0.45.1",
     "better-sqlite3": "13.0.3",
     "canonicalize": "5.1.0"

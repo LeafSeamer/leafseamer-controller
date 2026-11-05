@@ -20,7 +20,7 @@ function rows(db, sql, ...args) {
 }
 
 // 内部人员会话服务；clock由同服务认证时钟装配，HTTP Cookie与Origin边界另由传输层落实。
-export function sessionStore(db, serviceId, clock, authority = null, tokensEnabled = false, contextBinding = null) {
+export function sessionStore(db, serviceId, clock, authority = null, tokensEnabled = false, contextBinding = null, createExtensionManagement = null) {
   let stopped = false, dummy = null;
   const buckets = new Map(), global = {start: process.hrtime.bigint(), failed: 0, pending: 0};
   const salt = crypto.randomBytes(32);
@@ -110,6 +110,13 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
   const contexts = requestContextService({db, binding: contextBinding, writer, time, authorizeToken, rows, pad});
   const commands = commandAdmissionStore({db, binding: contextBinding, writer, time, authorizeToken, rows});
   const devices = deviceRegistryReader(db, contextBinding?.service);
+  const extensionManagement=createExtensionManagement?.((input,permission,recent)=>{
+    const proof=authorizeToken(input,serviceId);if(proof.denied)fail(proof.denied);
+    if(proof.principal_kind!=='human'||!proof.permissions.includes(permission))fail('extension_management_denied');
+    if(recent){const session=rows(db,'SELECT recent_before_ns FROM auth_session WHERE session_id=?',proof.session_id)[0];
+      if(!session||time().upper>=BigInt(session.recent_before_ns))fail('extension_management_recent_required');}
+    return proof;
+  });
   function readDevice(input, permission, read) {
     return deliver(writer(() => {
       const proof = authorizeToken(input, serviceId); if (proof.denied) return proof;
@@ -121,6 +128,16 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
   }
   return Object.freeze({
     ...tokens, ...contexts, ...commands,
+    approveExtension(input,request){if(!extensionManagement)fail('extension_management_unavailable');return extensionManagement.approve(input,request);},
+    revokeExtensionApproval(input,request){if(!extensionManagement)fail('extension_management_unavailable');return extensionManagement.revoke(input,request);},
+    lookupExtensionApproval(input,requestId){if(!extensionManagement)fail('extension_management_unavailable');return extensionManagement.query(input,requestId);},
+    getExtensionApproval(input,approvalRef){if(!extensionManagement)fail('extension_management_unavailable');return extensionManagement.current(input,approvalRef);},
+    planExtension(input,request){if(!extensionManagement?.plans)fail('extension_plans_unavailable');return extensionManagement.plans.create(input,request);},
+    lookupExtensionPlan(input,requestId){if(!extensionManagement?.plans)fail('extension_plans_unavailable');return extensionManagement.plans.query(input,requestId);},
+    getCurrentExtensionPlan(input,planRef){if(!extensionManagement?.plans)fail('extension_plans_unavailable');return extensionManagement.plans.current(input,planRef);},
+    activateExtension(input,request){if(!extensionManagement?.lifecycle)fail('extension_activation_unavailable');return extensionManagement.lifecycle.accept(input,'activate',request);},
+    enableExtension(input,request){if(!extensionManagement?.lifecycle)fail('extension_activation_unavailable');return extensionManagement.lifecycle.accept(input,'enable',request);},
+    lookupExtensionActivation(input,requestId){if(!extensionManagement?.lifecycle)fail('extension_activation_unavailable');return extensionManagement.lifecycle.query(input,requestId);},
     listDevices(input, cursor) { return readDevice(input, 'device.read', () => devices.list(cursor)); },
     getControl(input, deviceId) { return readDevice(input, 'control.read', () => devices.control(deviceId)); },
     localPermissions(input) {

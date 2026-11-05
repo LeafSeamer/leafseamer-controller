@@ -36,7 +36,10 @@ static std::string identifier() {
 }
 #include "process-journal.h"
 #include "process-bootstrap.h"
-#include "process-control.h"
+#include "process-worker.h"
+#include "process-installation.h"
+#include "process-loading.h"
+#include "process-runtime.h"
 struct Attributes {
   std::vector<unsigned char> buffer; LPPROC_THREAD_ATTRIBUTE_LIST list = nullptr;
   Attributes() {
@@ -52,6 +55,8 @@ static DWORD active(HANDLE job) {
   require(QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &info, sizeof(info), nullptr) != 0, "group_observation_failed");
   return info.ActiveProcesses;
 }
+#include "process-creation.h"
+#include "process-control.h"
 int wmain(int argc, wchar_t** argv) {
   try {
     // 低层入口只由本机可信装配使用，不接受 shell 命令或环境指定的解释器。
@@ -62,17 +67,23 @@ int wmain(int argc, wchar_t** argv) {
     require(GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_PIPE, "status_pipe_required");
     Instance instance(initialize || upgrade ? argv[2] : argv[1]); ProcessJournal journal(instance, initialize, upgrade);
     if (initialize) { printf("{\"event\":\"process_journal_initialized\",\"runtime_admitted\":false}\n"); fflush(stdout); return 0; }
-    if (upgrade) { printf("{\"event\":\"process_journal_upgraded\",\"changed\":%s,\"schema_revision\":\"2\",\"runtime_admitted\":false}\n", journal.upgraded ? "true" : "false"); fflush(stdout); return 0; }
+    if (upgrade) { printf("{\"event\":\"process_journal_upgraded\",\"changed\":%s,\"schema_revision\":\"5\",\"runtime_admitted\":false}\n", journal.upgraded ? "true" : "false"); fflush(stdout); return 0; }
     const std::string id = identifier(); const std::wstring jobName = L"Global\\LeafSeamer.Core." + std::wstring(id.begin(), id.end());
     std::unique_ptr<bootstrap::Policy> policy;
     if (argc >= 7 && std::wstring(argv[4]) == L"contained-core-auth") {
       for (int i = 5; i + 1 < argc; i += 2) if (std::wstring(argv[i]) == L"--bootstrap-policy") { require(!policy, "bootstrap_policy"); policy = std::make_unique<bootstrap::Policy>(utf8(argv[i + 1])); }
       require(policy != nullptr, "bootstrap_policy");
     }
+    std::unique_ptr<runtime::Protected> protectedRuntime;
+    if(policy)protectedRuntime=std::make_unique<runtime::Protected>(policy->manifest);
     std::unique_ptr<bootstrap::Exchange> exchange;
     if (policy) exchange = std::make_unique<bootstrap::Exchange>(*policy, id);
+    std::unique_ptr<installation::Client> installer;
+    for(int i=5;i+1<argc;i+=2)if(std::wstring(argv[i])==L"--installation-peer"){
+      require(exchange&&!installer,"installation_config");installer=std::make_unique<installation::Client>(utf8(argv[i+1]));
+    }
     std::unique_ptr<CoreControl> control;
-    if (exchange) control = std::make_unique<CoreControl>(instance, *exchange);
+    if (exchange) control = std::make_unique<CoreControl>(instance, *exchange,*protectedRuntime,std::move(installer));
     Handle job(CreateJobObjectW(&instance.security, jobName.c_str())); const DWORD jobError = GetLastError();
     require(job.value != nullptr && jobError != ERROR_ALREADY_EXISTS, "job_create_failed");
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -97,20 +108,22 @@ int wmain(int argc, wchar_t** argv) {
     STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof(si); si.lpAttributeList = attributes.list;
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES; si.StartupInfo.hStdInput = coreInput.value;
     si.StartupInfo.hStdOutput = exchange ? proofWriter.value : coreOutput.value; si.StartupInfo.hStdError = coreOutput.value;
-    std::wstring command = quote(argv[2]) + L" --disallow-code-generation-from-strings " + quote(argv[3]);
-    for (int i = 4; i < argc; ++i) { require(wcslen(argv[i]) <= 32768, "argument_capacity"); command += L" " + quote(argv[i]); }
+    const std::wstring executable=protectedRuntime?protectedRuntime->node:argv[2];
+    auto childEnvironment=runtime::environment();
+    std::wstring command = quote(executable) + L" --disallow-code-generation-from-strings " + quote(argv[3]);
+    for (int i = 4; i < argc; ++i) { if(std::wstring(argv[i])==L"--installation-peer"){require(i+1<argc,"installation_config");++i;continue;}require(wcslen(argv[i]) <= 32768, "argument_capacity"); command += L" " + quote(argv[i]); }
     command += L" --data-dir " + quote(instance.path);
     if (control) command += L" --supervisor-pipe " + quote(control->name) + L" --supervisor-channel " + quote(std::wstring(control->channel.begin(), control->channel.end()));
     require(command.size() < 32767, "command_capacity"); PROCESS_INFORMATION pi{};
     journal.begin(id, jobName, exchange ? policy->body : "", exchange ? exchange->descriptor : "", exchange ? exchange->intent : "");
-    require(CreateProcessW(argv[2], command.data(), nullptr, nullptr, TRUE,
-      EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr, &si.StartupInfo, &pi) != 0, "process_create_failed");
+    require(CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, TRUE,
+      EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, childEnvironment.data(), protectedRuntime?protectedRuntime->root.c_str():nullptr, &si.StartupInfo, &pi) != 0, "process_create_failed");
     Handle process(pi.hProcess), thread(pi.hThread); coreInput.reset(); coreOutput.reset(); proofWriter.reset();
     BOOL belongs = FALSE;
     require(IsProcessInJob(process.value, job.value, &belongs) != 0 && belongs && active(job.value) == 1, "process_containment_failed");
     std::vector<wchar_t> image(32768); DWORD imageSize = static_cast<DWORD>(image.size());
     require(QueryFullProcessImageNameW(process.value, 0, image.data(), &imageSize) != 0, "process_image_failed");
-    Handle expected(CreateFileW(argv[2], FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr));
+    Handle expected(CreateFileW(executable.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr));
     Handle loaded(CreateFileW(image.data(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr));
     BY_HANDLE_FILE_INFORMATION a{}, b{};
     require(expected.value != INVALID_HANDLE_VALUE && loaded.value != INVALID_HANDLE_VALUE &&
@@ -136,7 +149,10 @@ int wmain(int argc, wchar_t** argv) {
     while (WaitForSingleObject(process.value, 20) == WAIT_TIMEOUT) {
       if (control) {
         try { control->poll(process.value, pi.dwProcessId, job.value, journal); }
-        catch (const std::exception& e) { controlFailure = e.what(); invalid = true; break; }
+        catch (const std::exception& e) { controlFailure = e.what(); invalid = true;
+          const std::string kind=dynamic_cast<const std::out_of_range*>(&e)?"control_out_of_range":dynamic_cast<const std::length_error*>(&e)?"control_length_error":dynamic_cast<const std::bad_alloc*>(&e)?"control_allocation_failed":"control_internal_error";
+          const auto safe=controlFailure.size()<=96&&controlFailure.find_first_not_of("abcdefghijklmnopqrstuvwxyz_0123456789")==std::string::npos?controlFailure:kind;
+          fprintf(stderr,"{\"event\":\"supervisor_control_failure\",\"code\":\"%s\"}\n",safe.c_str());fflush(stderr);break; }
       }
       if (policy) { DWORD extra = 0; if (!PeekNamedPipe(proofReader.value, nullptr, 0, nullptr, &extra, nullptr) || extra) { invalid = true; break; } }
       DWORD count = 0;

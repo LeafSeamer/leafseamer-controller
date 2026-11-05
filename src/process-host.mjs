@@ -51,7 +51,7 @@ async function configureJournal(dataDir, upgrade) {
         const frame = JSON.parse(output);
         if (code !== 0) throw new ProcessHostError(typeof frame.code === 'string' && /^[a-z_]{1,64}$/.test(frame.code) ? frame.code : 'process_host_failed');
         check(frame.event === (upgrade ? 'process_journal_upgraded' : 'process_journal_initialized') && frame.runtime_admitted === false &&
-          (!upgrade || (frame.schema_revision === '2' && typeof frame.changed === 'boolean')), 'process_host_protocol'); resolve(Object.freeze(frame));
+          (!upgrade || (frame.schema_revision === '5' && typeof frame.changed === 'boolean')), 'process_host_protocol'); resolve(Object.freeze(frame));
       } catch (error) { reject(error instanceof ProcessHostError ? error : new ProcessHostError('process_host_protocol')); }
     });
   });
@@ -61,11 +61,11 @@ async function configureJournal(dataDir, upgrade) {
 export function installedCoreDigest() {
   const {root} = prepareProcessHost();
   return 'sha256:' + hash(canonicalize({controller_build_sha256: hash(fs.readFileSync(path.join(root, 'build-manifest.json'))),
-    node_sha256: hash(fs.readFileSync(fs.realpathSync(process.execPath)))}));
+    node_sha256: hash(fs.readFileSync(path.join(root, 'runtime/node.exe')))}));
 }
 
 // bootstrapPolicy仅由可信本机装配选择；状态帧不替代持久化AdmissionReceipt或生产profile批准。
-export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, onCoreOutput = () => {}, bootstrapPolicy = null} = {}) {
+export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, onCoreOutput = () => {}, bootstrapPolicy = null,installationPeer=null} = {}) {
   const {root, executable, env} = prepareProcessHost();
   const policy = bootstrapPolicy === null ? null : validateBootstrapPolicy(bootstrapPolicy);
   if (policy) check(policy.artifact_manifest_ref.digest === installedCoreDigest(), 'bootstrap_artifact');
@@ -74,6 +74,8 @@ export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, o
   const args = [dataDir, fs.realpathSync(process.execPath), path.join(root, 'cli.mjs'), policy ? 'contained-core-auth' : 'contained-core',
     '--host', host, '--port', String(port)];
   if (policy) args.push('--bootstrap-policy', canonicalize(policy));
+  if(installationPeer!==null){check(policy&&typeof installationPeer==='object','process_host_options');const config=canonicalize(installationPeer);
+    check(Buffer.byteLength(config)<=8192,'process_host_options');args.push('--installation-peer',config);}
   const child = spawn(executable, args, {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env});
   let first, last, buffer = '', protocolError = null, closing = false;
   let startedResolve, startedReject, exitResolve, exitReject;

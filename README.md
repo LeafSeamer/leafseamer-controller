@@ -8,7 +8,7 @@
 
 ## 开发运行
 
-使用 Node 24.22.0、npm 11.19.1。先在相邻 `leafseamer-sdk` 仓库构建与 [sdk-runtime.json](sdk-runtime.json) 摘要一致的 SDK，再安装本仓锁定依赖。构建将固定 SDK 运行文件纳入 Controller 包，独立运行无需邻仓。其余运行依赖固定为 better-sqlite3 13.0.3、argon2 0.45.1 和 canonicalize 5.1.0；安装使用锁内完整依赖。
+使用 Node 24.22.0、npm 11.19.1。先在相邻 `leafseamer-sdk` 仓库构建与 [sdk-runtime.json](sdk-runtime.json) 摘要一致的 SDK，再安装本仓锁定依赖。构建将固定 SDK 运行文件纳入 Controller 包，独立运行无需邻仓。其余运行依赖固定为 better-sqlite3 13.0.3、argon2 0.45.1、canonicalize 5.1.0、ajv 8.20.0 和 ajv-formats 3.0.1；安装使用锁内完整依赖。
 
 ```sh
 npm ci --ignore-scripts
@@ -64,19 +64,206 @@ SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 
 
 宿主核证明、实际Job归属和截止后，先在DELETE／EXTRA监督库提交closed的AdmissionReceipt，再发送ADMISSION。核心用SDK解析帧，核服务／数据库、制品／profile、描述摘要与完整启动意图，再用本机原生tick重核窗口。业务schema 11将完整意图、描述、回执和政策与当前service_boot同库不可变绑定，receipt／bootstrap／member_boot禁止跨启动重用。此事务成功后才监听；写入失败关闭业务库，监督已提交的准入历史保留。`bootstrap_authenticated=true`仅描述已完成的握手，客户端仍需观察核心实际监听；`runtime_admitted=false`与ready503保持，不授worker、设备或发送权。
 
-业务库运行 `migrate-storage` 显式升级至11，每步保留备份；已有监督日志v1使用 `upgrade-process-host --data-dir <绝对目录>` 显式升级至2。升级在核DDL、完整性、目录及所有者和无未决尝试后创建唯一备份并同事务新增bootstrap／admission表，既有记录不变；重复升级返回changed=false。host_meta的format继续标识未改变的身份布局，PRAGMA user_version标识schema 2。普通启动拒绝v1，不自动修复；未决尝试不能借升级、PID消失或新的挑战绕过旧域恢复。
+业务库运行 `migrate-storage` 显式升级至当前schema 23，每步保留备份；worker启动准备至少要求schema 12。已有监督日志v1至v4使用 `upgrade-process-host --data-dir <绝对目录>` 显式升级至5。监督日志升级在核DDL、完整性、目录及所有者和无未决尝试后创建唯一备份并同事务新增缺少的bootstrap／admission、启动快照、worker登记、组保留／退役及一次创建／实际观察原件表，既有记录不变；重复升级返回changed=false。host_meta的format继续标识未改变的身份布局，PRAGMA user_version标识schema 5。普通监督启动拒绝v1至v4，不自动修复；未决尝试不能借升级、PID消失或新的挑战绕过旧域恢复。迁移不为旧登记伪造创建原件、Job句柄或退役证据。
 
 当前真实Windows集成覆盖双库绑定后监听、正常退出、错误制品／服务、旧业务库、HMAC／角色／重复帧／EOF／超时拒绝、写入故障、历史迁移和重放拒绝。完整RuntimeBinding、worker子域、保护配置来源、旧域退役恢复、Linux、生产profile及设备验收继续实施。
+
+`bootstrapDeviceWorker`提供Windows设备worker的子进程校验入口。可信启动装配须提供固定完整意图、预期时钟描述、服务／数据库身份及监督器定向继承管道；不能从Assignment反向构造这些预期值。入口在首次等待前复制输入，按SDK核完整扩展意图与设备范围，再核挑战的意图摘要、成员、制品、监督域和profile。HMAC沿既定bootstrap投影；收到ADMISSION后逐项核回执、原子组和原生绝对截止，发proof不会延长窗口。返回深冻结的意图／描述／回执且gate_state仍为closed，不返回挑战秘密、不建立RuntimeBinding或开始设备业务。
+
+该入口既有独立管道用例使用合成监督挑战；现已接入下述原生一次创建流程，并用真实Suite内容、原生宿主和随包Node完成关闭态准入。核心持久RuntimeBinding已按下节接通；扩展执行和设备业务仍待完成。
 
 ### 监督控制连接与准入原件查询
 
 已准入核心使用单独的Windows命名管道连接原生宿主，bootstrap的两条继承管道不承载控制帧。宿主创建随机名称、只允许本机、显式当前账户／SYSTEM DACL及FIRST_PIPE_INSTANCE的单实例端点，生命周期内持续持有；名称和channel_id由原生父进程通过固定内部参数交付，普通supervise不能指定。连接后宿主核GetNamedPipeClientProcessId等于所持核心实例PID，并重新检查实际Job归属；同一Job的其它后代也不能取得核心控制通道。控制连接不自动重连。（平台接口依据：[CreateNamedPipe](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createnamedpipea)、[GetNamedPipeClientProcessId](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeclientprocessid)、[overlapped管道I/O](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-server-using-overlapped-i-o)。）
 
-当前接通LAUNCH_QUERY：从同一原生SQLite日志读取既有核心AdmissionReceipt，返回完整JournalView；未知launch返回record=null，同ID异摘要返回identity_conflict且只能query_only。查询不创建、消费或重签bootstrap，不产生新lease，也不把历史closed回执改成Ready。scope固定服务、数据库、监督实例和域；双向序号从1连续，channel及reply_to必须绑定本连接和实际未决请求。输入采用单帧规范JSON加LF、原生16KiB预算和异步I/O；额外字段、重复键、乱序或跨通道帧关闭连接。
+当前连接固定采用SDK独立worker-runtime选择中的supervisor-control/0.4.0-draft.1，不回退旧版本。LAUNCH_QUERY：从同一原生SQLite日志读取既有核心AdmissionReceipt，返回完整JournalView；未知launch返回record=null，同ID异摘要返回identity_conflict且只能query_only。查询不创建、消费或重签bootstrap，不产生新lease，也不把历史closed回执改成Ready。scope固定服务、数据库、监督实例和域；双向序号从1连续，channel及reply_to必须绑定本连接和实际未决请求。输入采用单帧规范JSON加LF、原生256KiB预算和异步I/O；额外字段、重复键、乱序或跨通道帧关闭连接。
 
 核心在持久采用启动绑定前先完成一次原件查询，之后每500ms串行核验。当前开发预算为单次请求2秒、宿主无完整控制交互5秒；期限从原请求起点计算，部分帧和迟到结果不续期，时钟读取异常或回退锁存。它们用于关闭失去监督的开发运行实例，不是经生产测量批准的执行租约或实时调度保证。控制来源先在内存失效，后关闭HTTP、认证监测和业务库；正常关停保持原停止流程。宿主观察到控制故障则终止完整Job，核实际空组与核心退出并持久保存退出原件，结果control_failed=true且进程失败退出；宿主自身崩溃仍没有成功退出证明。
 
-查询来源有效不代表完整RuntimeBindingRef、worker启动fence、发行批准或设备发送资格。当前没有REGISTER／CREATE／RETIRE写处理器，不能以未知键null推断旧进程不存在。完整保护配置、扩展审批／物化来源、worker子组及旧域恢复继续实施。Linux及跨账户部署未验；当前真实Windows用例验证正常查询、原件一致、错scope／序号／方向、重放、后代冒充和断线／静默终止，消费者错响应和迟到路径另用合成服务端验证。
+可信本机核心可通过同一连接的`putFence(snapshot)`提交完整FENCE_PUT，接收FENCE_RESULT；请求与周期查询串行、队列至多8项。完整scope、摘要、规范十进制revision及至多256项按launch_id唯一排序的集合均严格核验；核心自身不能作为扩展allow条目。原生监督日志先保存完整JCS、逐项判定和当前指针，再返回ACK。同修订同内容只查原，低修订、同修订异内容、同launch异摘要及历史deny恢复allow均拒绝；即使已从当前集合移除，历史deny仍保留。快照写入失败不恢复旧准入状态，存储错误终止整个Job。每个核心attempt至多4096份快照，仍受原16MiB日志上限约束。
+
+ACK仅证明该快照已提交；它不刷新核心查询期限，不创建worker或RuntimeBinding，不开放设备出口。快照必须覆盖当前监督实例的全部非终态worker登记，缺少registered记录也拒绝，失败后新登记资格保持关闭，直到显式提交并核验完整快照。已验证实际Windows命名管道上的256项完整快照、超过JavaScript安全整数的修订、重复查询、永久拒绝及真实退出，消费者错误ACK另用合成服务端验证；掉电、磁盘耗尽与COMMIT未知尚未验收。
+
+查询来源有效不代表完整RuntimeBindingRef、发行批准或设备发送资格。CREATE已接通固定worker入口，RETIRE覆盖当前域内已登记和已创建成员；不能以未知键null推断旧进程不存在。真实启动授权提供者、旧域恢复、Linux及跨账户部署仍待完成。
+
+### 核心worker启动准备
+
+业务库schema 12提供内部`storage.workerLaunches.prepare(intentBytes)`、`query(LaunchKey)`和`current()`。准备按固定SDK解码完整设备worker意图，在同一事务核本次已持久核心启动、监督实例／运行代、制品／政策／profile、成员与容纳组分离，以及每个设备的实际登记，再保存不可变意图、与意图一致的设备集合和审计提交记录。设备集合不完整或任一写点失败时整体回滚；同launch同摘要查原，异摘要或重复成员／组身份拒绝。
+
+每库至多4096份准备记录、本次核心启动至多256份，超过开发预算拒绝，不截断。`query`保留旧启动历史；普通重启后旧记录的`current_boot=false`，不能用同ID重新准备或移入新域。`current()`仅枚举本次核心启动的准备集合，`current_boot`只表示归属，不证明监督源仍有效。旧版库该入口为null，需显式备份迁移；迁移不生成意图或批准。
+
+schema18的新增准备还须从同库实际审批读取当前状态：完整安装／批准／审阅／配置／角色引用、权限摘要、intake／平台／宿主信任代和清单／库存摘要逐项一致，入口只能是原manifest的node_module worker。设备集合必须覆盖全部当前设备角色绑定，不能只按选中的device_scope删减；其他对象角色缺少提供者时拒绝。准备等待当前Suite内容核验，最终writer再次核审批与角色，等待中撤销不能留下新准备。现有意图／设备关联／审计仍沿原事务保存，不增加另一套启动模型；每实例最多四个等待中的准备。
+
+同请求已保存的准备只返回历史，批准撤销后查原不会生成新授权；跨启动历史仍不可复用。准备本身不能将current_boot或准备成功用作CREATE许可；后续完整虚拟资源、启用受理和业务短授权见对应章节。人员查询和核心内部检查共用实际审批状态读取，但外部查询仍须真实extension.read令牌。
+
+
+该内部入口不接受HTTP请求，不核成运行审批，也不从调用者给出的安装／审阅引用推导可信来源。后续虚拟资源、当前安装／审批、业务短授权及核心RuntimeBinding见对应章节；完整生命周期和最终出口仍待接通。准备记录不能直接转成allow快照、设备Ready或发送许可。
+
+### 核心worker运行绑定
+
+业务库schema 19提供内部`storage.workerLaunches.runtime`。启动装配在持久核心绑定后通过`bindSource(supervision)`绑定本次已认证监督连接，核完整服务／数据库／监督域及核心回执；不从HTTP接收worker回执或允许替换来源。`adopt(LaunchKey)`只能采用本次启动已保存的意图：先核实际安装审批与当前Suite内容，再从监督器查询admitted_closed，进入业务writer时重核来源资格、完整回执／意图／域和当前审批，把完整运行绑定与审计同事务保存。正文保留完整意图、ClockDomainDescriptor和AdmissionReceipt，RuntimeBindingRef由核心原件摘要生成。
+
+`observeWorker(intent)`返回的观察只能由原监督连接核验。其有效期沿实际查询起点的两秒截止，不因排队、复制或引用回执延长；`assertWorkerObservation`拒绝复制件、过期件和已撤回观察。完整deny提交前先提高本地撤回代，失败的fence响应使已有观察失效；来源关闭会先通知采用者。监督器仍独立核当前组与根进程，两个数据库不宣称原子。
+
+`query(key)`只查不可变历史，`current_boot`不是当前资格。`current(key)`另核内存采用、监督观察及本地审批；最多四个活动／等待采用沿当前加载容量执行，每500ms串行复核该成员和当前安装内容，超过原观察期限即撤回。采用或审计写入失败锁存该实例的采用资格；提交结果未知只允许查原，不自动补发成功。重复adopt只返回已保存历史，不能重新激活撤回记录；重启为旧绑定补记restarted撤回，不继承旧观察。
+
+撤回先关闭内存资格，再持久保存原因；持久失败不恢复资格。审批失效或来源变化会请求原监督器退役，退役请求失败不等于confirmed_empty，资源释放仍依赖原监督器的完整组结果。运行绑定与回执始终为closed，尚未发布安装active_closed、导入扩展模块、建立设备session或取得发送许可。固定虚拟设备的资源与启动依赖封存见下节；人员启用计划、受理和业务短授权见下节。
+
+真实业务SQLite用例覆盖人员审批竞争、错绑定、审计写入回滚、撤回写入失败和重启历史。跨仓用例进一步使用真实Suite封存与人员批准、原生创建及回执，完成业务库采用、deny后撤回和原组退役；业务短授权已按下节接通；平台批准与安装装配仍是明确的测试配置，不能替代正式发行或设备验收。
+
+
+### 固定虚拟设备资源与启动依赖
+
+业务库schema 20提供可信本机装配接口`storage.configureVirtualDevice({request_id,device_id})`。它只接受已登记的simulator设备，由核心分配固定`core_virtual_device/1`后端的资源身份，并将配置与审计同事务保存。调用方不能指定资源ID、设备引用或外部资源集合；普通HTTP没有此入口。物理设备仍须实际身份和别名提供者，不能通过此接口声明已支持。该登记选择后续必须使用的虚拟后端，不证明模块已经运行或获得设备权限。
+
+新启动准备从当前人员审批、完整角色解析、已验证的能力模板和上述核心登记生成持久依赖原件。它遍历全部绑定设备与全部动作，包括未获本次权限的动作；缺少提供者、模板、未知别名或非空外部依赖均拒绝，不以空集合代替。所有设备必须与完整意图范围相等，同一设备去重，保留每个角色与完整模板摘要。依赖原件与准备记录通过延迟外键在同一事务提交；内容获取及运行采用继续核对原件和当前审批。
+
+`workerLaunches.dependencies(LaunchKey)`只返回本次核心启动中仍匹配的冻结依赖记录。它是固定虚拟后端的资源绑定，不是正式DependencyPlan、LaunchAuthorization、CatalogApproval或发送许可。触发器描述和动作策略仍须在运行目录与采样／执行资格中核验。配置及依赖不可变；升级保留旧准备，但不为其补造资源或依赖，已被旧准备使用的设备不能事后改绑。开发容量为4096个虚拟资源、每意图64个设备与256条角色关联，仍待生产容量验收。
+
+
+### 安装依赖计划
+
+业务库schema 21将正式DependencyPlan接入当前人员会话：`planExtension(token,{request_id,slot_id,expected_slot_revision,selection})`从已批准候选、角色解析、固定虚拟资源及实际安装服务生成计划。当前支持空disabled槽位的activate／enable选择，必须指定已存在的新target，source与reuse均为null；尚不支持需要旧实例退役／资源核销的切换。其他对象或已有启动／未决命令缺少完整影响提供者时拒绝，不返回删减后的影响集合。
+
+计划绑定完整槽位引用、全局dependency_revision、选择、配置摘要、设备／资源影响、平台／策略及已认证监督域中的30秒固定单调期限；安装平台ID和修订必须与实际核心监督域匹配。当前开发容量为4096份计划、两个并发来源读取；配置、角色、审批、资源或运行记录变化在同writer推进依赖修订。计划正文和审计双向延迟外键绑定，任何一侧失败都回滚，不修改槽位或启动设备。
+
+`lookupExtensionPlan(token,request_id)`按当前人员读权返回原凭据范围的历史；同键重投不续期。`getCurrentExtensionPlan(token,plan_ref)`异步重核当前人员读权、原监督连接、实际安装服务、槽位／依赖修订与完整资源图，截止等号或重启失效。计划的content_digest覆盖除顶层plan_ref／content_digest外的全部字段，Ref回显该摘要。计划不是启用受理、资源占用、LaunchAuthorization或发送许可；人员受理与资源占用见下节，不能把计划查询结果直接用于CREATE。
+
+
+### 人员启用受理与资源占用
+
+业务库schema 22通过当前人员会话的`activateExtension`／`enableExtension`消费对应用途的正式计划。请求固定request_id、slot_id、expected_slot_revision、target_installation_ref、approval_ref和dependency_plan_ref。服务先核当前权限、近期认证、计划与真实安装来源，在writer内重新核对完整原件；同一事务保存原槽位的新版本、accepted受理、完整资源owner／占用head及审计。相同凭据和请求ID重投只返回原结果，内容或用途不同拒绝；`lookupExtensionActivation`按当前读权查原。受理不分配新安装，也不把候选发布为active_closed。
+
+资源来自计划的完整核心图，两个槽位不能同时占用同一资源。数据库要求受理与槽位操作相互引用，提交前逐项确认完整占用，不能少写一个owner后仍成功。槽位保持active_installation_id=null，同时记录enabled意图、待启动目标和原操作；有待处理操作时拒绝stage覆盖。旧版本槽位／候选／计划原字节保留，迁移不补造受理或占用。
+
+schema 22的新worker准备必须匹配本次服务启动的人员受理、当前审批和仍持有的完整资源。一份受理至多关联一个launch，数据库唯一约束与业务writer同时检查；同launch查原不授新资格。重启保留受理和占用历史，但不能自动恢复旧启动。审批撤回先阻止后续准备，不自动释放资源；释放仍需完整关闭／退役／资源核销路径，当前尚未实现该释放入口。
+
+当前受理结果只为accepted，业务短授权见下节；完整出口登记、运行发布、取消／停用与资源释放仍待接通。内部方法尚未映射正式管理HTTP／GUI，不能据此宣称完整安装生命周期或设备运行已完成。
+
+### 业务启动短授权与撤销同步
+
+业务库schema 23提供核心内部的`workerLaunches.authorization`。`bindSource`只绑定本次核心准入回执、实际监督实例及Windows原生单调时钟；`authorize(LaunchKey)`从已受理操作、当前审批、完整设备／资源依赖及实际安装查询生成两秒LaunchAuthorization，调用者不能提交审批内容或自行缩小设备集合。`register(LaunchKey)`和`create(LaunchKey,proof)`在同一串行队列取得新授权并交给原监督连接；CREATE只接受已有load及物化证明标识。已经尝试创建、退役或失去资格的launch不能续签以再次创建。
+
+核心先将本boot所有已准备launch的完整fence快照持久化，再发送并保存精确ACK，最后同writer复核原件并保存授权；授权正文摘要不包含顶层authorization_ref。ACK等待期间撤销会发送下一版完整deny，旧allow不能生成授权。审批和资源资格每500毫秒复核，`synchronize()`可立即传播当前撤销，`deny(LaunchKey)`永久关闭该launch；任何ACK不确定、授权写入失败或来源丢失都关闭新签发，存储失败会关闭监督连接。快照、ACK、永久deny与授权原件不可改写；重启只有历史，不补造资格。开发上限为每boot4096版快照、每库4096份授权及4个并发请求，仍待生产容量验收。
+
+真实跨仓流程使用独立安装INTAKE_QUERY核当前回执，然后完成业务计划、受理、唯一准备、业务REGISTER／CREATE、关闭态运行采用和人员撤销传播；安装查询不依赖已登记worker。平台批准、可信时间与测试装配仍为明确测试配置。该入口尚未映射正式管理HTTP／GUI，也不发布active_closed、不执行扩展模块、不释放资源owner或生成设备发送许可。
+
+### 完整worker登记
+
+可信核心装配通过`registerWorker(intent, authorization)`提交完整意图，`queryLaunch(key)`查询原登记。Controller只接受devices分支，设备集合1至64项、ASCII排序唯一；数据源分支属于Seamer，不能在Controller取得设备进程身份。完整extension_binding、对象范围、运行组合、组、member及政策进入不可变意图和摘要，REGISTER不启动OS进程。
+
+原生宿主独立重建规范意图与授权，核当前服务／数据库、监督实例、runtime generation、完整权限／安装／批准／解析绑定、当前fence revision及同域两秒授权窗口，再将意图、初始授权和registered状态同事务保存。首次成功登记随后建立独占Windows Job并持久保存组保留原件，两者均完成后才响应REGISTER；失败关闭当前控制运行，不补发成功。Job使用随机名称、当前账户／SYSTEM ACL，拒绝同名既有对象，持续持有不可继承句柄，设置并回读KILL_ON_JOB_CLOSE且不允许breakaway。相同键与内容只查原并复用原Job，不替换初始授权或创建第二条记录；同ID异意图、重复member／组拒绝。登记与状态双向延迟外键防止孤立提交，历史意图不可更新或删除。LAUNCH_QUERY返回registered及creation_attempted=false，不能解释为运行准入。
+
+真实Windows管道／SQLite用例已覆盖规范完整登记、重复查原、短授权过期及未来起点、错域／权限／批准、完整fence遗漏、永久撤销和同ID异范围。独立协议用例中的安装审批与权限Ref为合成输入；跨仓运行用例采用真实业务审批与短授权，Suite可信物化提供者已按下节接通。CREATE仍须重新验证完整审批原件和challenge，并在创建前持久消费一次尝试；当前不提供绕过物化的启动开关或任意worker路径。
+
+`createWorker({key, authorization, load_id, materialization_evidence_id, materialization_challenge_id})`重新核当前完整意图、授权正文摘要、两秒同域窗口、完整fence及profile，并核当前五秒物化观察、ready内容持有和受保护运行包。未知键、错摘要、旧栅栏或无效批准均拒绝；REGISTER的初始授权不替换。合法拒绝响应仅允许query_only，不延长健康查询期限。业务调用使用下述授权提供者；独立协议故障用例保留合成授权。
+
+原生监督器先在schema 5同一事务保存不可变创建原件并将registered改为creating／creation_attempted=true，然后最多调用一次OS创建。进程悬挂创建时即进入原根Job和专属Job，核实际PID、创建时间、映像FILE_ID及组归属，持久观察并转awaiting_bootstrap后才恢复线程。执行入口固定为受保护包内device-worker-entry.mjs；上下文由父进程创建、核摘要并持有，不接收任意模块路径。创建调用失败或已消费后超时均保留indeterminate，重复CREATE不能重试或复活。
+
+worker在原监督域内取得新的定向挑战、秘密和member_boot；证明、实际根进程归属及固定截止全部成立后，先持久closed回执再交付ADMISSION。成功交付后清除挑战秘密并删除临时上下文。awaiting与admitted_closed期间持续核当前fence和根进程；撤销、退出或异常管道进入indeterminate并停止整个专属组。收到closed回执不导入扩展、不连接设备、不生成核心RuntimeBinding。运行后的后代仍纳入同一Job，实际组为空才允许退役。
+
+`retireWorker(intent, reason)`从完整意图生成精确键及containment，原生端核持久摘要和原组／代。registered、creating、awaiting_bootstrap、admitted_closed及indeterminate先持久retiring，再停止持有的专属Job；只有实际活动进程数为零且原组限制未变，才将完整组观察、原请求、RetirementEvidence和retired状态同事务提交。累计进程数来自实际观察，不伪写为零。缺原组或尚未观察空组返回indeterminate；调用方可继续查询或请求退役，不能重复CREATE。原件不可替换或删除，重复退役查原，同ID永久不可复活。撤权和fence失步不阻止退役；retired后才释放监督器持有的运行内容。该流程不证明旧监督域恢复或设备资源释放。（实际计数语义依据：[Microsoft Job accounting](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_accounting_information)。）
+
+### 安装内容与候选实例
+
+业务库schema 13提供可信本机装配接口`storage.extensionInstallations`。`bindSource(host)`在本次打开期间固定Suite安装宿主身份与`describeIntake`方法；`createSlot({request_id,extension_id})`建立空槽位；`stage({request_id,slot_id,expected_slot_revision,intake_ref})`读取当前合格内容，核完整intake引用、目标权威、宿主及清单／库存摘要，分配新的不可变installation。此处为同进程受信任库装配；独立服务的内容传输及管理HTTP入口尚待接通。
+
+候选内容、槽位修订／head、请求原结果与审计在同一writer事务提交；完整引用及延迟外键绑定写集。相同request_id同内容查原，异内容冲突；新请求核槽位CAS，旧请求查原不因槽位推进重新生成实例。`query(request_id)`查历史结果，`content(installation_ref)`按完整引用查固定内容。每库最多4096个保留管理请求，候选正文至多8MiB、全部候选正文合计64MiB，超限拒绝且不删除历史。
+
+这些内部方法仅准备管理原件，尚未映射公开的C09 Context和人员鉴权。候选初始state=verified、approval_ref=null、运行绑定为空；它保存观察时内容，不能代替审批或启动时的当前实物资格。角色解析、人员审阅／批准、撤销传播、启用与运行采用仍须完成。配置原件接口见下节。真实Suite封存内容已验证进入文件业务库、重启查原及信任代撤销后拒绝新候选；逐写故障验证整组回滚。没有执行归档中的模块。
+
+### 安装配置原件
+
+业务库schema 14增加`storage.extensionInstallations.configurations`。来源绑定同时固定Suite的`describeConfigurationSchema`方法；`configure({request_id,installation_ref,expected_revision,bytes})`接收至多1MiB的原始JSON Buffer，在完整安装引用及Schema文件摘要匹配后校验配置，再复查当前来源资格，最后同事务保存配置修订、head、请求结果和审计。新配置期望版本为`"0"`，之后使用当前版本；同一实例保留稳定配置ID和递增版本。`query(request_id)`查原请求，`current(installation_ref)`查当前配置；历史结果不代表当前实物资格。当前仅用于未批准候选，后续批准流程须冻结所选配置版本。
+
+配置原始字节摘要参与幂等比较，因此空白等字节差异也会使同request_id冲突。每库最多4096个配置操作，配置正文合计64MiB，超限拒绝而不删除历史。Schema仅来自清单指定且库存角色为schema的文件；Suite使用受保护的原文件句柄读取，Controller再核文件长度、摘要和完整来源引用。
+
+固定短生命周期校验子进程复用SDK原始JSON解析规则和JSON Schema 2020-12校验，拒绝重复键、不可精确表示的整数、外部引用及未知关键字，不转换类型、填默认值或删除额外属性。核心继续禁止字符串代码生成；只有该固定入口子进程允许编译Schema，且不继承NODE_OPTIONS或预加载配置。并发最多两个，外部截止三秒，输出和输入有字节上限，V8老生代堆64MiB、半空间4MiB；这是校验资源预算，并非完整操作系统内存隔离保证。超时或异常不产生可用配置。
+
+真实文件库测试覆盖版本CAS、幂等、逐写回滚、重开查原和schema13→14显式迁移；真实Suite封存内容与固定校验子进程联调覆盖原Schema读取、约束拒绝和信任代撤销。这些内部接口尚未公开为人员管理HTTP或跨进程内容消息，也不生成批准、LaunchAuthorization或RuntimeBinding。
+
+### 角色解析原件
+
+业务库schema 15增加`storage.extensionInstallations.roles`。`deviceReference(device_id)`从实际设备登记原件产生完整本地Ref；`resolve({request_id,installation_ref,configuration_ref,expected_revision,bindings})`只接受角色绑定，权限模板和用途来自已保存manifest。expected_revision是该候选的解析序列，初次为`"0"`；它不是公开管理接口的installation CAS。每次新解析分配新resolution_id，保留旧原件；`query(request_id)`查历史结果，`current(installation_ref)`核当前配置与对象后查最新结果。推进配置会使旧解析不能作为current使用，但不会删除历史。
+
+解析检查声明与绑定一一对应、kind与基数、同一配置、目标权威／库、完整对象版本与摘要、唯一性和规范排序。八种模板采用固定投影；端点不得为URL或通配符，helper绑定包内文件原字节摘要和制品集合，protocol_io必须引用同集合且同profile的网络权限。客户端不能提交permissions，不执行扩展代码或文本插值。编译后的产品Schema再次校验整个结果；提交前复查当前安装来源，再在同一writer快照内重读配置与对象、重算权限。解析修订、head、查原结果和审计同事务提交，逐写失败全部回滚；每库4096次解析、正文合计64MiB、并发最多两个。
+
+当前业务提供者接通实际设备登记原件。source、data_object、secret_role、filesystem_role、helper_artifact、protocol_profile、validation_policy及run的实际存储提供者尚待接通，缺失时返回object_provider_unavailable；测试中的八类型映射使用合成对象提供者，不能作为这些资源已运行的证据。设备登记当前没有运行能力目录，解析中的action_ids等仅记录模板请求；动作支持、用途政策、人员可见性及收窄批准仍须在后续审阅／审批链验证。角色解析不授予设备权限，不等同于安装审批或启动资格。
+
+### 权限审阅原件
+
+业务库schema 16增加`storage.extensionInstallations.reviews`。`review({request_id,installation_ref,configuration_ref,role_resolution_ref,expected_revision,proposed_permissions})`从当前固定解析取得requested_permissions，不接受客户端上传requested或policy。expected_revision是本实例的审阅序列，首次为`"0"`；每次新审阅分配新review_id。`query(request_id)`查原，`current(installation_ref)`要求角色解析、配置、对象与当前审阅策略仍匹配；配置或解析推进后保留旧历史，但拒绝将旧结果用于当前操作。
+
+提案先用SDK产品Permission定义校验，再执行八类权限收窄：kind与purpose不变，集合仅删减且保持唯一排序，quota_bytes用精确整数比较且不能增加，其余固定字段及完整Ref不变。device_scope与secret_role不能保留空用途；protocol_io必须保留同profile的network_endpoint。可删除整项权限，空提案表示请求不授予任何权限，不隐式恢复manifest的完整范围。
+
+服务在首次成功审阅事务内保存本地validation_policy原件，绑定当前构建清单摘要、产品契约和收窄规则，调用者不能选择其他策略。不同构建产生不同策略身份；旧审阅可查历史，但不能自动作为新构建的current结果。策略、审阅、head、请求结果和审计同事务提交，角色与配置在同writer内重新核对。每库最多4096次审阅、正文合计64MiB、并发最多两个。逐写故障、显式15→16备份迁移和独立进程策略变化拒绝已有验证。
+
+该接口准备后续人员批准所需的固定请求与提案，尚未表达人员确认、会话授权、能力支持或最终用途政策批准。它不生成Approval、LaunchAuthorization或设备权限，也未替代正式C09管理HTTP的Context与installation CAS。其他角色对象提供者及正式人员管理传输继续作为未完成实现；下节提供真实会话的内部批准入口。
+
+### 人员批准、冻结与撤销
+
+业务库schema 17将安装批准接入真实`storage.sessions(clock)`。`extension.manage`进入本地可授予权限目录，但不加入首次管理员默认权限；须由有当前auth.manage权限且处于近期认证窗口的人员显式授予。批准入口只在默认本地权限权威下装配，外部自定义会话权限提供者不能取得该入口。调用者提供真实access token，不能上传principal或自报认证证明。
+
+`sessions.approveExtension(token,{request_id,installation_ref,permission_review_ref,configuration_ref,approved_permission_ids})`要求当前人员令牌含extension.manage且处于既有五分钟近期认证窗口。批准前后核对令牌、会话及当前权限；等待安装来源期间注销或撤权会阻止提交。权限ID须排序、唯一，并从固定review.proposed选择完整权限对象；permissions_digest覆盖完整收窄结果，不能回查manifest扩大范围。schema 18从包内静态模板核对设备动作声明，允许批准与本地设备角色及device_kind相符的非空权限；不依赖启动后才能产生的运行目录。其他资源类型缺少实际能力提供者时仍拒绝。空权限批准只表示不授予扩展任何权限。schema 17保留原有设备目录检查，不自动获得新能力。
+
+批准、完整权限和人员操作审计同事务保存。每个installation至多一次批准；配置、角色解析和审阅的后续插入由数据库触发器拒绝，即使批准已撤销也不能复活旧实例。须重新stage候选，再配置、解析、审阅并批准。`revokeExtensionApproval(token,{request_id,approval_ref,reason})`使用当前人员管理权限保存永久deny；它不依赖安装来源或旧审阅策略仍可用，重复撤销返回原deny。实际worker保护传播尚待运行采用链接通。
+
+`lookupExtensionApproval(token,request_id)`要求extension.read，按当前真实credential与request_id查历史；不同credential不共享请求身份。`getExtensionApproval(token,approval_ref)`要求extension.read，返回本地批准或永久撤销状态；approved还须匹配当前审阅／配置／对象／构建策略及能力。此查询不检查实时安装实物，不生成启动授权，也不能替代启动时的Suite物化复查。历史approve结果在撤销后仍可查原，不能当作当前有效批准。
+
+每库至多4096个批准／撤销请求，结果合计64MiB，单结果4MiB；批准并发至多两个。真实登录、令牌签发、管理权限授予／撤销、近期认证截止、等待中注销、配置冻结、逐写回滚及重开后的永久deny已有文件库验证。认证时钟与平台资格的测试输入仍为合成；人员管理HTTP／GUI、完整对象能力与用途政策仍待完成；业务短授权、一次CREATE与关闭态运行采用见前述章节。
+
+### 包内静态能力与运行目录分离
+
+schema 18通过固定安装来源的`describeCapabilityTemplates`读取清单指定文件，核完整intake／清单／库存／文件身份及原bytes摘要。SDK独立`capability-template`入口严格解码，模板的device_role须为本包声明的设备角色；同角色与device_kind只接受一份模板。SchemaDescriptor摘要须匹配JCS文档，相同schema_id不得代表不同定义；全部Schema在固定子进程内共享编译预算，拒绝外部引用和未知关键字，核心继续禁止动态代码生成。
+
+批准时将权限中的真实设备引用映射到当前角色绑定及device_kind，核动作／触发器ID与当前OS／架构声明。静态模板不携带运行footprint；平台untested可作为待验声明参与安装批准，不能据此宣称平台或设备已通过验收。所有文件总计至多1MiB、唯一Schema至多256，证据正文每项2MiB、每库合计64MiB。模板证据、批准、完整权限和审计同事务写入，失败全部回滚；当前批准重查原模板选择、配置／角色及设备绑定。17→18显式迁移保留旧记录，不补造静态证据。
+
+这是既定的安装前静态批准；启动后的只读身份观测、实际目录、型号／固件／资源足迹、完成与取消资格仍须由运行CatalogApproval核定。非空安装批准不生成LaunchAuthorization，也不允许设备发送。当前仅接通device_scope声明检查，其他资源能力、完整用途政策、正式管理HTTP／GUI和运行采用仍待完成。
+
+### 当前内容锁交接
+
+`storage.workerLaunches.acquireContent(LaunchKey)`仅处理本次核心启动已准备的完整意图，审批与内容提供者由storage固定装配。它从Suite有界交接核完整intake／收据／manifest／inventory，固定worker再按当前库存核原bytes摘要、文件类型、完整目录及root FILE_ID并取得自己的原生只读锁。交接释放前重核Suite资格和本地审批；接收方锁已持有才结束Suite交接。摘要与目录扫描在固定worker中运行，单次原生检查至多三秒，不阻塞核心监督心跳。
+
+返回的`protection`固定根路径／身份、入口文件及相对路径、IO策略文件ID和两个制品摘要；它不是可执行授权。`verify()`重新核Suite当前内容、原生锁和本地审批，失败关闭保护；`close()`和`closed`用于等待实际释放。业务库关闭会主动终止本库持有的内容worker，最多四个等待或已持有的保护。启动器每次消费前仍须核当前批准、完整启用／资源计划、短授权及fence；路径副本不能替代活的保护句柄。
+
+已验证Windows真实句柄交接、防改写／替换、当前信任撤销及业务库关闭后的释放。该入口同时返回冻结的materials，供下述监督通道交接；完整扩展加载器闭包与创建业务编排仍待接通，不把内容保护视为worker已启动或模块已加载。
+
+
+### 固定 worker 启动运行包
+
+Windows 构建按`worker-runtime-inputs.json`固定 Node 24.22.0 x64、Node 许可及canonicalize原始模块／许可的字节摘要，运行包包含`runtime/node.exe`、`runtime/canonicalize.mjs`及相应许可。构建必须使用该固定Node和同目录LICENSE，摘要不符即拒绝，不从网络获取或选择另一运行时。worker bootstrap、核心bootstrap和监督客户端的规范化库均从包内固定位置导入。
+
+带bootstrap政策启动时，原生宿主从自身安装目录读取完整构建清单，将构建原字节摘要与随包Node摘要合成并核对artifact_manifest_ref；在创建核心前按完整库存检查实际文件、目录、文件身份和内容，再持续持有原生句柄。解释器固定为随包Node，调用方传入的解释器路径不能替换该选择。原生创建时仅交付Windows系统和临时目录环境项，工作目录固定为受保护安装根，不继承NODE_OPTIONS／NODE_PATH。受保护的实际盘符路径用于Windows创建进程，加载后另核真实映像文件身份。
+
+该保护已覆盖当前worker bootstrap所需的Node、JS验证器、规范化库和本地时钟模块，独立副本无需外部npm模块即可运行这条路径。它尚不覆盖核心数据库等包外业务依赖，也不表示扩展动态加载闭包、OS平台组合或正式发行信任已经验收。CREATE采用该固定组合；真实启动授权来源及扩展启用业务继续实施。裸开发容纳模式没有bootstrap政策，不能据其启动成功声称取得上述保护资格。
+
+### 原生监督器持有扩展内容
+
+监督控制0.4增加LAUNCH_LOAD／LOAD_RESULT，`loadWorkerContent(LaunchKey, materials)`先取得当前物化证明，再按begin／chunk／finish传输完整加载材料。材料来自`acquireContent`返回的冻结原件，包含实际根路径／身份、manifest和库存；调用方在交接前后调用原持有对象的verify，监督器ready且复核成功后才释放Controller持有对象。该方法是可信核心内部接口，不能由管理客户端指定任意文件路径。
+
+完整材料最多8MiB，分片最多49152原字节，严格连续offset并绑定完整材料摘要；从begin起固定十秒，不因轮询续期。原生监督器核当前登记、fence、物化观察、完整清单／库存摘要和指定worker入口，后台核实际目录、文件原字节及根FILE_ID并持有自己的句柄；等待与分片之间保留原健康查询。开发容量为四个活动加载、4096个保留load身份和一个后台扫描，未完成生产容量验收。
+
+返回的load_id只标识本监督实例的内容保护。release在后台仍运行时返回pending，确认released后句柄才全部退出；撤销先关闭资格，未完成扫描的结果不得采用。创建尝试已消费时，内容保护保持至实际组退役，不能仅凭deny或通道丢失释放。CREATE还要求独立的新授权、当前物化证明和完整运行组合；load_id本身不能授予启动或设备权限。
+
+真实Windows联调验证超过256KiB的完整材料及连续分片交接、Controller释放后监督器仍阻止改写／替换、显式释放与deny后的实际释放，以及错根身份、manifest摘要和worker入口拒绝。测试中的安装批准、平台资格和启动授权仍为合成配置，不能作为正式运行准入证据。
+
+### 监督器取得当前物化证明
+
+监督控制0.3增加`LAUNCH_MATERIALIZE`与`MATERIALIZATION_RESULT`；核心调用`prepareWorkerMaterialization(LaunchKey)`取得监督器持有的观察引用。请求绑定已登记完整意图及当前allow；固定观察请求ID重复查询不会新建challenge。registered及admitted_closed可取得当前物化观察；后者供采用复核，不恢复创建权。监督器后台查询Suite的INTAKE_QUERY及VERIFY_MATERIALIZATION，控制通道快速返回pending，核心在队列外等待后轮询；原500ms健康查询和两秒回执期限保持生效。等待中撤权立即拒绝后续结果，旧观察不能恢复allow。
+
+可信父进程可通过`startProcessHost`的`installationPeer`配置安装端点。原生宿主截留`--installation-peer`，不转交核心；配置包含固定管道后缀、channel、安装宿主／权威／库、进程PID及创建时间、SID／会话／认证LUID和安装库观察域。该配置不来自HTTP或控制消息。原生保留进程句柄，在连接及I/O期间核对实际服务端PID与身份；连接失效后不重连。
+
+监督器核收据完整Ref及摘要、宿主信任代、平台、目标、清单与制品集合，再自行产生challenge并核完整响应回显、固定观察域及本地截止。I/O总预算四秒；证明从challenge生成起最多五秒，返回寿命使用监督器本地域，远端observed_tick不充当本地年龄。CREATE只查本监督器持有的当前证明，并继续核新短授权和当前fence；调用者填写两个字符串不能取得创建资格。每实例最多4096个观察请求，同时只执行一个安装查询；超限拒绝，不自动淘汰或延长。
+
+真实Windows联调覆盖Suite封存原件、SQLite、实际文件重验、双向认证管道、超过两秒的观察等待、错误收据／目标／观察域／challenge／进程创建时间、等待中撤销及超时。安装审批、平台批准与可信时间仍采用合成测试配置。当前物化证明已进入固定运行包的一次创建及核心运行绑定采用；人员启用与业务短授权已接通，扩展模块执行仍待完成。
+
+### 物化文件核验
+
+`openMaterializedContent().pin(root, inventory)`提供Windows x64本机内容核验。调用者须是安装／启动可信代码，输入为已由权威确定的本地payload根及完整`extension-files/1`库存；它不是接受浏览器或worker任意路径的接口。包内路径沿C09的`portable-ascii/1`，文件ID严格排序且唯一；根路径可以使用Unicode。控制文档与payload分开保存，库存不包含`extension.json`或`files.json`。单文件256MiB、总量1GiB、最多65536个文件、路径240字符及每次最多5秒核验窗口沿既定开发预算；这些上限不是吞吐或实时性能承诺。
+
+原生模块逐级持有目录句柄、拒绝reparse和硬链接，以卷GUID路径定位内容根；文件仅共享读取，核实际大小和SHA256，并拒绝未列文件／目录及文件或目录的附加数据流。句柄使用N-API类型标记，不能从JavaScript属性、原型或克隆重建。`verify()`重新核文件身份、库存与数据流，失败释放句柄并永久关闭该对象；`close()`可重复调用。首次核验沿用同一起点，遍历阶段不刷新窗口，晚于截止的结果不成功返回。同步文件操作不能承诺在操作系统阻塞期间立即中止，须放入独立安装工作进程，不能直接占用核心控制循环。（平台依据：[CreateFileW共享语义](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)、[卷GUID路径](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew)、[文件流](https://learn.microsoft.com/en-us/windows/win32/fileio/file-streams)。）
+
+目录句柄不阻止新增目录项或数据流，核验也不设置或证明目录ACL。受保护根、加载器的依赖闭包、当前发行信任、installation.db封存记录及原件查询仍须由Suite安装宿主与启动器接通；不能把该对象、rootIdentity或一次摘要相符当作物化凭据或启动批准。当前没有对外生成MaterializationResult，也未据此开放CREATE。6项真实Windows文件测试覆盖跨进程写入／替换拒绝、祖先重命名、内容错配、库存变化后失效、链接／数据流、路径／容量及伪造令牌。Linux、掉电耐久与完整可信安装／加载链尚未验证。
 
 ### 实例锁与启动记录
 
@@ -106,7 +293,7 @@ SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 
 node --disallow-code-generation-from-strings dist/cli.mjs migrate-storage --data-dir /absolute/controller-data
 ```
 
-此操作逐步升级至 schema 10。每一步先通过 SQLite backup 生成同目录的独立旧版文件及 SHA-256，再同事务升级、保留服务 scope、启动历史和已有身份回执、登记迁移摘要和备份引用。成功响应 `steps` 列出本次各步，顶层备份字段指最后一步；已为 v10 时返回 `changed:false`。正在运行、未知版本或不完整迁移拒绝。每一步 DDL 失败只回滚该步；例如 v1→v2 已提交而 v2→v3 失败时保留 v2，不自动降级。旧 v1—v9 库仍可保护态启动，不自动升级。备份不能作为另一个活动实例直接使用，正式恢复仍需换 scope 和完整恢复流程。活动库与备份目录的安装 ACL、备份恢复和掉电耐久尚待平台验收。
+此操作逐步升级至 schema 23。每一步先通过 SQLite backup 生成同目录的独立旧版文件及 SHA-256，再同事务升级、保留服务 scope、启动历史和已有身份回执、登记迁移摘要和备份引用。成功响应 `steps` 列出本次各步，顶层备份字段指最后一步；已为 v23 时返回 `changed:false`。正在运行、未知版本或不完整迁移拒绝。每一步 DDL 失败只回滚该步；例如 v1→v2 已提交而 v2→v3 失败时保留 v2，不自动降级。旧 v1—v22 库仍可使用对应版本的保护态功能，不自动升级；worker启动准备要求v12，候选安装原件要求v13，配置原件要求v14，角色解析原件要求v15，权限审阅原件要求v16，人员批准与永久撤销要求v17，静态能力批准证据要求v18，核心worker运行绑定要求v19，固定虚拟设备资源与启动依赖封存要求v20，正式安装依赖计划要求v21，人员启用受理与资源占用要求v22，业务启动短授权与fence要求v23。备份不能作为另一个活动实例直接使用，正式恢复仍需换 scope 和完整恢复流程。活动库与备份目录的安装 ACL、备份恢复和掉电耐久尚待平台验收。
 
 `enroll-admin --data-dir <绝对目录>` 是供本机安装管理客户端使用的子进程入口。Windows 要求实际提升权限的管理员，首期系统工具固定标准 Windows 安装位置；Linux 要求有效 UID 0。没有在线角色、环境开关或命令参数可替代该检查。当前账户非管理员时，在打开业务库或发出能力前拒绝。父客户端必须用受控继承管道连接 stdin/stdout，终端和文件重定向拒绝；尚未提供交互安装向导。
 

@@ -1,0 +1,11 @@
+{
+  "format": "leafseamer-worker-runtime-inputs/1",
+  "node_version": "24.22.0",
+  "platform": "win32",
+  "arch": "x64",
+  "node_sha256": "ba93f9a70bd86fce3ebbb39ec758501458453467aa92a34a0a3602d1e3fc2b9c",
+  "node_license_sha256": "ed34dd8e3f0a78dbaf00d0444ce8e285b015b765379c2e17880455f70370f8e9",
+  "canonicalize_version": "5.1.0",
+  "canonicalize_sha256": "c1d0195af2a0748454b06af8f218e5c90415c19d39154d0058fee8229c12d859",
+  "canonicalize_license_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+}

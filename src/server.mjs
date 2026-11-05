@@ -20,6 +20,9 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       const result = await coreBootstrap(storage.identity), {binding, policy} = result;
       supervision = result.supervision ?? null; supervision?.assertCurrent();
       storage.bindCoreRuntime(binding, policy);
+      if(supervision)storage.workerLaunches?.runtime?.bindSource(supervision);
+      if(supervision)storage.extensionInstallations?.bindRuntimeSource?.(supervision);
+      if(supervision)storage.workerLaunches?.authorization?.bindSource(supervision);
       supervision?.assertCurrent();
     }
   } catch (error) { try { storage.close(); } finally { supervision?.close(); } throw error; }

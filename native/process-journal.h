@@ -67,6 +67,11 @@ struct Statement {
   std::string text(int n) { const auto p = sqlite3_column_text(value, n); require(p != nullptr, "process_journal_value"); return reinterpret_cast<const char*>(p); }
   void done() { require(sqlite3_step(value) == SQLITE_DONE, "process_journal_write"); }
 };
+struct LaunchFenceItem { std::string launch, digest, disposition; };
+struct WorkerStored {
+  std::string digest, intent, state, receipt, retirement, member, group, generation;
+  bool attempted = false;
+};
 class ProcessJournal {
   Handle file;
   std::unique_ptr<sqlite3, DatabaseCloser> db;
@@ -111,19 +116,19 @@ public:
     }
     require(scalar("PRAGMA application_id") == "1280528456", "process_journal_version");
     const auto version = scalar("PRAGMA user_version");
-    require(version == "2" || (upgrade && version == "1"), version == "1" ? "process_journal_migration_required" : "process_journal_version");
+    require(version == "5" || (upgrade && (version == "1" || version == "2" || version == "3" || version == "4")), version != "5" ? "process_journal_migration_required" : "process_journal_version");
     require(scalar("PRAGMA integrity_check") == "ok", "process_journal_integrity");
     Statement foreignKeys(db.get(), "PRAGMA foreign_key_check"); require(sqlite3_step(foreignKeys.value) == SQLITE_DONE, "process_journal_foreign_key");
     sqlite3* memory = nullptr; require(sqlite3_open(":memory:", &memory) == SQLITE_OK, "process_journal_schema");
     std::unique_ptr<sqlite3, DatabaseCloser> reference(memory);
-    require(sqlite3_exec(memory, version == "1" ? processJournalV1Sql : processJournalSql, nullptr, nullptr, nullptr) == SQLITE_OK && schema(memory) == schema(db.get()), "process_journal_schema");
+    require(sqlite3_exec(memory, version == "1" ? processJournalV1Sql : (version == "2" ? processJournalV2Sql : (version == "3" ? processJournalV3Sql : (version == "4" ? processJournalV4Sql : processJournalSql))), nullptr, nullptr, nullptr) == SQLITE_OK && schema(memory) == schema(db.get()), "process_journal_schema");
     Statement meta(db.get(), "SELECT directory_id,owner_sid FROM host_meta WHERE singleton=1");
     require(sqlite3_step(meta.value) == SQLITE_ROW && meta.text(0) == instance.directoryId && meta.text(1) == instance.owner, "process_journal_identity");
     require(sqlite3_step(meta.value) == SQLITE_DONE, "process_journal_identity");
     require(scalar("SELECT count(*) FROM core_attempt a LEFT JOIN core_exit e USING(attempt_id) WHERE e.attempt_id IS NULL") == "0", "process_recovery_required");
-    if (version == "1") {
+    if (version != "5") {
       // 显式升级才备份并改变DDL；未结束尝试不能通过升级绕开恢复。
-      const auto suffix = identifier(); const auto backupPath = instance.path + L"\\supervisor-before-v2-" + std::wstring(suffix.begin(), suffix.end()) + L".db";
+      const auto suffix = identifier(); const auto backupPath = instance.path + L"\\supervisor-before-v5-" + std::wstring(suffix.begin(), suffix.end()) + L".db";
       Handle backupFile(CreateFileW(backupPath.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &instance.security, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
       require(backupFile.value != INVALID_HANDLE_VALUE, "process_journal_backup");
       sqlite3* copy = nullptr; require(sqlite3_open_v2(utf8(backupPath).c_str(), &copy, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, nullptr) == SQLITE_OK, "process_journal_backup");
@@ -131,8 +136,13 @@ public:
       sqlite3_backup* transfer = sqlite3_backup_init(copy, "main", db.get(), "main"); require(transfer != nullptr, "process_journal_backup");
       const auto step = sqlite3_backup_step(transfer, -1), finish = sqlite3_backup_finish(transfer);
       require(step == SQLITE_DONE && finish == SQLITE_OK, "process_journal_backup");
-      execute("BEGIN IMMEDIATE"); execute(processJournalUpgradeSql); execute("COMMIT");
-      require(sqlite3_exec(memory, processJournalUpgradeSql, nullptr, nullptr, nullptr) == SQLITE_OK && schema(memory) == schema(db.get()), "process_journal_schema");
+      execute("BEGIN IMMEDIATE"); if (version == "1") execute(processJournalUpgradeSql);
+      if (version == "1" || version == "2") execute(processJournalFenceSql);
+      if (version != "4") execute(processJournalRetirementSql); execute(processJournalCreationSql); execute("COMMIT");
+      if (version == "1") require(sqlite3_exec(memory, processJournalUpgradeSql, nullptr, nullptr, nullptr) == SQLITE_OK, "process_journal_schema");
+      if (version == "1" || version == "2") require(sqlite3_exec(memory, processJournalFenceSql, nullptr, nullptr, nullptr) == SQLITE_OK, "process_journal_schema");
+      if (version != "4") require(sqlite3_exec(memory, processJournalRetirementSql, nullptr, nullptr, nullptr) == SQLITE_OK, "process_journal_schema");
+      require(sqlite3_exec(memory, processJournalCreationSql, nullptr, nullptr, nullptr) == SQLITE_OK && schema(memory) == schema(db.get()), "process_journal_schema");
       upgraded = true;
     }
   }
@@ -161,5 +171,148 @@ public:
     Statement q(db.get(), "SELECT a.receipt_jcs FROM core_admission a JOIN core_observation o USING(attempt_id) LEFT JOIN core_exit e USING(attempt_id) WHERE a.attempt_id=? AND e.attempt_id IS NULL");
     q.bind(1, id); require(sqlite3_step(q.value) == SQLITE_ROW, "control_journal_closed");
     const auto body = q.text(0); require(sqlite3_step(q.value) == SQLITE_DONE, "control_journal_binding"); return body;
+  }
+  // 固定scope属于已准入核心attempt；整个快照和历史deny同事务提交后才能ACK。
+  std::string fence(const std::string& id, const std::string& revision, const std::string& digest,
+      const std::string& body, const std::vector<LaunchFenceItem>& items) {
+    admission(id);
+    Statement members(db.get(), "SELECT l.launch_id,l.intent_digest,s.state FROM worker_launch l JOIN worker_state s USING(attempt_id,launch_id) WHERE l.attempt_id=?");
+    members.bind(1, id); int memberState;
+    while ((memberState = sqlite3_step(members.value)) == SQLITE_ROW) {
+      const auto key = members.text(0), storedDigest = members.text(1), phase = members.text(2); bool found = false;
+      for (const auto& item : items) if (item.launch == key) {
+        found = true;
+        if (item.digest != storedDigest || (item.disposition == "allow" && (phase == "retired" || phase == "rejected" || phase == "retiring" || phase == "indeterminate"))) return "invalid_binding";
+      }
+      if (!found && phase != "retired" && phase != "rejected") return "invalid_binding";
+    }
+    require(memberState == SQLITE_DONE, "process_journal_read");
+    Statement current(db.get(), "SELECT c.revision,f.digest,f.snapshot_jcs FROM launch_fence_current c JOIN launch_fence f USING(attempt_id,revision) WHERE c.attempt_id=?");
+    current.bind(1, id); const auto state = sqlite3_step(current.value);
+    require(state == SQLITE_ROW || state == SQLITE_DONE, "process_journal_read");
+    bool exists = state == SQLITE_ROW;
+    if (exists) {
+      const auto old = current.text(0), previousDigest = current.text(1), previousBody = current.text(2);
+      require(sqlite3_step(current.value) == SQLITE_DONE, "process_journal_read");
+      if (old == revision) return previousDigest == digest && previousBody == body ? "" : "identity_conflict";
+      if (revision.size() < old.size() || (revision.size() == old.size() && revision < old)) return "stale_fence";
+    }
+    Statement count(db.get(), "SELECT count(*) FROM launch_fence WHERE attempt_id=?"); count.bind(1, id);
+    require(sqlite3_step(count.value) == SQLITE_ROW, "process_journal_read");
+    if (std::stoul(count.text(0)) >= 4096) return "capacity";
+    require(sqlite3_step(count.value) == SQLITE_DONE, "process_journal_read");
+    for (const auto& item : items) {
+      Statement conflict(db.get(), "SELECT 1 FROM launch_fence_item WHERE attempt_id=? AND launch_id=? AND (intent_digest<>? OR (disposition='deny' AND ?='allow')) LIMIT 1");
+      conflict.bind(1, id); conflict.bind(2, item.launch); conflict.bind(3, item.digest); conflict.bind(4, item.disposition);
+      const auto result = sqlite3_step(conflict.value); if (result == SQLITE_ROW) return "identity_conflict";
+      require(result == SQLITE_DONE, "process_journal_read");
+    }
+    try {
+      execute("BEGIN IMMEDIATE");
+      Statement snapshot(db.get(), "INSERT INTO launch_fence VALUES(?,?,?,?)");
+      snapshot.bind(1, id); snapshot.bind(2, revision); snapshot.bind(3, digest); snapshot.bind(4, body); snapshot.done();
+      for (const auto& item : items) {
+        Statement insert(db.get(), "INSERT INTO launch_fence_item VALUES(?,?,?,?,?)");
+        insert.bind(1, id); insert.bind(2, revision); insert.bind(3, item.launch); insert.bind(4, item.digest); insert.bind(5, item.disposition); insert.done();
+      }
+      Statement pointer(db.get(), exists ? "UPDATE launch_fence_current SET revision=?2 WHERE attempt_id=?1" : "INSERT INTO launch_fence_current VALUES(?1,?2)");
+      pointer.bind(1, id); pointer.bind(2, revision); pointer.done(); execute("COMMIT");
+    } catch (...) {
+      sqlite3_exec(db.get(), "ROLLBACK", nullptr, nullptr, nullptr); throw;
+    }
+    return "";
+  }
+  std::unique_ptr<WorkerStored> worker(const std::string& id, const std::string& launchId) {
+    Statement q(db.get(), "SELECT l.intent_digest,l.intent_jcs,s.state,s.creation_attempted,coalesce(s.admission_receipt,'null'),coalesce(s.retirement_evidence,'null'),l.member_id,l.group_id,l.group_generation FROM worker_launch l JOIN worker_state s USING(attempt_id,launch_id) WHERE l.attempt_id=? AND l.launch_id=?");
+    q.bind(1, id); q.bind(2, launchId); const auto status = sqlite3_step(q.value);
+    if (status == SQLITE_DONE) return nullptr; require(status == SQLITE_ROW, "process_journal_read");
+    auto found = std::make_unique<WorkerStored>(); found->digest = q.text(0); found->intent = q.text(1); found->state = q.text(2);
+    found->attempted = q.text(3) == "1"; found->receipt = q.text(4); found->retirement = q.text(5);
+    found->member = q.text(6); found->group = q.text(7); found->generation = q.text(8);
+    require(sqlite3_step(q.value) == SQLITE_DONE, "process_journal_read"); return found;
+  }
+  void reserveWorkerGroup(const std::string& id, const std::string& launchId, const std::string& name, const std::string& reservation) {
+    Statement prior(db.get(), "SELECT object_name,reservation_jcs FROM worker_group WHERE attempt_id=? AND launch_id=?");
+    prior.bind(1, id); prior.bind(2, launchId); const auto status = sqlite3_step(prior.value);
+    if (status == SQLITE_ROW) { require(prior.text(0) == name && prior.text(1) == reservation && sqlite3_step(prior.value) == SQLITE_DONE, "worker_group_identity"); return; }
+    require(status == SQLITE_DONE, "process_journal_read");
+    try {
+      execute("BEGIN IMMEDIATE"); Statement insert(db.get(), "INSERT INTO worker_group VALUES(?,?,?,?)");
+      insert.bind(1, id); insert.bind(2, launchId); insert.bind(3, name); insert.bind(4, reservation); insert.done(); execute("COMMIT");
+    } catch (...) { sqlite3_exec(db.get(), "ROLLBACK", nullptr, nullptr, nullptr); throw; }
+  }
+  void beginWorkerCreation(const std::string& id,const std::string& launchId,const std::string& creationId,const std::string& record){
+    try{execute("BEGIN IMMEDIATE");Statement insert(db.get(),"INSERT INTO worker_creation VALUES(?,?,?,?)");
+      insert.bind(1,id);insert.bind(2,launchId);insert.bind(3,creationId);insert.bind(4,record);insert.done();
+      Statement update(db.get(),"UPDATE worker_state SET state='creating',creation_attempted=1 WHERE attempt_id=? AND launch_id=? AND state='registered' AND creation_attempted=0");
+      update.bind(1,id);update.bind(2,launchId);update.done();require(sqlite3_changes(db.get())==1,"worker_creation_state");execute("COMMIT");
+    }catch(...){sqlite3_exec(db.get(),"ROLLBACK",nullptr,nullptr,nullptr);throw;}
+  }
+  void observeWorker(const std::string& id,const std::string& launchId,const std::string& observationId,const std::string& record){
+    try{execute("BEGIN IMMEDIATE");Statement insert(db.get(),"INSERT INTO worker_observation VALUES(?,?,?,?)");
+      insert.bind(1,id);insert.bind(2,launchId);insert.bind(3,observationId);insert.bind(4,record);insert.done();
+      Statement update(db.get(),"UPDATE worker_state SET state='awaiting_bootstrap' WHERE attempt_id=? AND launch_id=? AND state='creating' AND creation_attempted=1");
+      update.bind(1,id);update.bind(2,launchId);update.done();require(sqlite3_changes(db.get())==1,"worker_creation_state");execute("COMMIT");
+    }catch(...){sqlite3_exec(db.get(),"ROLLBACK",nullptr,nullptr,nullptr);throw;}
+  }
+  void admitWorker(const std::string& id,const std::string& launchId,const std::string& receipt){
+    Statement update(db.get(),"UPDATE worker_state SET state='admitted_closed',admission_receipt=?3 WHERE attempt_id=?1 AND launch_id=?2 AND state='awaiting_bootstrap' AND creation_attempted=1");
+    update.bind(1,id);update.bind(2,launchId);update.bind(3,receipt);update.done();require(sqlite3_changes(db.get())==1,"worker_admission_state");
+  }
+  void failWorker(const std::string& id,const std::string& launchId){
+    Statement update(db.get(),"UPDATE worker_state SET state='indeterminate' WHERE attempt_id=? AND launch_id=? AND state IN('creating','awaiting_bootstrap','admitted_closed')");
+    update.bind(1,id);update.bind(2,launchId);update.done();
+  }
+  void beginWorkerRetirement(const std::string& id, const std::string& launchId) {
+    try {
+      execute("BEGIN IMMEDIATE");
+      Statement update(db.get(), "UPDATE worker_state SET state='retiring' WHERE attempt_id=? AND launch_id=? AND state IN('registered','creating','awaiting_bootstrap','admitted_closed','indeterminate')");
+      update.bind(1, id); update.bind(2, launchId); update.done(); require(sqlite3_changes(db.get()) == 1, "worker_retirement_state"); execute("COMMIT");
+    } catch (...) { sqlite3_exec(db.get(), "ROLLBACK", nullptr, nullptr, nullptr); throw; }
+  }
+  void finishWorkerRetirement(const std::string& id, const std::string& launchId, const std::string& evidenceId, const std::string& observationId,
+      const std::string& request, const std::string& observation, const std::string& evidence) {
+    try {
+      execute("BEGIN IMMEDIATE"); Statement insert(db.get(), "INSERT INTO worker_retirement VALUES(?,?,?,?,?,?,?)");
+      insert.bind(1, id); insert.bind(2, launchId); insert.bind(3, evidenceId); insert.bind(4, observationId);
+      insert.bind(5, request); insert.bind(6, observation); insert.bind(7, evidence); insert.done();
+      Statement update(db.get(), "UPDATE worker_state SET state='retired',retirement_evidence=?3 WHERE attempt_id=?1 AND launch_id=?2 AND state='retiring'");
+      update.bind(1, id); update.bind(2, launchId); update.bind(3, evidence); update.done(); require(sqlite3_changes(db.get()) == 1, "worker_retirement_state"); execute("COMMIT");
+    } catch (...) { sqlite3_exec(db.get(), "ROLLBACK", nullptr, nullptr, nullptr); throw; }
+  }
+  std::string workerPermission(const std::string& id, const std::string& launchId, const std::string& digest, const std::string& revision = "") {
+    admission(id);
+    Statement permission(db.get(), "SELECT c.revision,i.intent_digest,i.disposition FROM launch_fence_current c JOIN launch_fence_item i USING(attempt_id,revision) WHERE c.attempt_id=? AND i.launch_id=?");
+    permission.bind(1, id); permission.bind(2, launchId); const auto result = sqlite3_step(permission.value);
+    if (result == SQLITE_DONE) return "stale_fence"; require(result == SQLITE_ROW, "process_journal_read");
+    if (!revision.empty() && permission.text(0) != revision) return "stale_fence";
+    if (permission.text(1) != digest || permission.text(2) != "allow") return "unauthorized";
+    require(sqlite3_step(permission.value) == SQLITE_DONE, "process_journal_read");
+    return "";
+  }
+  std::string registerWorker(const std::string& id, const std::string& launchId, const std::string& digest, const std::string& intent,
+      const std::string& member, const std::string& group, const std::string& generation, const std::string& authorization, const std::string& revision) {
+    admission(id);
+    const auto prior = worker(id, launchId);
+    if (prior && (prior->digest != digest || prior->intent != intent)) return "identity_conflict";
+    if (prior && prior->state != "registered") return "invalid_binding";
+    const auto failure = workerPermission(id, launchId, digest, revision); if (!failure.empty()) return failure;
+    if (prior) return "";
+    Statement limits(db.get(), "SELECT count(*),sum(state NOT IN('retired','rejected')) FROM worker_state WHERE attempt_id=?"); limits.bind(1, id);
+    require(sqlite3_step(limits.value) == SQLITE_ROW, "process_journal_read");
+    const auto count = std::stoul(limits.text(0)); if (count >= 4096 || (count && std::stoul(limits.text(1)) >= 256)) return "capacity";
+    require(sqlite3_step(limits.value) == SQLITE_DONE, "process_journal_read");
+    Statement unique(db.get(), "SELECT 1 FROM worker_launch WHERE attempt_id=? AND (member_id=? OR group_id=?) LIMIT 1");
+    unique.bind(1, id); unique.bind(2, member); unique.bind(3, group); const auto collision = sqlite3_step(unique.value);
+    if (collision == SQLITE_ROW) return "identity_conflict"; require(collision == SQLITE_DONE, "process_journal_read");
+    try {
+      execute("BEGIN IMMEDIATE");
+      Statement insert(db.get(), "INSERT INTO worker_launch VALUES(?,?,?,?,?,?,?,?)");
+      insert.bind(1, id); insert.bind(2, launchId); insert.bind(3, digest); insert.bind(4, intent); insert.bind(5, member);
+      insert.bind(6, group); insert.bind(7, generation); insert.bind(8, authorization); insert.done();
+      Statement state(db.get(), "INSERT INTO worker_state VALUES(?,?,'registered',0,NULL,NULL)"); state.bind(1, id); state.bind(2, launchId); state.done();
+      execute("COMMIT");
+    } catch (...) { sqlite3_exec(db.get(), "ROLLBACK", nullptr, nullptr, nullptr); throw; }
+    return "";
   }
 };

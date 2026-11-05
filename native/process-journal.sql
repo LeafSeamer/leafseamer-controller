@@ -57,3 +57,154 @@ CREATE TRIGGER bootstrap_no_delete BEFORE DELETE ON core_bootstrap BEGIN SELECT 
 CREATE TRIGGER admission_no_update BEFORE UPDATE ON core_admission BEGIN SELECT RAISE(ABORT,'immutable'); END;
 CREATE TRIGGER admission_no_delete BEFORE DELETE ON core_admission BEGIN SELECT RAISE(ABORT,'immutable'); END;
 PRAGMA user_version=2;
+
+CREATE TABLE launch_fence(
+ attempt_id TEXT NOT NULL REFERENCES core_admission(attempt_id),
+ revision TEXT NOT NULL CHECK(length(revision) BETWEEN 1 AND 20 AND revision NOT GLOB '*[^0-9]*' AND (revision='0' OR substr(revision,1,1)<>'0')),
+ digest TEXT NOT NULL,
+ snapshot_jcs TEXT NOT NULL CHECK(length(snapshot_jcs)<=262144),
+ PRIMARY KEY(attempt_id,revision)
+) STRICT;
+CREATE TABLE launch_fence_item(
+ attempt_id TEXT NOT NULL,
+ revision TEXT NOT NULL,
+ launch_id TEXT NOT NULL,
+ intent_digest TEXT NOT NULL,
+ disposition TEXT NOT NULL CHECK(disposition IN('allow','deny')),
+ PRIMARY KEY(attempt_id,revision,launch_id),
+ FOREIGN KEY(attempt_id,revision) REFERENCES launch_fence(attempt_id,revision)
+) STRICT;
+CREATE TABLE launch_fence_current(
+ attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES core_admission(attempt_id),
+ revision TEXT NOT NULL,
+ FOREIGN KEY(attempt_id,revision) REFERENCES launch_fence(attempt_id,revision)
+) STRICT;
+CREATE TRIGGER fence_no_update BEFORE UPDATE ON launch_fence BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER fence_no_delete BEFORE DELETE ON launch_fence BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER fence_item_no_update BEFORE UPDATE ON launch_fence_item BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER fence_item_no_delete BEFORE DELETE ON launch_fence_item BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER fence_current_no_delete BEFORE DELETE ON launch_fence_current BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER fence_item_sealed BEFORE INSERT ON launch_fence_item WHEN EXISTS(
+ SELECT 1 FROM launch_fence_current WHERE attempt_id=NEW.attempt_id AND
+ (length(revision)>length(NEW.revision) OR (length(revision)=length(NEW.revision) AND revision>=NEW.revision))
+) BEGIN SELECT RAISE(ABORT,'fence_sealed'); END;
+CREATE TRIGGER fence_item_identity BEFORE INSERT ON launch_fence_item WHEN EXISTS(
+ SELECT 1 FROM launch_fence_item WHERE attempt_id=NEW.attempt_id AND launch_id=NEW.launch_id AND
+ (intent_digest<>NEW.intent_digest OR (disposition='deny' AND NEW.disposition='allow'))
+) BEGIN SELECT RAISE(ABORT,'fence_identity_or_denial'); END;
+CREATE TRIGGER fence_current_forward BEFORE UPDATE ON launch_fence_current WHEN NEW.attempt_id<>OLD.attempt_id OR
+ length(NEW.revision)<length(OLD.revision) OR (length(NEW.revision)=length(OLD.revision) AND NEW.revision<=OLD.revision)
+BEGIN SELECT RAISE(ABORT,'fence_revision'); END;
+CREATE TABLE worker_launch(
+ attempt_id TEXT NOT NULL REFERENCES core_admission(attempt_id),
+ launch_id TEXT NOT NULL,
+ intent_digest TEXT NOT NULL,
+ intent_jcs TEXT NOT NULL CHECK(length(intent_jcs)<=262144),
+ member_id TEXT NOT NULL,
+ group_id TEXT NOT NULL,
+ group_generation TEXT NOT NULL,
+ authorization_jcs TEXT NOT NULL CHECK(length(authorization_jcs)<=65536),
+ PRIMARY KEY(attempt_id,launch_id),
+ UNIQUE(attempt_id,member_id),
+ UNIQUE(attempt_id,group_id),
+ FOREIGN KEY(attempt_id,launch_id) REFERENCES worker_state(attempt_id,launch_id) DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+CREATE TABLE worker_state(
+ attempt_id TEXT NOT NULL,
+ launch_id TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN('registered','creating','awaiting_bootstrap','admitted_closed','retiring','retired','rejected','indeterminate')),
+ creation_attempted INTEGER NOT NULL CHECK(creation_attempted IN(0,1)),
+ admission_receipt TEXT,
+ retirement_evidence TEXT,
+ PRIMARY KEY(attempt_id,launch_id),
+ FOREIGN KEY(attempt_id,launch_id) REFERENCES worker_launch(attempt_id,launch_id) DEFERRABLE INITIALLY DEFERRED,
+ CHECK(state NOT IN('registered','rejected') OR creation_attempted=0),
+ CHECK(state NOT IN('creating','awaiting_bootstrap','admitted_closed','indeterminate') OR creation_attempted=1),
+ CHECK(state<>'admitted_closed' OR admission_receipt IS NOT NULL),
+ CHECK(admission_receipt IS NULL OR state IN('admitted_closed','indeterminate','retiring','retired')),
+ CHECK((state='retired')=(retirement_evidence IS NOT NULL))
+) STRICT;
+CREATE TRIGGER worker_launch_no_update BEFORE UPDATE ON worker_launch BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER worker_launch_no_delete BEFORE DELETE ON worker_launch BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER worker_state_no_delete BEFORE DELETE ON worker_state BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER worker_state_initial BEFORE INSERT ON worker_state WHEN NEW.state<>'registered' OR NEW.creation_attempted<>0
+BEGIN SELECT RAISE(ABORT,'worker_initial_state'); END;
+CREATE TRIGGER worker_state_transition BEFORE UPDATE ON worker_state WHEN NEW.attempt_id<>OLD.attempt_id OR NEW.launch_id<>OLD.launch_id OR
+ NEW.creation_attempted<OLD.creation_attempted OR (OLD.admission_receipt IS NOT NULL AND NEW.admission_receipt IS NOT OLD.admission_receipt) OR NOT(
+ (OLD.state='registered' AND NEW.state IN('creating','rejected','retiring')) OR
+ (OLD.state='creating' AND NEW.state IN('awaiting_bootstrap','indeterminate','retiring')) OR
+ (OLD.state='awaiting_bootstrap' AND NEW.state IN('admitted_closed','indeterminate','retiring')) OR
+ (OLD.state='admitted_closed' AND NEW.state IN('indeterminate','retiring')) OR
+ (OLD.state='indeterminate' AND NEW.state='retiring') OR (OLD.state='retiring' AND NEW.state='retired'))
+BEGIN SELECT RAISE(ABORT,'worker_state_transition'); END;
+PRAGMA user_version=3;
+
+CREATE TABLE worker_group(
+ attempt_id TEXT NOT NULL,
+ launch_id TEXT NOT NULL,
+ object_name TEXT NOT NULL UNIQUE,
+ reservation_jcs TEXT NOT NULL CHECK(length(reservation_jcs)<=8192),
+ PRIMARY KEY(attempt_id,launch_id),
+ FOREIGN KEY(attempt_id,launch_id) REFERENCES worker_launch(attempt_id,launch_id)
+) STRICT;
+CREATE UNIQUE INDEX worker_state_retirement_key ON worker_state(attempt_id,launch_id,retirement_evidence);
+CREATE TABLE worker_retirement(
+ attempt_id TEXT NOT NULL,
+ launch_id TEXT NOT NULL,
+ evidence_id TEXT NOT NULL UNIQUE,
+ observation_id TEXT NOT NULL UNIQUE,
+ request_jcs TEXT NOT NULL CHECK(length(request_jcs)<=8192),
+ observation_jcs TEXT NOT NULL CHECK(length(observation_jcs)<=8192),
+ evidence_jcs TEXT NOT NULL CHECK(length(evidence_jcs)<=8192),
+ PRIMARY KEY(attempt_id,launch_id),
+ FOREIGN KEY(attempt_id,launch_id) REFERENCES worker_group(attempt_id,launch_id),
+ FOREIGN KEY(attempt_id,launch_id,evidence_jcs) REFERENCES worker_state(attempt_id,launch_id,retirement_evidence) DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+CREATE TRIGGER worker_group_initial BEFORE INSERT ON worker_group WHEN NOT EXISTS(
+ SELECT 1 FROM worker_state WHERE attempt_id=NEW.attempt_id AND launch_id=NEW.launch_id AND state='registered' AND creation_attempted=0
+) BEGIN SELECT RAISE(ABORT,'worker_group_state'); END;
+CREATE TRIGGER worker_group_no_update BEFORE UPDATE ON worker_group BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER worker_group_no_delete BEFORE DELETE ON worker_group BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER worker_retirement_initial BEFORE INSERT ON worker_retirement WHEN NOT EXISTS(
+ SELECT 1 FROM worker_state WHERE attempt_id=NEW.attempt_id AND launch_id=NEW.launch_id AND state='retiring'
+) BEGIN SELECT RAISE(ABORT,'worker_retirement_state'); END;
+CREATE TRIGGER worker_retirement_no_update BEFORE UPDATE ON worker_retirement BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER worker_retirement_no_delete BEFORE DELETE ON worker_retirement BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER worker_retired_evidence BEFORE UPDATE ON worker_state WHEN NEW.state='retired' AND NOT EXISTS(
+ SELECT 1 FROM worker_retirement WHERE attempt_id=NEW.attempt_id AND launch_id=NEW.launch_id AND evidence_jcs=NEW.retirement_evidence
+) BEGIN SELECT RAISE(ABORT,'worker_retirement_evidence'); END;
+PRAGMA user_version=4;
+
+CREATE TABLE worker_creation(
+ attempt_id TEXT NOT NULL,
+ launch_id TEXT NOT NULL,
+ creation_id TEXT NOT NULL UNIQUE,
+ record_jcs TEXT NOT NULL CHECK(length(record_jcs)<=65536),
+ PRIMARY KEY(attempt_id,launch_id),
+ FOREIGN KEY(attempt_id,launch_id) REFERENCES worker_launch(attempt_id,launch_id)
+) STRICT;
+CREATE TABLE worker_observation(
+ attempt_id TEXT NOT NULL,
+ launch_id TEXT NOT NULL,
+ observation_id TEXT NOT NULL UNIQUE,
+ record_jcs TEXT NOT NULL CHECK(length(record_jcs)<=65536),
+ PRIMARY KEY(attempt_id,launch_id),
+ FOREIGN KEY(attempt_id,launch_id) REFERENCES worker_creation(attempt_id,launch_id)
+) STRICT;
+CREATE TRIGGER worker_creation_initial BEFORE INSERT ON worker_creation WHEN NOT EXISTS(
+ SELECT 1 FROM worker_state WHERE attempt_id=NEW.attempt_id AND launch_id=NEW.launch_id AND state='registered' AND creation_attempted=0
+) BEGIN SELECT RAISE(ABORT,'worker_creation_state'); END;
+CREATE TRIGGER worker_creation_no_update BEFORE UPDATE ON worker_creation BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER worker_creation_no_delete BEFORE DELETE ON worker_creation BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER worker_observation_initial BEFORE INSERT ON worker_observation WHEN NOT EXISTS(
+ SELECT 1 FROM worker_state WHERE attempt_id=NEW.attempt_id AND launch_id=NEW.launch_id AND state='creating' AND creation_attempted=1
+) BEGIN SELECT RAISE(ABORT,'worker_observation_state'); END;
+CREATE TRIGGER worker_observation_no_update BEFORE UPDATE ON worker_observation BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER worker_observation_no_delete BEFORE DELETE ON worker_observation BEGIN SELECT RAISE(ABORT,'immutable'); END;
+CREATE TRIGGER worker_creating_evidence BEFORE UPDATE ON worker_state WHEN NEW.state='creating' AND NOT EXISTS(
+ SELECT 1 FROM worker_creation WHERE attempt_id=NEW.attempt_id AND launch_id=NEW.launch_id
+) BEGIN SELECT RAISE(ABORT,'worker_creation_evidence'); END;
+CREATE TRIGGER worker_observed_evidence BEFORE UPDATE ON worker_state WHEN NEW.state IN('awaiting_bootstrap','admitted_closed') AND NOT EXISTS(
+ SELECT 1 FROM worker_observation WHERE attempt_id=NEW.attempt_id AND launch_id=NEW.launch_id
+) BEGIN SELECT RAISE(ABORT,'worker_observation_evidence'); END;
+PRAGMA user_version=5;
