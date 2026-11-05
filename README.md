@@ -160,6 +160,16 @@ schema 22的新worker准备必须匹配本次服务启动的人员受理、当�
 
 该批准明确 `write_eligible=false`、`automation_eligible=false`，只适用于包内固定模拟器，其他模块不会因自报相同型号取得资格。物理型号CatalogApproval、事件来源／年龄接纳、设备写出口和资源释放仍待接通。扩展是经过管理员批准的代码，进程监督不构成恶意代码沙箱；没有以模拟器结果批准实际设备。
 
+### 人员控制请求与退出屏障
+
+schema26提供人员接管、释放和转交请求存储，使用当前人员Bearer令牌、同会话CSRF、RequestContext及控制版本CAS。接管、释放、提出转交、接受转交分别要求 `control.acquire`、`control.release`、`control.transfer`、`control.accept`；管理员身份不自动授予这些权限。强制接管额外要求 `control.emergency` 和非空理由，服务主体不能使用这些人员入口。
+
+HTTP入口为 `POST /api/v1/devices/{device_id}/control/acquire`、`release`、`transfers`，以及 `POST /api/v1/devices/{device_id}/control/transfers/{transfer_id}/accept`、`cancel`。请求字段及实际路径以SDK当前product1选择为准；响应202表示持久受理，200表示同键查原，均不表示已经生效。通过 `GET /api/v1/control-operations/{operation_id}` 查询操作，通过控制记录查询实际生效版本；`POST /api/v1/control-requests/lookup` 验证当前人员、目标scope及历史请求命名空间后查原。同键异内容拒绝，新请求耗用上下文预算，重放不重复耗用。
+
+接管、释放与接受转交在同一事务预留单调版本、保存完整历史启动集合、pending记录、请求回执和审计通知。pending期间拒绝新增启动准备；旧launch永久拒绝续签。核心内部屏障取得完整deny快照的确认和原监督器的组空退役原件后，才在同一事务更新生效版本。无证据或确认不完整时保留未决及预留版本；事务失败不部分提交。跨boot仅复用已持久保存的完整退出证据，未知旧启动不会视为空集合。当前只适用于没有已接纳命令的设备，后续命令执行必须接入完整命令切点与资源归类。
+
+接管和释放已通过本机真实监督进程、SQLite及HTTPS检查。生效后仍为 `protected`，不提供设备发送许可、不释放扩展资源owner。转交的存储与接口已有实现，多人员管理来源、双人员完整流程及GUI操作尚未接通验收；不能据此宣称完整人工控制交付。当前开发容量为4096份请求、16384次控制提交及每次256个历史启动，达到上限拒绝，不删除历史。
+
 ### 完整worker登记
 
 可信核心装配通过`registerWorker(intent, authorization)`提交完整意图，`queryLaunch(key)`查询原登记。Controller只接受devices分支，设备集合1至64项、ASCII排序唯一；数据源分支属于Seamer，不能在Controller取得设备进程身份。完整extension_binding、对象范围、运行组合、组、member及政策进入不可变意图和摘要，REGISTER不启动OS进程。
@@ -305,7 +315,7 @@ Windows 构建按`worker-runtime-inputs.json`固定 Node 24.22.0 x64、Node 许�
 node --disallow-code-generation-from-strings dist/cli.mjs migrate-storage --data-dir /absolute/controller-data
 ```
 
-此操作逐步升级至 schema 23。每一步先通过 SQLite backup 生成同目录的独立旧版文件及 SHA-256，再同事务升级、保留服务 scope、启动历史和已有身份回执、登记迁移摘要和备份引用。成功响应 `steps` 列出本次各步，顶层备份字段指最后一步；已为 v23 时返回 `changed:false`。正在运行、未知版本或不完整迁移拒绝。每一步 DDL 失败只回滚该步；例如 v1→v2 已提交而 v2→v3 失败时保留 v2，不自动降级。旧 v1—v22 库仍可使用对应版本的保护态功能，不自动升级；worker启动准备要求v12，候选安装原件要求v13，配置原件要求v14，角色解析原件要求v15，权限审阅原件要求v16，人员批准与永久撤销要求v17，静态能力批准证据要求v18，核心worker运行绑定要求v19，固定虚拟设备资源与启动依赖封存要求v20，正式安装依赖计划要求v21，人员启用受理与资源占用要求v22，业务启动短授权与fence要求v23。备份不能作为另一个活动实例直接使用，正式恢复仍需换 scope 和完整恢复流程。活动库与备份目录的安装 ACL、备份恢复和掉电耐久尚待平台验收。
+此操作逐步升级至 schema 26。每一步先通过 SQLite backup 生成同目录的独立旧版文件及 SHA-256，再同事务升级、保留服务 scope、启动历史和已有身份回执、登记迁移摘要和备份引用。成功响应 `steps` 列出本次各步，顶层备份字段指最后一步；已为 v26 时返回 `changed:false`。正在运行、未知版本或不完整迁移拒绝。每一步 DDL 失败只回滚该步；例如 v1→v2 已提交而 v2→v3 失败时保留 v2，不自动降级。旧 v1—v25 库仍可使用对应版本的保护态功能，不自动升级；worker启动准备要求v12，候选安装原件要求v13，配置原件要求v14，角色解析原件要求v15，权限审阅原件要求v16，人员批准与永久撤销要求v17，静态能力批准证据要求v18，核心worker运行绑定要求v19，固定虚拟设备资源与启动依赖封存要求v20，正式安装依赖计划要求v21，人员启用受理与资源占用要求v22，业务启动短授权与fence要求v23，模块通道要求v24，只读目录批准与基线样本要求v25，人员控制请求与退出屏障要求v26。备份不能作为另一个活动实例直接使用，正式恢复仍需换 scope 和完整恢复流程。活动库与备份目录的安装 ACL、备份恢复和掉电耐久尚待平台验收。
 
 `enroll-admin --data-dir <绝对目录>` 是供本机安装管理客户端使用的子进程入口。Windows 要求实际提升权限的管理员，首期系统工具固定标准 Windows 安装位置；Linux 要求有效 UID 0。没有在线角色、环境开关或命令参数可替代该检查。当前账户非管理员时，在打开业务库或发出能力前拒绝。父客户端必须用受控继承管道连接 stdin/stdout，终端和文件重定向拒绝；尚未提供交互安装向导。
 

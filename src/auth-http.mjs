@@ -14,7 +14,9 @@ const routes = new Map([
 ]);
 const maximumBody = 16384, maximumPending = 16, bodyDeadline = 2000;
 const commandOperations = ['submitCommand', 'lookupCommandAdmission', 'rejectCommandAdmission'];
-const readOperations = ['getSession', 'listDevices', 'getControl'];
+const controlWrites=['acquireControl','releaseControl','offerTransfer','acceptTransfer','cancelTransfer'];
+const controlOperations=['getControl','getControlOperation','getTransfer','lookupControlRequest',...controlWrites];
+const readOperations = ['getSession', 'listDevices', 'getControl','getControlOperation','getTransfer'];
 const rawPairs = flat => Array.from({length: flat.length / 2}, (_, i) => [flat[2 * i], flat[2 * i + 1]]);
 const credentialPattern = /^v1\.([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([A-Za-z0-9_-]{43})$/;
 const cookieFlags = '; Path=/auth; Secure; HttpOnly; SameSite=Strict';
@@ -52,6 +54,12 @@ function failure(error) {
   if (error?.code === 'command_conflict') return [409, 'IDEMPOTENCY_CONFLICT'];
   if (error?.code === 'command_capacity') return [429, 'CAPACITY_EXCEEDED'];
   if (error?.code === 'command_admission_unavailable') return [503, 'WORKER_NOT_READY'];
+  if (['control_permission','control_target_permission','control_context'].includes(error?.code)) return [403,'PERMISSION_DENIED'];
+  if (error?.code==='control_input') return [422,'INVALID_REQUEST'];
+  if (error?.code==='control_conflict') return [409,'REVISION_CONFLICT'];
+  if (error?.code==='control_not_found') return [404,'NOT_FOUND'];
+  if (error?.code==='control_capacity') return [429,'CAPACITY_EXCEEDED'];
+  if (error?.code?.startsWith('control_')) return [503,'WORKER_NOT_READY'];
   if (error?.code === 'device_read_denied') return [403, 'PERMISSION_DENIED'];
   if (error?.code === 'device_not_found') return [404, 'NOT_FOUND'];
   if (error?.code === 'device_cursor_invalid') return [422, 'INVALID_REQUEST'];
@@ -85,7 +93,7 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
         details: {}, existing_command_id: null, existing_operation_id: null, retry_advice: 'do_not_retry'}} : {data})};
     // 命令裁决契约使用具名原结果及独立Error，不能套用身份信封。
     const commandError = {400: 'invalid', 401: 'unauthenticated', 403: 'forbidden', 409: 'conflict', 413: 'invalid', 422: 'invalid', 429: 'capacity', 503: 'unavailable'};
-    const body = Buffer.from(JSON.stringify(request.operation_id === 'getControl' ?
+    const body = Buffer.from(JSON.stringify(controlOperations.includes(request.operation_id) ?
       (code ? {code, message: code.toLowerCase(), retry_instruction: 'query_original'} : data) : commandOperations.includes(request.operation_id) ?
       (code ? {code: commandError[status] ?? 'unavailable', request_id: requestId} : data) : envelope));
     const headers = [['content-type', 'application/json'], ['content-length', String(body.length)],
@@ -137,6 +145,20 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
         const view = () => operation === 'listDevices' ? sessions.listDevices(proof, request.parameters.query.cursor) : sessions.getControl(proof, request.parameters.path.device_id);
         const data = view();
         await reply(res, request, 200, null, {data, beforeSend() { if (canonical(view()) !== canonical(data)) reject('device_registry_integrity'); }});
+      } else if(controlOperations.includes(operation)){
+        const proof=tokenInput(req),parameters=request.parameters.path;
+        if(!readOperations.includes(operation)){
+          sessions.verifyTokenCsrf(proof,req.headers['x-csrf-token']);
+        }
+        if(controlWrites.includes(operation)){
+          const result=await sessions.changeControl(proof,operation,parameters,body);
+          await reply(res,request,result.replay?200:202,null,{data:result.receipt,beforeSend(){sessions.verifyToken(proof,serviceId);}});
+        }else if(operation==='lookupControlRequest'){
+          const data=await sessions.lookupControlRequest(proof,body);await reply(res,request,200,null,{data,beforeSend(){sessions.verifyToken(proof,serviceId);}});
+        }else{
+          const read=()=>operation==='getControlOperation'?sessions.getControlOperation(proof,parameters.operation_id):sessions.getTransfer(proof,parameters.device_id,parameters.transfer_id);
+          const data=read();await reply(res,request,200,null,{data,beforeSend(){if(canonical(read())!==canonical(data))reject('control_changed');}});
+        }
       } else if (commandOperations.includes(operation)) {
         const proof = tokenInput(req), data = await sessions[operation](proof, body);
         const identity = operation === 'lookupCommandAdmission' ? body : data.identity;
@@ -194,7 +216,8 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
   }
   return Object.freeze({handle(req, res) {
     const pathname = req.url?.split('?')[0];
-    const method = routes.get(pathname) ?? (/^\/api\/v1\/devices\/[^/]+\/control$/.test(pathname) ? 'GET' : null);
+    const method = routes.get(pathname) ?? (/^\/api\/v1\/devices\/[^/]+\/control$/.test(pathname)||/^\/api\/v1\/control-operations\/[^/]+$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+$/.test(pathname)?'GET':
+      /^\/api\/v1\/devices\/[^/]+\/control\/(acquire|release|transfers)$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+\/(accept|cancel)$/.test(pathname)||pathname==='/api/v1/control-requests/lookup'?'POST':null);
     if (!method) return false;
     if (req.method !== method) { empty(res, 405, {Allow: method}); return true; }
     void serve(req, res).catch(() => empty(res, 503)); return true;

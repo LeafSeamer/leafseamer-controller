@@ -4,7 +4,7 @@ import {canonical, checked, digest, ref, seal} from './auth-clock-value.mjs';
 
 // 身份管理的首期产品权限目录。设备写、配对内部用途和其它服务不从管理员名称推导。
 export const localIdentityPermissions = Object.freeze(['auth.manage', 'auth.read', 'identity.read', 'request.create', 'session.read', 'status.read']);
-const supported = new Set([...localIdentityPermissions, 'control.read', 'device.read', 'extension.read', 'extension.manage', 'command.read', 'command.cancel']);
+const supported = new Set([...localIdentityPermissions, 'control.read','control.acquire','control.release','control.transfer','control.accept','control.emergency', 'device.read', 'extension.read', 'extension.manage', 'command.read', 'command.cancel']);
 const fail = code => { throw new IdentityError(code); };
 const revisionKey = value => String(value).padStart(20, '0');
 const maxRevision = (1n << 64n) - 1n;

@@ -83,6 +83,7 @@ export function workerDependencies(db,service,intent,selected){
 }
 
 export function currentWorkerDependencies(db,service,intent,selected){
+ if(Number(service.schema_revision)>=26)need(!db.prepare('SELECT 1 FROM control_barrier_target WHERE launch_id=?').pluck().get(intent.launch_id),'control_fenced');
  const row=db.prepare('SELECT body_jcs,body_digest FROM worker_launch_dependencies WHERE launch_id=?').raw().get(intent.launch_id);need(row,'missing');
  const saved=read(row[0],row[1]);need(same(saved,workerDependencies(db,service,intent,selected)),'stale');return freeze(saved);
 }

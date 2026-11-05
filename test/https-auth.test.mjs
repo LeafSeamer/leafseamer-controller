@@ -17,7 +17,7 @@ import crypto from 'node:crypto';
 import {certificate, supervisedFixture, browserFetch} from './https-auth-fixture.mjs';
 
 const material = certificate(), login = {login: 'synthetic-https-admin', password: 'synthetic-https-password-012345'};
-async function setup(t, qualified = true, commandPermissions = false, registerDevices = false) {
+async function setup(t, qualified = true, commandPermissions = false, registerDevices = false, controlPermissions = false) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'leafseamer-https-')); let app;
   t.after(async () => { await app?.close(); assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir())); fs.rmSync(dir, {recursive: true, force: true}); });
   initializeStorage(dir); await migrateStorage(dir);
@@ -29,7 +29,7 @@ async function setup(t, qualified = true, commandPermissions = false, registerDe
       try {
         const sessions = storage.sessions(clock), logged = await sessions.login(login), input = {credential_id: logged.credential_id, secret: logged.secret, csrf: logged.csrf};
         sessions.replaceLocalPermissions(input, {request_id: crypto.randomUUID(), principal_id: logged.session.principal_id, expected_revision: '1', permissions: [...localIdentityPermissions,
-          ...(commandPermissions ? ['command.read', 'command.cancel'] : []), ...(registerDevices ? ['device.read', 'control.read'] : [])]});
+          ...(commandPermissions ? ['command.read', 'command.cancel'] : []), ...(registerDevices ? ['device.read', 'control.read'] : []), ...(controlPermissions?['control.acquire','control.release','control.transfer','control.accept','control.emergency']:[])]});
         sessions.logout(input);
       } finally { clock.stop(); }
     }
@@ -219,4 +219,23 @@ test('注销来源失信返回503并清SDK内存，不伪报本地或传播完�
   const db = new Database(path.join(a.dir, 'controller.sqlite'), {fileMustExist: true});
   try { assert.equal(db.prepare('SELECT count(*) FROM session_revocation').pluck().get(), 0); }
   finally { db.close(); }
+});
+
+
+test('HTTPS人员接管绑定Bearer会话CSRF，接纳后可查原且未确认屏障不生效',{timeout:15000},async t=>{
+ const a=await setup(t,true,false,true,true);await a.client.login(login);
+ const issued=await a.client.issueToken({audience:a.app.identity.service_id,requested_scopes:['request.create','control.read','control.acquire']});
+ const csrf=a.browser.state.requests.at(-1).headers['x-csrf-token'],headers={Authorization:'Bearer '+issued.body.data.access_token,'X-CSRF-Token':csrf};
+ const contextResponse=await a.send('POST','/api/v1/request-contexts',{audience:a.app.identity.service_id,selection,operations:['acquireControl'],ttl_ms:10000,max_unique_requests:8},headers);
+ assert.equal(contextResponse.status,201);const context=(await contextResponse.json()).data,device=a.devices[0].device_id;
+ const before=await (await a.send('GET','/api/v1/devices/'+device+'/control',undefined,headers)).json();
+ const body={context_id:context.context_id,idempotency_key:'http.acquire',expected_control:{epoch:before.control_epoch,version:before.effective_version},reason:'人工接管'};
+ const route='/api/v1/devices/'+device+'/control/acquire';
+ assert.equal((await a.send('POST',route,body,{...headers,'X-CSRF-Token':'invalid'})).status,401);
+ assert.equal((await a.send('POST',route,body,{...headers,Origin:'https://other.invalid'})).status,403);
+ const response=await a.send('POST',route,body,headers);assert.equal(response.status,202);const receipt=await response.json();assert.equal(receipt.result_kind,'control_operation');
+ const replay=await a.send('POST',route,{...body,force:false},headers);assert.equal(replay.status,200);assert.deepEqual(await replay.json(),receipt);
+ const operation=await (await a.send('GET','/api/v1/control-operations/'+receipt.initial_result_ref.id,undefined,headers)).json();assert.equal(operation.state,'indeterminate');
+ const current=await (await a.send('GET','/api/v1/devices/'+device+'/control',undefined,headers)).json();assert.equal(current.holder,null);assert.equal(current.effective_version,'0');assert.equal(current.reserved_version,'1');
+ const lookup=await a.send('POST','/api/v1/control-requests/lookup',receipt.identity,headers);assert.equal(lookup.status,200);assert.equal((await lookup.json()).status,'found');
 });

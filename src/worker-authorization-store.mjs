@@ -21,7 +21,8 @@ export function workerAuthorizationStore({db,service,bootId,isOpen,core,prepared
   const result=tail.then(async()=>{available();connected();try{return await job();}catch(error){if(error.code?.startsWith('SQLITE_'))stop();throw error;}});
   tail=result.catch(()=>{});return result.finally(()=>--pending);
  }
- const hasDenied=id=>denied.has(id)||!!db.prepare('SELECT 1 FROM worker_launch_denial WHERE launch_id=?').pluck().get(id);
+ const hasDenied=id=>denied.has(id)||!!db.prepare('SELECT 1 FROM worker_launch_denial WHERE launch_id=?').pluck().get(id)||
+  Number(service.schema_revision)>=26&&!!db.prepare('SELECT 1 FROM control_barrier_target WHERE launch_id=?').pluck().get(id);
  function written(ok){if(!ok){stop();need(false,'storage_failed');}}
  function deny(id,reason){denied.add(id);db.prepare('INSERT OR IGNORE INTO worker_launch_denial VALUES(?,?)').run(id,reason);
   written(!!db.prepare('SELECT 1 FROM worker_launch_denial WHERE launch_id=?').pluck().get(id));}
@@ -112,6 +113,16 @@ export function workerAuthorizationStore({db,service,bootId,isOpen,core,prepared
    return enqueue(async()=>{const authorization=await issue(copy);db.transaction(()=>current(copy)).immediate();return source.createWorker({...fixedProof,key:copy,authorization});});},
   deny(key){const copy=fixed(key);denied.add(copy.launch_id);return enqueue(async()=>{db.transaction(()=>deny(copy.launch_id,'requested')).immediate();return sync();});},
   synchronize(){return enqueue(sync);},
+  domain(){connected();return freeze({ref:structuredClone(receipt.domain_ref),tick:String(clock.tick())});},
+  retireForControl(key){const copy=fixed(key);return enqueue(async()=>{
+   db.transaction(()=>deny(copy.launch_id,'requested')).immediate();const fence=await sync();
+   const record=await source.queryLaunch(copy);connected();
+   if(record===null)return freeze({key:copy,fence,record:null,retirement:null});
+   const preparation=prepared(copy),retirement=await source.retireWorker(preparation.intent,'revoked');connected();
+   need(retirement.result==='confirmed_empty','retirement_unconfirmed');
+   const final=await source.queryLaunch(copy);connected();need(final?.state==='retired'&&final.retirement_evidence,'retirement_unconfirmed');
+   return freeze({key:copy,fence,record:final,retirement});
+  });},
   close(){if(closed)return;closed=true;clearTimeout(timer);unsubscribe?.();source?.close();}
  });
 }

@@ -71,7 +71,8 @@ export function deviceRegistryReader(db, service) {
     },
     control(deviceId) {
       transaction(); if (!id(deviceId)) fail('device_registration_invalid');
-      const record = rows(db, `SELECT h.body,h.digest FROM device_record d JOIN device_control_history h ON h.record_id=d.initial_control_id
+      const latest=Number(service.schema_revision)>=26?db.prepare('SELECT r.body_jcs,r.body_digest FROM control_record_revision r JOIN control_record_head h USING(device_id,revision) WHERE device_id=?').raw().get(deviceId):null;
+      const record = latest?{body:Buffer.from(latest[0]),digest:latest[1]}:rows(db, `SELECT h.body,h.digest FROM device_record d JOIN device_control_history h ON h.record_id=d.initial_control_id
         AND h.device_id=d.device_id WHERE d.device_id=?`, deviceId)[0];
       if (!record) fail('device_not_found');
       const value = decode(record.body, record.digest), {record_digest, ...body} = value;

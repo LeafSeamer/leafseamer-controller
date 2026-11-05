@@ -89,7 +89,23 @@ try{
       const reconnected=await moduleClient.connectReadOnly(device),third=await moduleClient.captureBaseline(device);
       const fresh=moduleClient.currentBaseline(device);report({event:'module-samples',connected,first,second,disconnected,reconnected,third,accepted,fresh});
     }
-    let observed;if(current.state==='admitted_closed'){observed=await source.observeWorker(intent);source.assertWorkerObservation(observed);report({event:'observed',receipt:observed.receipt});
+    if(input.mode==='supervisor_create_module_control'){
+      const permissions=['control.read','control.acquire','control.release','control.transfer','control.accept','control.emergency'];
+      const before=manager.sessions.localPermissions(manager.auth);manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id:manager.logged.session.principal_id,expected_revision:before.revision,permissions:[...before.permissions,...permissions]});
+      const token=manager.token([...permissions,'request.create']),device=intent.object_scope.device_ids[0];
+      const {contractSelection:selection}=await import('../../dist/sdk/index.mjs');
+      const context=manager.sessions.createRequestContext(token,{audience:business.identity.service_id,operations:['acquireControl','releaseControl'],selection,ttl_ms:60000,max_unique_requests:8});
+      const act=async(method,key)=>{
+        const before=manager.sessions.getControl(token,device),request={context_id:context.context_id,idempotency_key:key,expected_control:{epoch:before.control_epoch,version:before.effective_version},reason:'人工控制'};
+        const accepted=await manager.sessions.changeControl(token,method,{device_id:device},request);report({event:'control-accepted',method,accepted});
+        const until=performance.now()+8000;let operation;
+        do{operation=manager.sessions.getControlOperation(token,accepted.receipt.initial_result_ref.id);if(operation.state!=='pending')break;if(performance.now()>=until)throw new Error('control_wait');await delay(20);}while(true);
+        report({event:'control-result',method,operation,control:manager.sessions.getControl(token,device)});
+        const replay=await manager.sessions.changeControl(token,method,{device_id:device},request);report({event:'control-replay',method,replay});
+      };
+      await act('acquireControl','control.acquire');await act('releaseControl','control.release');
+    }
+    let observed;if(current.state==='admitted_closed'&&input.mode!=='supervisor_create_module_control'){observed=await source.observeWorker(intent);source.assertWorkerObservation(observed);report({event:'observed',receipt:observed.receipt});
       try{source.assertWorkerObservation(structuredClone(observed));report({event:'copied-observation',code:'unexpected_success'});}catch(error){report({event:'copied-observation',code:error.code});}}
     try{if(business)await business.workerLaunches.authorization.create(key,{load_id:held.load_id,...proof});else await source.createWorker({key,authorization:authorization(),load_id:held.load_id,...proof});report({event:'duplicate',code:'unexpected_success'});}
     catch(error){report({event:'duplicate',code:error.code});}

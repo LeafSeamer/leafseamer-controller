@@ -9,7 +9,7 @@ const millisecond = 1000000n;
 const iso = value => new Date(Number(value / millisecond)).toISOString();
 
 // 开发预算有界且不回收历史；完整生产容量profile与命令去重writer另行接入。
-export function requestContextService({db, binding, writer, time, authorizeToken, rows, pad}) {
+export function requestContextService({db, binding, writer, time, authorizeToken, rows, pad,attachCurrent}) {
   const adapter = createHttpAdapter(selection);
   const available = () => { if (!binding) fail('request_context_migration_required'); };
   const deliver = result => { if (result.denied) fail(result.denied); return result; };
@@ -18,7 +18,7 @@ export function requestContextService({db, binding, writer, time, authorizeToken
     for (const name of names) {
       let op;
       try { op = adapter.describe('controller', name); } catch { fail('request_context_operation'); }
-      if (op.transport !== 'http-headers' || !op.security.some(group => Object.keys(group).some(k => k.endsWith('__bearerAuth'))) ||
+      if (op.transport !== 'http-headers' || !op.security.some(group => Object.keys(group).some(k => k.endsWith('__bearerAuth')||k==='control__humanBearer'&&proof.principal_kind==='human')) ||
           !proof.permissions.includes(op.extensions['x-permission'] ?? op.extensions['x-required-permission'])) fail('request_context_permission');
     }
     return [...names].sort();
@@ -41,6 +41,7 @@ export function requestContextService({db, binding, writer, time, authorizeToken
     if (operation !== undefined && !stored.context.operations.includes(operation)) fail('request_context_permission');
     return stored.context;
   }
+  attachCurrent?.(current);
   return {
     createRequestContext(input, request) {
       available();

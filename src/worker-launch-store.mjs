@@ -5,6 +5,7 @@ import {workerAuthorizationStore} from './worker-authorization-store.mjs';
 import {connectDeviceModule} from './device-module-client.mjs';
 import {deviceModuleJournal} from './device-module-store.mjs';
 import {deviceCatalogStore} from './device-catalog-store.mjs';
+import {deviceControlBarrier} from './device-control-barrier.mjs';
 import canonicalize from 'canonicalize';
 import {decodeWorkerIntent} from './sdk/worker-runtime.mjs';
 
@@ -53,7 +54,8 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     verifyDependencies:(intent,selected)=>currentWorkerDependencies(db,service,intent,selected),
     prepared(value){const selected=key(value),row=find(selected.launch_id);if(row)need(row.intent_digest===selected.launch_intent_digest,'worker_launch_conflict');return view(row);},
     all(){return rows(db,'SELECT '+fields+' FROM worker_launch_preparation WHERE service_boot_id=? ORDER BY launch_id COLLATE BINARY',bootId).map(view);}}):null;
-  return Object.freeze({runtime,authorization,
+  const controlBarrier=Number(service.schema_revision)>=26?deviceControlBarrier({db,bootId,authorization,runtime,isOpen}):null;
+  return Object.freeze({runtime,authorization,controlBarrier,
     async openModule(value){
       available();need(Number(service.schema_revision)>=25,'worker_module_migration_required');const selected=key(value),active=runtime.current(selected);need(!modules.has(selected.launch_id)&&modules.size<4,'worker_module_capacity');
       const reference=active.binding.launch_intent.extension_binding.configuration_ref;
