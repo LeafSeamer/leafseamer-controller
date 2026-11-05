@@ -81,11 +81,13 @@ try{
     if(input.mode.startsWith('supervisor_create_module')){
       moduleClient=await business.workerLaunches.openModule(key);const device=intent.object_scope.device_ids[0];
       const connected=await moduleClient.connectReadOnly(device),first=await moduleClient.captureBaseline(device),second=await moduleClient.captureBaseline(device);
+      const accepted=moduleClient.currentBaseline(device);
       const disconnected=await moduleClient.stopReadOnly(device);
+      try{moduleClient.currentBaseline(device);report({event:'catalog-disconnected',code:'unexpected_success'});}catch(error){report({event:'catalog-disconnected',code:error.code});}
       try{await moduleClient.captureBaseline(device);report({event:'module-disconnected-read',code:'unexpected_success'});}
       catch(error){report({event:'module-disconnected-read',code:error.code});}
       const reconnected=await moduleClient.connectReadOnly(device),third=await moduleClient.captureBaseline(device);
-      report({event:'module-samples',connected,first,second,disconnected,reconnected,third});
+      const fresh=moduleClient.currentBaseline(device);report({event:'module-samples',connected,first,second,disconnected,reconnected,third,accepted,fresh});
     }
     let observed;if(current.state==='admitted_closed'){observed=await source.observeWorker(intent);source.assertWorkerObservation(observed);report({event:'observed',receipt:observed.receipt});
       try{source.assertWorkerObservation(structuredClone(observed));report({event:'copied-observation',code:'unexpected_success'});}catch(error){report({event:'copied-observation',code:error.code});}}
@@ -93,7 +95,8 @@ try{
     catch(error){report({event:'duplicate',code:error.code});}
     if(business){manager.sessions.revokeExtensionApproval(manager.token(),{request_id:'runtime.deny',approval_ref:input.runtime.approved.approval_ref,reason:'人员撤销'});await business.workerLaunches.authorization.synchronize();}
     else if(input.mode!=='supervisor_create_deny_pending')await source.putFence(fence('2','deny'));report({event:'denied',record:await source.queryLaunch(key)});
-    if(moduleClient){try{await moduleClient.captureBaseline(intent.object_scope.device_ids[0]);report({event:'module-revoked',code:'unexpected_success'});}
+    if(moduleClient){try{moduleClient.currentBaseline(intent.object_scope.device_ids[0]);report({event:'catalog-revoked',code:'unexpected_success'});}catch(error){report({event:'catalog-revoked',code:error.code});}
+      try{await moduleClient.captureBaseline(intent.object_scope.device_ids[0]);report({event:'module-revoked',code:'unexpected_success'});}
       catch(error){report({event:'module-revoked',code:error.code});}}
 
     if(observed){try{source.assertWorkerObservation(observed);report({event:'withdrawn-observation',code:'unexpected_success'});}catch(error){report({event:'withdrawn-observation',code:error.code});}}

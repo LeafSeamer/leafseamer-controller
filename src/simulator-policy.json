@@ -1,0 +1,1 @@
+{"external_resources":[],"format":"leafseamer-simulator-io-policy/1","operations":{"capture":"read_only","catalog":"read_only","connect":"read_only","disconnect":"read_only"},"transport":"memory","writes":[]}

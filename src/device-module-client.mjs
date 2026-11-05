@@ -4,7 +4,7 @@ import {moduleNeed as need,DeviceModuleError,deviceModuleProtocol} from './sdk/d
 import {moduleSocket,moduleTransport,moduleFrameBytes,moduleDigestEqual as same} from './device-module-channel.mjs';
 
 // 核心内部调用；current/invalidate绑定同库当前运行原件，HTTP调用方不能提供这些函数。
-export async function connectDeviceModule({current,invalidate,configuration,journal,onClose}){
+export async function connectDeviceModule({current,invalidate,configuration,journal,catalog,onClose}){
  const initial=current(),clock=openNativeClock(),sessions=new Map();
  const binding=Object.freeze({runtime_binding_ref:initial.ref,ipc_session_id:crypto.randomUUID(),member_boot_id:initial.binding.admission_receipt.member_boot_id});
  const devices=initial.binding.launch_intent.object_scope.device_ids;
@@ -44,6 +44,10 @@ export async function connectDeviceModule({current,invalidate,configuration,jour
   async stopReadOnly(deviceId){
    check();need(!pending,'module_busy');const selected=sessions.get(deviceId);need(selected?.state==='connected','module_session');sessions.set(deviceId,{...selected,state:'disconnecting'});
    const frame=await request('DISCONNECT',{device_id:deviceId,device_session_id:selected.session},'DISCONNECTED');sessions.delete(deviceId);return frame;
+  },
+  currentBaseline(deviceId){
+   check();need(!pending,'module_busy');const selected=sessions.get(deviceId);need(selected?.state==='connected','module_session');
+   try{return catalog.current(binding.ipc_session_id,deviceId,selected.session);}catch(error){fail();throw error;}
   },
   close:fail
  });

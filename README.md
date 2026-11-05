@@ -150,13 +150,15 @@ schema 22的新worker准备必须匹配本次服务启动的人员受理、当�
 
 ### 受监督设备模块与候选采样
 
-业务库schema 24增加模块通道、不可变帧及同事务审计。核心内部 `workerLaunches.openModule(LaunchKey)` 采用本次启动的当前RuntimeBinding和同库配置原件；原生监督器创建专用双端命名管道，分别核实际核心与worker进程，持续持有加载材料并转发有界字节。worker只在收到匹配运行原件的LOAD后导入批准清单指定入口，要求 `leafseamer-device-module/1` API及 `device-module/1` IPC版本。该内部接口尚未映射管理HTTP／GUI。
+业务库schema 24增加模块通道、不可变帧及同事务审计；schema25增加只读目录批准和基线样本，旧库须显式备份迁移后才能打开v2模块。核心内部 `workerLaunches.openModule(LaunchKey)` 采用本次启动的当前RuntimeBinding和同库配置原件；原生监督器创建专用双端命名管道，分别核实际核心与worker进程，持续持有加载材料并转发有界字节。worker只在收到匹配运行原件的LOAD后导入批准清单指定入口，要求 `leafseamer-device-module/2` API及 `device-module/2` IPC版本。该内部接口尚未映射管理HTTP／GUI。
 
-返回对象提供 `connectReadOnly(deviceId)`、`captureBaseline(deviceId)`、`stopReadOnly(deviceId)` 和 `close()`。每次连接生成独立session，每次采样生成独立capture ID；回复核原运行、通道、请求、设备、session和截止。通道采用规范JSON、至多1MiB单帧、连续序号及两秒固定窗口；错绑、超时、断连或当前资格失效关闭通道并撤回运行采用，不自动重连或重采样。监督器发现通道断开后停止专属Job，实际退役仍以组为空为准。
+返回对象提供 `connectReadOnly(deviceId)`、`captureBaseline(deviceId)`、`stopReadOnly(deviceId)`、`currentBaseline(deviceId)` 和 `close()`。每次连接生成独立session，每次采样生成独立capture ID；回复核原运行、通道、请求、设备、session和截止。通道采用规范JSON、至多1MiB单帧、连续序号及两秒固定窗口；错绑、超时、断连或当前资格失效关闭通道并撤回运行采用，不自动重连或重采样。监督器发现通道断开后停止专属Job，实际退役仍以组为空为准。
 
 发出请求前先持久保存原帧；响应与审计提交成功且资格仍有效后才交给调用方。提交失败或漏写审计不能返回采样成功，已经执行的采样不重发。开发容量为四个活动通道、每库4096个保留通道、16384帧及64MiB帧正文，达到上限拒绝，不自动删除历史。schema23须通过已有备份迁移入口显式升级，迁移不补造通道或样本。
 
-包内 `simulator-module.mjs` 可作为独立批准扩展的入口，提供虚拟连接、当前固定值和逐次采样序号，尚未实现动作写入。CAPTURED及其本域tick仅为候选采样原件；完整CatalogApproval、来源／年龄接纳、事件发布、设备写出口和资源释放仍待接通。扩展是经过管理员批准的代码，进程监督不构成恶意代码沙箱；没有以模拟器结果批准实际设备。
+包内 `simulator-module.mjs` 可作为独立批准扩展的入口，提供虚拟连接、当前固定值和逐次采样序号，尚未实现动作写入。CONNECTED中的目录由核心核对实际入口和 `simulator-policy.json` 字节、已审阅状态模板、设备资源、平台引用及当前运行会话，形成固定内存模拟器的只读批准。采样须符合该状态Schema、从1开始逐次递增且保留同域时钟原件，才保存为基线样本；批准与样本各自和审计在同一不可变记录内提交，写入失败或静默忽略均关闭运行。`currentBaseline` 返回当前会话批准及最后接纳的基线，不是持续实时读数；断开、撤销或新会话不能复用旧批准。每库最多4096份目录批准、16384份样本，不自动删除历史。
+
+该批准明确 `write_eligible=false`、`automation_eligible=false`，只适用于包内固定模拟器，其他模块不会因自报相同型号取得资格。物理型号CatalogApproval、事件来源／年龄接纳、设备写出口和资源释放仍待接通。扩展是经过管理员批准的代码，进程监督不构成恶意代码沙箱；没有以模拟器结果批准实际设备。
 
 ### 完整worker登记
 

@@ -4,6 +4,7 @@ import {workerRuntimeStore} from './worker-runtime-store.mjs';
 import {workerAuthorizationStore} from './worker-authorization-store.mjs';
 import {connectDeviceModule} from './device-module-client.mjs';
 import {deviceModuleJournal} from './device-module-store.mjs';
+import {deviceCatalogStore} from './device-catalog-store.mjs';
 import canonicalize from 'canonicalize';
 import {decodeWorkerIntent} from './sdk/worker-runtime.mjs';
 
@@ -54,14 +55,18 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     all(){return rows(db,'SELECT '+fields+' FROM worker_launch_preparation WHERE service_boot_id=? ORDER BY launch_id COLLATE BINARY',bootId).map(view);}}):null;
   return Object.freeze({runtime,authorization,
     async openModule(value){
-      available();need(Number(service.schema_revision)>=24,'worker_module_migration_required');const selected=key(value),active=runtime.current(selected);need(!modules.has(selected.launch_id)&&modules.size<4,'worker_module_capacity');
+      available();need(Number(service.schema_revision)>=25,'worker_module_migration_required');const selected=key(value),active=runtime.current(selected);need(!modules.has(selected.launch_id)&&modules.size<4,'worker_module_capacity');
       const reference=active.binding.launch_intent.extension_binding.configuration_ref;
       const row=db.prepare('SELECT body_jcs,body_digest FROM extension_configuration WHERE configuration_id=? AND revision=?').raw().get(reference.object_id,Number(reference.revision));
       need(row&&row[1]===reference.digest,'worker_module_configuration');const body=JSON.parse(row[0]);need(canonicalize(body)===row[0]&&hash(body)===row[1],'worker_module_configuration');
       modules.set(selected.launch_id,null);
       const current=()=>runtime.current(selected);
+      const catalog=deviceCatalogStore({db,current,select(intent){const selected=extensionSource.current(intent);return {selected,dependencies:currentWorkerDependencies(db,service,intent,selected)};}});
+      const journal=deviceModuleJournal(db,current);
       let module;
-      try{module=await connectDeviceModule({current,invalidate:()=>runtime.invalidate(selected),configuration:{reference,value:body.configuration},journal:deviceModuleJournal(db,current),onClose:()=>modules.delete(selected.launch_id)});
+      try{module=await connectDeviceModule({current,invalidate:()=>runtime.invalidate(selected),configuration:{reference,value:body.configuration},
+        journal:{open:journal.open,record(direction,frame){journal.record(direction,frame);if(direction==='w2c')catalog.receive(frame);}},catalog,
+        onClose:()=>modules.delete(selected.launch_id)});
         available();current();modules.set(selected.launch_id,module);return module;
       }catch(error){modules.delete(selected.launch_id);module?.close();try{runtime.invalidate(selected);}catch{}throw error;}
     },

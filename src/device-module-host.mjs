@@ -35,20 +35,22 @@ export function hostDeviceModule({admitted,materials,failed}){
      runtime.database_instance_id===frame.binding.runtime_binding_ref.database_instance_id,'module_binding');
     need(same(frame.body.configuration.reference,admitted.intent.extension_binding.configuration_ref),'module_configuration');
     binding=frame.binding;
-    need(materials.manifest.api_versions.includes('leafseamer-device-module/1')&&materials.manifest.ipc_versions.includes(deviceModuleProtocol),'module_version');
+    need(materials.manifest.api_versions.includes('leafseamer-device-module/2')&&materials.manifest.ipc_versions.includes(deviceModuleProtocol),'module_version');
     // 文件政策和模块都是批准归档的固定字节；策略对象不自赋联网或设备写许可。
     file(entry.io_policy_file_id,'policy');const selected=await import(pathToFileURL(file(entry.file_id,'module')).href);current(frame);
     need(typeof selected.createDeviceModule==='function','module_interface');
     implementation=await selected.createDeviceModule(Object.freeze({configuration:frame.body.configuration.value,
      device_ids:admitted.intent.object_scope.device_ids,signal:abort.signal,tick:()=>clock.tick()}));current(frame);
-    need(implementation?.api_version==='leafseamer-device-module/1'&&['connectReadOnly','captureBaseline','stopReadOnly'].every(k=>typeof implementation[k]==='function'),'module_interface');
+    need(implementation?.api_version==='leafseamer-device-module/2'&&['connectReadOnly','proposeCatalog','captureBaseline','stopReadOnly'].every(k=>typeof implementation[k]==='function'),'module_interface');
     type='LOADED';body={entry_id:entry.entry_id};
    }else{
     need(same(frame.binding,binding),'module_binding');const input=frame.body,device=input.device_id,session=input.device_session_id;
     need(admitted.intent.object_scope.device_ids.includes(device),'module_device');
     if(frame.type==='CONNECT'){
      need(!sessions.has(device)&&!usedSessions.has(session)&&usedSessions.size<4096,'module_session');usedSessions.add(session);
-     const identity=await implementation.connectReadOnly({...input,signal:abort.signal});current(frame);sessions.set(device,session);type='CONNECTED';body={...input,identity};
+     const identity=Object.freeze(structuredClone(await implementation.connectReadOnly({...input,signal:abort.signal})));current(frame);
+     const catalog=await implementation.proposeCatalog({...input,identity,signal:abort.signal});current(frame);
+     sessions.set(device,session);type='CONNECTED';body={...input,identity,catalog};
     }else{
      need(sessions.get(device)===session,'module_session');
      if(frame.type==='CAPTURE'){
