@@ -9,6 +9,7 @@ export function deviceModuleJournal(db,current){
  function check(){const selected=current();need(selected.current_boot&&!selected.withdrawal,'module_runtime');return selected;}
  return Object.freeze({
   open(binding){
+   need(Number(db.pragma('user_version',{simple:true}))>=46,'module_migration');
    const selected=check();need(binding.runtime_binding_ref.digest===selected.ref.digest&&binding.runtime_binding_ref.object_id===selected.ref.object_id,'module_runtime');
    db.transaction(()=>{
     need(db.prepare('SELECT count(*) FROM device_module_channel').pluck().get()<4096,'module_capacity');

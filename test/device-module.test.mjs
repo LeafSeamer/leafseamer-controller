@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {setup,inspect} from './fixtures/extension-installation.mjs';
 import {migrateStorage} from '../dist/storage.mjs';
-const frame=()=>({version:'device-module/2',type:'CAPTURE',sequence:'1',request_id:'request',reply_to:null,
+const frame=()=>({version:'device-module/3',type:'CAPTURE',sequence:'1',request_id:'request',reply_to:null,
  binding:{runtime_binding_ref:{kind:'runtime_binding',authority_service_id:'controller',database_instance_id:'database',object_id:'runtime',revision:'1',digest:'sha256:'+'1'.repeat(64)},ipc_session_id:'channel',member_boot_id:'worker'},
  issued_tick_ns:'1',deadline_tick_ns:'100',body:{device_id:'device',device_session_id:'session',capture_id:'capture'}});
 test('业务通道接受分片规范帧，拒绝重复键、非规范正文和帧合并',async()=>{

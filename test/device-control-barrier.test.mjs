@@ -5,6 +5,18 @@ import canonicalize from 'canonicalize';
 import {deviceControlBarrier} from '../dist/device-control-barrier.mjs';
 import {controlHash as hash} from '../dist/device-control-value.mjs';
 
+test('监督来源缺失按资格拒绝，存储和未知异常保持原错误',t=>{
+ const db=new Database(':memory:');t.after(()=>db.close());let thrown;
+ const barrier=deviceControlBarrier({db,isOpen:()=>true,authorization:{domain(){throw thrown;}}});
+ for(const code of ['worker_authorization_source','supervisor_confirmation_expired']){
+  thrown=Object.assign(new Error(code),{code});
+  assert.throws(()=>barrier.domain(),e=>e.name==='IdentityError'&&e.code==='control_source_unavailable');
+ }
+ for(const code of ['SQLITE_CORRUPT','unexpected_provider_error']){
+  thrown=Object.assign(new Error(code),{code});assert.throws(()=>barrier.domain(),e=>e===thrown);
+ }
+});
+
 // 隔离的屏障分支验证；退出原件为合成数据，不作为真实重启或设备验收证据。
 function fixture(t,{history=true,accepted=false,retired=true,corrupt=false}={}){
  const db=new Database(':memory:');t.after(()=>db.close());

@@ -47,3 +47,22 @@ test('重启保留未决控制及预留版本，不自动恢复闸门或持有�
  const store=f.reopen(),a=await authenticated(t,{store});const token=a.token(['control.read']);
  assert.deepEqual(a.sessions.getControl(token,f.device),original);assert.equal(original.reserved_version,'1');assert.equal(original.effective_version,'0');assert.equal(original.gate_state,'protected');
 });
+
+test('新手动命令核当前控制版本、持有人与未决状态，拒绝不占用命令或上下文预算',async t=>{
+ const f=await fixture(t),old=f.a.sessions.localPermissions(f.a.auth);
+ f.a.sessions.replaceLocalPermissions(f.a.auth,{request_id:crypto.randomUUID(),principal_id:f.a.logged.session.principal_id,expected_revision:old.revision,permissions:[...old.permissions,'device.command','command.read']});
+ const token=f.a.token([...permissions,'request.create','device.command','command.read']);
+ const context=f.a.sessions.createRequestContext(token,{audience:f.store.identity.service_id,operations:['acquireControl','submitCommand'],selection,ttl_ms:10000,max_unique_requests:8});
+ const before=f.a.sessions.getControl(token,f.device),expected={epoch:before.control_epoch,version:before.effective_version};
+ const command={device_id:f.device,action_id:'leafseamer.simulator.value.set',capability_version:'1.0.0',parameters:{value:7},context_id:context.context_id,idempotency_key:'new.command',
+  expected_control:expected,origin:'manual',automation_binding:null,required_completion:'sent',preconditions:[],dispatch:{mode:'immediate',max_queue_ms:1000},evidence_timeout_ms:1000};
+ await assert.rejects(f.a.sessions.submitCommand(token,{...command,expected_control:{...expected,version:'9'}}),{code:'command_control_conflict'});
+ await assert.rejects(f.a.sessions.submitCommand(token,command),{code:'command_control_owner'});
+ await f.a.sessions.changeControl(token,'acquireControl',{device_id:f.device},{context_id:context.context_id,idempotency_key:'acquire.for.command',expected_control:expected,reason:'命令控制'});
+ await new Promise(resolve=>setImmediate(resolve));
+ await assert.rejects(f.a.sessions.submitCommand(token,command),{code:'command_control_pending'});
+ f.close();inspect(f.dir,db=>{
+  assert.equal(db.prepare('SELECT count(*) FROM ca_command_initial').pluck().get(),0);assert.equal(db.prepare('SELECT count(*) FROM ca_adjudication').pluck().get(),0);
+  assert.equal(db.prepare('SELECT used_count FROM request_context WHERE context_id=?').pluck().get(context.context_id),1);
+ });
+});

@@ -49,6 +49,18 @@ export async function connectDeviceModule({current,invalidate,configuration,jour
    check();need(!pending,'module_busy');const selected=sessions.get(deviceId);need(selected?.state==='connected','module_session');
    try{return catalog.current(binding.ipc_session_id,deviceId,selected.session);}catch(error){fail();throw error;}
   },
+  bindExecution(deviceId){
+   check();need(!pending,'module_busy');const selected=sessions.get(deviceId);need(selected?.state==='connected','module_session');
+   try{return catalog.bindExecution(binding.ipc_session_id,deviceId,selected.session);}catch(error){fail();throw error;}
+  },
+  async configureExecution(deviceId){
+   check();need(!pending,'module_busy');const selected=sessions.get(deviceId);need(selected?.state==='connected','module_session');
+   try{
+    const execution=catalog.bindExecution(binding.ipc_session_id,deviceId,selected.session);
+    const answer=await request('BIND_EXECUTION',{device_id:deviceId,device_session_id:selected.session,execution},'EXECUTION_BOUND');
+    need(same(answer.body.execution_ref,execution.ref),'module_execution_binding');return execution;
+   }catch(error){fail();throw error;}
+  },
   close:fail
  });
 }

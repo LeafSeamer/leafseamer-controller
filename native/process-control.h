@@ -7,6 +7,7 @@ class CoreControl {
   bootstrap::Domain coreDomain;
   HANDLE rootJob=nullptr;
   DWORD corePid=0;
+  std::string coreBoot;
   loading::Store loads;
   std::unique_ptr<installation::Client> installer;
   struct MaterializationJob {std::string launch,digest;bool done=false;installation::Observation result;};
@@ -249,7 +250,7 @@ class CoreControl {
                 if(failure.empty()){
                   const auto group=groups.find(target);if(group==groups.end()||!group->second->unusedAndEmpty())failure="invalid_binding";
                   else{
-                    auto process=std::make_unique<WorkerProcess>(owner,*group->second,rootJob,protectedRuntime,coreDomain,target,*stored,*loaded->materials,corePid);
+                    auto process=std::make_unique<WorkerProcess>(owner,*group->second,rootJob,protectedRuntime,coreDomain,target,*stored,*loaded->materials,corePid,coreBoot);
                     if(!grant.current()||tick()>=observation.result.expires)failure="expired";
                     else{
                       journal.beginWorkerCreation(launch,target,process->creationId,process->creation(grant.authorization,loadId,loaded->materials->rootIdentity));
@@ -353,6 +354,7 @@ public:
   CoreControl(Instance& instance, const bootstrap::Exchange& exchange,runtime::Protected& executableRuntime,std::unique_ptr<installation::Client> installation=nullptr) : owner(instance),protectedRuntime(executableRuntime),coreDomain(exchange.policy,exchange.supervisor,exchange.generation,exchange.descriptor,exchange.domainId,exchange.descriptorDigest),installer(std::move(installation)) {
     using namespace bootstrap;
     channel = identifier(); name = L"\\\\.\\pipe\\LeafSeamer.Control." + std::wstring(channel.begin(), channel.end());
+    coreBoot=exchange.memberBoot;
     launch = exchange.common.at("launch_id"); launch = launch.substr(1, launch.size() - 2);
     intentDigest = exchange.intentDigest; supervisor = exchange.supervisor;
     service = exchange.policy.service; databaseId = exchange.policy.database; generation = exchange.generation; rootMember = exchange.member;

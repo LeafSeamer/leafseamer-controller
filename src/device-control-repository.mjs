@@ -1,9 +1,10 @@
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
+import {saveControlSources} from './device-control-source.mjs';
 import {controlNeed as need,controlHash as hash,controlRead as read,controlSeal as seal,controlNext as next} from './device-control-value.mjs';
 
 // 只在业务writer事务内使用；原登记记录保留不动，追加修订成为唯一当前投影。
-export function deviceControlRepository(db,devices){
+export function deviceControlRepository(db,devices,domain){
  const writer=()=>need(db.inTransaction,'writer');
  const tables={record:['control_record_revision','control_record_head','device_id'],operation:['control_operation_revision','control_operation_head','operation_id'],offer:['control_offer_revision','control_offer_head','transfer_id']};
  function current(kind,id){writer();const [table,head,key]=tables[kind];const row=db.prepare(`SELECT r.body_jcs,r.body_digest,r.revision,r.target_device_id FROM ${table} r JOIN ${head} h USING(${key},revision) WHERE r.${key}=?`).raw().get(id);
@@ -21,7 +22,8 @@ export function deviceControlRepository(db,devices){
   prior(identity){writer();const row=db.prepare('SELECT request_digest,receipt_jcs,receipt_digest,key_jcs FROM control_request WHERE key_digest=?').raw().get(hash(identity.key));if(!row)return null;
    need(row[0]===identity.request_digest,'conflict');const receipt=read(row[1],row[2]);need(canonicalize(receipt.identity)===canonicalize(identity)&&row[3]===canonicalize(identity.key),'integrity');return receipt;},
   request(identity,context,device,receipt,commit){writer();need(db.prepare('INSERT INTO control_request VALUES(?,?,?,?,?,?,?,?)').run(hash(identity.key),canonicalize(identity.key),identity.request_digest,device,context,canonicalize(receipt),hash(receipt),commit).changes===1,'storage');},
-  commit(id,kind,actor,members,acquisition){writer();need(db.prepare('INSERT INTO control_change_commit VALUES(?,?,?,?,?,?)').run(id,kind,members,
+  commit(id,kind,actor,members,acquisition){writer();if(Number(db.pragma('user_version',{simple:true}))>=32)saveControlSources(db,id,kind,domain);
+   need(db.prepare('INSERT INTO control_change_commit(commit_id,kind,members,audit_jcs,event_id,notification_jcs) VALUES(?,?,?,?,?,?)').run(id,kind,members,
    canonicalize({kind,actor,acquisition_ref:acquisition}),crypto.randomUUID(),canonicalize({kind,commit_id:id})).changes===1,'storage');},
   capacity(){writer();need(db.prepare('SELECT count(*) FROM control_request').pluck().get()<4096&&db.prepare('SELECT count(*) FROM control_change_commit').pluck().get()<16384,'capacity');}
  });

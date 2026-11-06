@@ -102,7 +102,7 @@ test('减收固定全部关联目标并保持pending，不能重新签发或复�
 test('管理核近期认证与合法目录，不接受角色或远端权限自报', async t => {
   const app = await setup(t);
   try {
-    for (const permissions of [['auth.manage', 'device.command'], ['auth.manage', 'auth.manage']])
+    for (const permissions of [['auth.manage', 'remote.device.command'], ['auth.manage', 'auth.manage']])
       assert.throws(() => app.sessions.replaceLocalPermissions(app.credentials, app.change(permissions)), e => e.code === 'local_authorization_request');
     assert.throws(() => app.sessions.replaceLocalPermissions({...app.credentials, csrf: 'A'.repeat(43)}, app.change([...localIdentityPermissions])), e => e.code === 'session_invalid');
     assert.throws(() => app.sessions.replaceLocalPermissions(app.credentials, {...app.change([...localIdentityPermissions]), role: 'administrator'}), e => e.code === 'local_authorization_request');
@@ -111,6 +111,18 @@ test('管理核近期认证与合法目录，不接受角色或远端权限自�
     assert.throws(() => app.sessions.replaceLocalPermissions(app.credentials, app.change([...localIdentityPermissions])), e => e.code === 'local_authorization_management_denied');
     assert.equal(app.sessions.localPermissions(app.credentials).revision, '1');
   } finally { app.close(); }
+});
+
+test('设备命令权限须显式授予，撤销先关闭现有写令牌',async t=>{
+ const app=await setup(t);
+ try{
+  assert.throws(()=>app.issue(['device.command']),{code:'local_authorization_denied'});
+  app.sessions.replaceLocalPermissions(app.credentials,app.change([...localIdentityPermissions,'device.command']));
+  const token=app.issue(['device.command']);assert.deepEqual(app.sessions.verifyToken(tokenInput(token),app.storage.identity.service_id).permissions,['device.command']);
+  app.sessions.replaceLocalPermissions(app.credentials,app.change([...localIdentityPermissions]));
+  assert.throws(()=>app.sessions.verifyToken(tokenInput(token),app.storage.identity.service_id),{code:'token_invalid'});
+  assert.throws(()=>app.issue(['device.command']),{code:'local_authorization_denied'});
+ }finally{app.close();}
 });
 
 test('已有v6管理员显式迁移保留身份，新增授权只来自已保存初始化角色', async t => {

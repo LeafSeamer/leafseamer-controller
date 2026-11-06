@@ -38,22 +38,35 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
   catch{storageFailed=true;for(const other of [...active.values()]){stopEntry(other);retire(other.prepared.intent);}}
   retire(entry.prepared.intent);
  }
- function check(entry){
-  live();need(!entry.stopped&&active.get(entry.prepared.intent.launch_id)===entry,'worker_runtime_withdrawn');
+ function checkInWriter(entry){
+  need(db.inTransaction,'worker_runtime_writer');connected();need(!entry.stopped&&active.get(entry.prepared.intent.launch_id)===entry,'worker_runtime_withdrawn');
   source.assertWorkerObservation(entry.observation);
-  db.transaction(()=>{core();const selected=extension.current(entry.prepared.intent);verifyDependencies?.(entry.prepared.intent,selected);
-   need(!db.prepare('SELECT 1 FROM worker_runtime_withdrawal WHERE runtime_id=?').pluck().get(entry.row.runtime_id),'worker_runtime_withdrawn');}).immediate();
+  core();const selected=extension.current(entry.prepared.intent);verifyDependencies?.(entry.prepared.intent,selected);
+  need(!db.prepare('SELECT 1 FROM worker_runtime_withdrawal WHERE runtime_id=?').pluck().get(entry.row.runtime_id),'worker_runtime_withdrawn');
  }
- async function refresh(entry){
-  if(entry.stopped)return;
-  try{
+ function check(entry){live();db.transaction(()=>checkInWriter(entry)).immediate();}
+ function withdrawFromWriter(entry,error){
+  // 外层受理事务可能回滚，不能让回滚恢复进程资格或吞掉必须落盘的撤回。
+  stopEntry(entry);retire(entry.prepared.intent);
+  queueMicrotask(()=>{
+   try{if(db.open)db.transaction(()=>saveWithdrawal(entry.row,error?.code?.startsWith('extension_')?'approval_changed':'source_changed')).immediate();}
+   catch{storageFailed=true;for(const other of [...active.values()]){stopEntry(other);retire(other.prepared.intent);}}
+  });
+ }
+ function refresh(entry){
+  if(entry.stopped)return Promise.resolve();
+  if(entry.refreshing)return entry.refreshing;
+  clearTimeout(entry.timer);
+  entry.refreshing=(async()=>{try{
    check(entry);
    const {selected,observed}=await observe(entry.prepared.intent);
    check(entry);source.assertWorkerObservation(observed);
    need(same(observed.receipt,entry.observation.receipt),'worker_runtime_receipt_changed');
    db.transaction(()=>need(same(extension.current(entry.prepared.intent),selected),'worker_runtime_approval_changed')).immediate();
-   entry.observation=observed;entry.timer=setTimeout(()=>{void refresh(entry);},500);entry.timer.unref();
+   entry.observation=observed;
   }catch(error){withdraw(entry,error?.code?.startsWith('extension_')?'approval_changed':'source_changed');}
+  finally{entry.refreshing=null;if(!entry.stopped){entry.timer=setTimeout(()=>{void refresh(entry);},500);entry.timer.unref();}}})();
+  return entry.refreshing;
  }
  // 重启只有历史，不恢复上次进程的采用资格。
  db.transaction(()=>{for(const row of rows(db,'SELECT runtime_id,service_boot_id FROM worker_runtime_binding r WHERE service_boot_id<>? AND NOT EXISTS(SELECT 1 FROM worker_runtime_withdrawal w WHERE w.runtime_id=r.runtime_id)',bootId))saveWithdrawal(row,'restarted');}).immediate();
@@ -102,9 +115,18 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
    }finally{pending--;waiting.delete(preparation.intent.launch_id);}
   },
   query(key){available();const value=prepared(key);return value?view(find(value.intent.launch_id)):null;},
+  async refreshCurrent(key){
+   available();const value=prepared(key),entry=value&&active.get(value.intent.launch_id);need(entry,'worker_runtime_unavailable');
+   await refresh(entry);check(entry);return view(entry.row);
+  },
   current(key){
    available();const value=prepared(key),entry=value&&active.get(value.intent.launch_id);need(entry,'worker_runtime_unavailable');
    try{check(entry);return view(entry.row);}catch(error){withdraw(entry,error?.code?.startsWith('extension_')?'approval_changed':'source_changed');throw error;}
+  },
+  currentInTransaction(key){
+   need(db.inTransaction&&db.open,'worker_runtime_writer');const value=prepared(key),entry=value&&active.get(value.intent.launch_id);
+   need(entry,'worker_runtime_unavailable');
+   try{checkInWriter(entry);return view(entry.row);}catch(error){withdrawFromWriter(entry,error);throw error;}
   },
   invalidate(key){available();const value=prepared(key),entry=value&&active.get(value.intent.launch_id);if(entry)withdraw(entry,'source_changed');},
   close(){if(closed)return;closed=true;unsubscribe?.();for(const entry of [...active.values()])withdraw(entry,'closed');}

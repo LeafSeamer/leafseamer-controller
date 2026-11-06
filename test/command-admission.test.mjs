@@ -30,7 +30,7 @@ async function setup(t, revision = 9, beforeOpen = () => {}) {
   // 保留真实已入库采样引用，仅用合成时间跨度验证生命周期边界。
   const clock = {current() { const v = real.current(); return {...v, lower_ns: String(BigInt(v.lower_ns) + state.offset), upper_ns: String(BigInt(v.upper_ns) + state.offset)}; }};
   const sessions = storage.sessions(clock), logged = await sessions.login(login);
-  sessions.replaceLocalPermissions(input(logged), {request_id: crypto.randomUUID(), principal_id: logged.session.principal_id, expected_revision: '1', permissions: [...localIdentityPermissions, 'command.read', 'command.cancel']});
+  sessions.replaceLocalPermissions(input(logged), {request_id: crypto.randomUUID(), principal_id: logged.session.principal_id, expected_revision: '1', permissions: [...localIdentityPermissions, 'command.read', 'command.cancel','device.command']});
   const token = (scopes = ['request.create', 'command.read', 'command.cancel']) => {
     const issued = sessions.issueToken(input(logged), {request_id: crypto.randomUUID(), audience: storage.identity.service_id, requested_scopes: scopes});
     return {token_id: issued.token.token_id, secret: issued.secret};
@@ -66,7 +66,7 @@ test('真实文件库拒收同键永久查原，换context和关联标识不增�
     }
     const changed = {...body, parameters: {...body.parameters, context_id: 'different-business-field'}};
     await assert.rejects(a.sessions.rejectCommandAdmission(token, {...request, content: changed, identity: {...id, request_digest: digest(changed)}}), e => e.code === 'command_conflict');
-    await assert.rejects(a.sessions.submitCommand(token, {...body, context_id: ctx.context_id, idempotency_key: crypto.randomUUID()}), e => e.code === 'command_admission_unavailable');
+    await assert.rejects(a.sessions.submitCommand(token, {...body, context_id: ctx.context_id, idempotency_key: crypto.randomUUID()}), e => e.code === 'command_permission');
     a.close();
     inspect(a.dir, db => {
       assert.equal(db.prepare('SELECT count(*) FROM ca_request_key').pluck().get(), 1);
@@ -81,6 +81,41 @@ test('真实文件库拒收同键永久查原，换context和关联标识不增�
       assert.throws(() => db.exec('INSERT OR REPLACE INTO ca_request_key SELECT * FROM ca_request_key'));
     });
   } finally { a.close(); }
+});
+
+test('新命令必须绑定当前写令牌与submit上下文，旧裁决重查不重新要求写权',async t=>{
+ const a=await setup(t),token=a.token(['request.create','command.read','command.cancel','device.command']);
+ try{
+  const context=a.sessions.createRequestContext(token,{...a.request,operations:['submitCommand','rejectCommandAdmission']}),body=content();
+  const request={...body,context_id:context.context_id,idempotency_key:crypto.randomUUID()};
+  // 真实当前上下文检查通过后，旧schema仍不能受理新命令。
+  await assert.rejects(a.sessions.submitCommand(token,request),{code:'command_admission_unavailable'});
+  const other=a.token(['request.create','command.read','device.command']);
+  await assert.rejects(a.sessions.submitCommand(other,request),{code:'request_context_denied'});
+  const wrong=a.sessions.createRequestContext(token,a.request);
+  await assert.rejects(a.sessions.submitCommand(token,{...request,context_id:wrong.context_id}),{code:'request_context_permission'});
+  const id={...identity(a,context,body),key:{...identity(a,context,body).key,idempotency_key:request.idempotency_key}};
+  const original=await a.sessions.rejectCommandAdmission(token,{rejection_operation_id:crypto.randomUUID(),identity:id,content:body});
+  a.state.offset=15000000000n;
+  const readOnly=a.token(['command.read']);
+  assert.deepEqual(await a.sessions.submitCommand(readOnly,request),original);
+  await assert.rejects(a.sessions.submitCommand(token,{...request,idempotency_key:crypto.randomUUID()}),{code:'request_context_expired'});
+  a.close();inspect(a.dir,db=>{
+   assert.equal(db.prepare('SELECT state FROM request_context WHERE context_id=?').pluck().get(context.context_id),'expired');
+   assert.equal(db.prepare('SELECT count(*) FROM ca_command_initial').pluck().get(),0);
+   assert.equal(db.prepare('SELECT sum(used_count) FROM request_context').pluck().get(),0);
+  });
+ }finally{a.close();}
+});
+
+test('新命令不能使用前一boot的上下文，重新鉴权不会恢复旧上下文',async t=>{
+ const a=await setup(t),token=a.token(['request.create','command.read','device.command']),context=a.sessions.createRequestContext(token,{...a.request,operations:['submitCommand']});
+ a.close();const store=openStorage(a.dir),f=fixture(store.authenticationClock.scope),clock=startAuthenticationClock(f.source,store.authenticationClock,f.provider,{schedule:false});
+ try{
+  const sessions=store.sessions(clock),logged=await sessions.login(login),issued=sessions.issueToken(input(logged),{request_id:crypto.randomUUID(),audience:store.identity.service_id,requested_scopes:['command.read','device.command']});
+  await assert.rejects(sessions.submitCommand({token_id:issued.token.token_id,secret:issued.secret},{...content(),context_id:context.context_id,idempotency_key:crypto.randomUUID()}),{code:'request_context_denied'});
+ }finally{clock.stop();store.close();}
+ inspect(a.dir,db=>{assert.equal(db.prepare('SELECT state FROM request_context WHERE context_id=?').pluck().get(context.context_id),'closed');assert.equal(db.prepare('SELECT count(*) FROM ca_command_initial').pluck().get(),0);});
 });
 
 test('旧context到期或重启不阻止当前授权人员保护自身namespace，其他主体和错scope拒绝', async t => {

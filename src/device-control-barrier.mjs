@@ -28,7 +28,14 @@ export function deviceControlBarrier({db,bootId,authorization,runtime,isOpen}){
   need(false,'old_exit_unresolved');
  }
  return Object.freeze({
-  domain(){need(isOpen()&&db.open,'unavailable');return authorization.domain();},
+  domain(){need(isOpen()&&db.open,'unavailable');try{return authorization.domain();}
+   catch(error){
+    // 已知监督来源缺失是资格拒绝；未知异常及SQLite失败仍交由writer关闭服务。
+    if(/^(worker_authorization_(source|source_changed|unavailable)|supervisor_[a-z_]+)$/.test(error?.code??''))need(false,'source_unavailable');
+    throw error;
+   }},
+  selectCoreSource(){need(isOpen()&&db.open,'unavailable');return authorization.selectCoreSource();},
+  currentCoreSource(reference){need(isOpen()&&db.open,'unavailable');return authorization.currentCoreSource(reference);},
   async protect(operation){
    need(!db.inTransaction,'writer');pending(operation);const domain=authorization.domain(),selected=targets(operation.operation_id),receipts=[];
    for(const target of selected){

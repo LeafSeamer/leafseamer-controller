@@ -9,6 +9,7 @@ import {initializeStorage, migrateStorage, openStorage} from '../dist/storage.mj
 import {startAuthenticationClock} from '../dist/auth-clock.mjs';
 import {seal, digest} from '../dist/auth-clock-value.mjs';
 import {fixture} from './auth-clock-fixture.mjs';
+import {sessionStore} from '../dist/session-store.mjs';
 
 const login = {login: 'synthetic-token-admin', password: 'synthetic-token-password-012345'};
 const sessionInput = x => ({credential_id: x.credential_id, secret: x.secret, csrf: x.csrf});
@@ -104,6 +105,30 @@ test('合成长期区间到期等号永久禁用token，较早时间不能使其
     assert.throws(() => app.sessions.verifyToken(tokenInput(token), audience), e => e.code === 'token_invalid');
   } finally { app.close(); }
   assert.equal(inspect(app.dir, db => db.prepare('SELECT state FROM access_token').pluck().get()), 'expired');
+});
+
+test('人员执行来源拒绝过期token时提交永久失效，时间回退不恢复且不读取执行来源', async t => {
+  const app = await setup(t, () => {}, true), service = app.storage.identity;
+  let token, acquired;
+  try { token = app.sessions.issueToken(app.input, request(service.service_id)); acquired = app.clock.current(); }
+  finally { app.close(); }
+  // 认证采集原件保留在真实数据库；只合成期限推进，不启动第二个存储所有者。
+  let offset = BigInt(token.token.expires_ns) - BigInt(acquired.upper_ns);
+  const clock = {current: () => ({...acquired, lower_ns: String(BigInt(acquired.lower_ns) + offset), upper_ns: String(BigInt(acquired.upper_ns) + offset)})};
+  const db = new Database(path.join(app.dir, 'controller.sqlite'), {fileMustExist: true});
+  db.pragma('foreign_keys=ON'); db.pragma('trusted_schema=OFF');
+  const unreachable = () => { assert.fail('失效令牌不得读取执行来源'); };
+  const sessions = sessionStore(db, service.service_id, clock, app.authority, true,
+    {service, bootId: crypto.randomUUID()}, null, {domain: unreachable}, unreachable);
+  try {
+    assert.throws(() => sessions.beginManualExecutionChallenge(tokenInput(token), crypto.randomUUID(),crypto.randomUUID()), e => e.code === 'token_expired');
+    assert.equal(db.prepare('SELECT state FROM access_token WHERE token_id=?').pluck().get(token.token.token_id), 'expired');
+    offset = 0n;
+    assert.throws(() => sessions.beginManualExecutionChallenge(tokenInput(token), crypto.randomUUID(),crypto.randomUUID()), e => e.code === 'token_invalid');
+    assert.equal(db.prepare('SELECT count(*) FROM execution_manual_authority').pluck().get(), 0);
+    assert.equal(db.prepare('SELECT count(*) FROM manual_execution_challenge').pluck().get(), 0);
+    assert.deepEqual(db.pragma('foreign_key_check'), []);
+  } finally { sessions.stop(); db.close(); }
 });
 
 test('权限扩张拒绝，授权版本变化使旧token终止，发放期间变化整笔回滚', async t => {

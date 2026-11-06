@@ -25,18 +25,21 @@ class WorkerProcess {
   Handle process,thread,inputWriter,proofReader;
   std::unique_ptr<WorkerContext> context;
   std::unique_ptr<ModuleLink> moduleLink;
+  std::unique_ptr<ModuleLink> executionLink;
   std::future<bool> proof;
   bool finished=false,verified=false;
 public:
   bootstrap::Exchange exchange;
   std::string creationId=identifier(),observationId=identifier(),observation;
   WorkerProcess(Instance& owner,WorkerGroup& target,HANDLE parent,runtime::Protected& installed,const bootstrap::Domain& core,
-      const std::string& launch,const WorkerStored& stored,const loading::Materials& materials,DWORD corePid):group(target),rootJob(parent),runtime(installed),
+      const std::string& launch,const WorkerStored& stored,const loading::Materials& materials,DWORD corePid,const std::string& coreBoot):group(target),rootJob(parent),runtime(installed),
       exchange(core,launch,stored.intent,stored.member,bootstrap::object({{"group_id",bootstrap::string(stored.group)},
         {"generation",bootstrap::string(stored.generation)},{"backend",bootstrap::string("windows_job")}})){
     using namespace bootstrap;
     moduleLink=std::make_unique<ModuleLink>(owner,exchange.memberBoot,corePid);
-    context=std::make_unique<WorkerContext>(owner,object({{"format",string("leafseamer-device-worker-start/2")},{"intent",stored.intent},{"module",materials.moduleContext},
+    executionLink=std::make_unique<ModuleLink>(owner,exchange.memberBoot,corePid,true);
+    context=std::make_unique<WorkerContext>(owner,object({{"format",string("leafseamer-device-worker-start/3")},{"intent",stored.intent},{"module",materials.moduleContext},
+      {"execution",object({{"controller_boot_id",string(coreBoot)}})},
       {"descriptor",core.descriptor},{"identity",object({{"service_id",string(core.policy.service)},{"database_instance_id",string(core.policy.database)}})},
       {"timeout_ms",std::to_string(core.policy.timeout)}}));
   }
@@ -93,6 +96,6 @@ public:
   void admit(const bootstrap::Object& receipt){require(qualified(),"worker_bootstrap");bootstrap::write(inputWriter.value,bootstrap::Exchange::frame("ADMISSION",receipt));require(qualified(),"worker_bootstrap");
     SecureZeroMemory(exchange.secret.bytes.data(),exchange.secret.bytes.size());SecureZeroMemory(exchange.nonce.bytes.data(),exchange.nonce.bytes.size());context.reset();}
   bool quiet(){DWORD count=0;return alive()&&PeekNamedPipe(proofReader.value,nullptr,0,nullptr,&count,nullptr)&&count==0;}
-  bool moduleCurrent(){try{moduleLink->poll(GetProcessId(process.value));return true;}catch(...){return false;}}
+  bool moduleCurrent(){try{const auto pid=GetProcessId(process.value);moduleLink->poll(pid);executionLink->poll(pid);return true;}catch(...){return false;}}
   void stop(){if(process.value)require(TerminateJobObject(group.native(),1)!=0,"worker_termination");}
 };

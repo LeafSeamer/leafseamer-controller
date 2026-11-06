@@ -20,7 +20,7 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy}) 
   const socket = net.createConnection(pipe);
   let pending = null, input = Buffer.alloc(0), failed = null, stopped = false, timer = null, lastDeadline = null;
   let outgoing = 1n, incoming = 1n, listener = null, latest = null;
-  const lostListeners=new Set(),workerObservations=new WeakMap(),workerVersions=new Map();let workerEpoch=0;
+  const lostListeners=new Set(),workerObservations=new WeakMap(),workerVersions=new Map(),coreObservations=new WeakMap();let workerEpoch=0,latestCoreObservation=null;
   const freeze=value=>{if(value&&typeof value==='object'){for(const item of Object.values(value))freeze(item);Object.freeze(value);}return value;};
   const notifyLost=error=>{for(const callback of [...lostListeners])try{callback(error);}catch{}};
   let previousTick = null, tail = Promise.resolve(), queued = 0;
@@ -63,7 +63,7 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy}) 
     try {
       check(!failed && !stopped && !pending && outgoing <= maxSequence && incoming <= maxSequence, 'supervisor_state');
       if (lastDeadline !== null) assertCurrent();
-      const deadline = now() + 2000000000n, message = crypto.randomUUID();
+      const issued = now(), deadline = issued + 2000000000n, message = crypto.randomUUID();
       const frame = {version: supervisorControlVersion, type, scope, channel_id: channelId,
         sequence: String(outgoing++), message_id: message, reply_to: null, payload};
       const response = new Promise((resolve, reject) => { pending = {resolve, reject, timer: setTimeout(() => fail('supervisor_timeout'), 2000)}; });
@@ -72,20 +72,23 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy}) 
       let result;
       try { result = await decodeSupervisorControl(bytes, expected); }
       catch { result = await decodeSupervisorControl(bytes, 'ERROR'); }
-      check(!failed && !stopped && now() < deadline, 'supervisor_confirmation_expired');
+      const received=now();check(!failed && !stopped && received < deadline, 'supervisor_confirmation_expired');
       check(result.channel_id === channelId && result.sequence === String(incoming) && result.reply_to === message && same(result.scope, scope), 'supervisor_response_binding');
-      incoming++; return {result, deadline};
+      incoming++; return {result, deadline,request:frame,issued,received};
     } catch (error) { fail(error instanceof SupervisorError ? error.code : 'supervisor_response_rejected'); throw failed ?? error; }
   }
   function query() {
     return enqueue(async () => {
       try {
-        const {result, deadline} = await exchange('LAUNCH_QUERY', key, 'LAUNCH_RESULT');
+        const {result, deadline,request,issued,received} = await exchange('LAUNCH_QUERY', key, 'LAUNCH_RESULT');
         check(result.type === 'LAUNCH_RESULT' && same(result.payload.key, key), 'supervisor_response_binding');
         const record = result.payload.record;
         check(record && same(record.key, key) && record.supervisor_instance_id === descriptor.supervisor_instance_id && record.state === 'admitted_closed' &&
           record.creation_attempted === true && record.gate_state === 'closed' && record.retirement_evidence === null && same(record.admission_receipt, receipt), 'supervisor_receipt_binding');
         lastDeadline = deadline; latest = result;
+        latestCoreObservation=freeze({format:'leafseamer-core-observation/1',request,response:result,
+          issued_tick_ns:String(issued),received_tick_ns:String(received),expires_tick_ns:String(deadline)});
+        coreObservations.set(latestCoreObservation,deadline);
         timer = setTimeout(() => { void query().catch(() => {}); }, 500); return result;
       } catch (error) { fail(error instanceof SupervisorError ? error.code : 'supervisor_response_rejected'); throw failed ?? error; }
     });
@@ -288,6 +291,9 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy}) 
     assertCurrent, observeWorker, assertWorkerObservation, putFence, queryLaunch, registerWorker, prepareWorkerMaterialization, loadWorkerContent, createWorker, retireWorker,
     scope,
     current() { assertCurrent(); return latest; },
+    observeCore(){assertCurrent();check(latestCoreObservation,'supervisor_core_observation');return latestCoreObservation;},
+    assertCoreObservation(value){assertCurrent();const deadline=coreObservations.get(value);
+      check(deadline!==undefined&&now()<deadline&&same(value.response.payload.record.admission_receipt,receipt),'supervisor_core_observation');},
     subscribeLost(callback){check(typeof callback==='function','supervisor_listener');lostListeners.add(callback);if(failed||stopped)callback(failed??new SupervisorError('supervisor_stopped'));return ()=>lostListeners.delete(callback);},
     onLost(callback) { check(typeof callback === 'function' && listener === null, 'supervisor_listener'); listener = callback; if (failed) listener(failed); },
     close() {

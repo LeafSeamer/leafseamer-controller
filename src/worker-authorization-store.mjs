@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {openNativeClock} from './native-clock.mjs';
+import {coreRuntimeSource} from './core-runtime-source.mjs';
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 const same=(a,b)=>canonicalize(a)===canonicalize(b);
 const need=(ok,code)=>{if(!ok){const error=new Error('worker_authorization_'+code);error.code=error.message;throw error;}};
@@ -99,6 +100,10 @@ export function workerAuthorizationStore({db,service,bootId,isOpen,core,prepared
  }
  function schedule(){timer=setTimeout(()=>{void Promise.resolve().then(()=>enqueue(sync)).catch(()=>stop()).finally(()=>{if(!closed&&!failed)schedule();});},500);timer.unref();}
  function fixed(key){available();const value=prepared(key);need(value?.current_boot,'preparation');return {launch_id:value.intent.launch_id,launch_intent_digest:value.ref.digest};}
+ const runtimeSource=Number(service.schema_revision)>=35?coreRuntimeSource({db,service,bootId,core,connected,
+  observe(){need(typeof source?.observeCore==='function','core_source_unavailable');return source.observeCore();},
+  assertObservation(value){need(typeof source?.assertCoreObservation==='function','core_source_unavailable');source.assertCoreObservation(value);},
+  domain(){connected();return {ref:structuredClone(receipt.domain_ref),tick:String(clock.tick())};}}):null;
  return Object.freeze({
   bindSource(value){
    available();need(!source&&value&&['assertCurrent','current','putFence','queryLaunch','registerWorker','createWorker','subscribeLost','close'].every(name=>typeof value[name]==='function'),'source');
@@ -114,6 +119,8 @@ export function workerAuthorizationStore({db,service,bootId,isOpen,core,prepared
   deny(key){const copy=fixed(key);denied.add(copy.launch_id);return enqueue(async()=>{db.transaction(()=>deny(copy.launch_id,'requested')).immediate();return sync();});},
   synchronize(){return enqueue(sync);},
   domain(){connected();return freeze({ref:structuredClone(receipt.domain_ref),tick:String(clock.tick())});},
+  selectCoreSource(){need(runtimeSource,'core_source_unavailable');return runtimeSource.select();},
+  currentCoreSource(reference){need(runtimeSource,'core_source_unavailable');return runtimeSource.current(reference);},
   retireForControl(key){const copy=fixed(key);return enqueue(async()=>{
    db.transaction(()=>deny(copy.launch_id,'requested')).immediate();const fence=await sync();
    const record=await source.queryLaunch(copy);connected();

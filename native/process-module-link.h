@@ -60,12 +60,12 @@ class ModuleLink {
   };
   Port core,worker;
   DWORD corePid;
-  static std::wstring name(const std::string& boot,const wchar_t* side){
+  static std::wstring name(const std::string& boot,const wchar_t* side,bool execution){
     require(boot.size()==32&&boot.find_first_not_of("0123456789abcdef")==std::string::npos,"module_link_identity");
-    return L"\\\\.\\pipe\\LeafSeamer.Module."+std::wstring(boot.begin(),boot.end())+side;
+    return std::wstring(execution?L"\\\\.\\pipe\\LeafSeamer.Execution.":L"\\\\.\\pipe\\LeafSeamer.Module.")+std::wstring(boot.begin(),boot.end())+side;
   }
 public:
-  ModuleLink(Instance& owner,const std::string& boot,DWORD pid):core(owner,name(boot,L".core")),worker(owner,name(boot,L".worker")),corePid(pid){require(pid!=0,"module_link_peer");}
+  ModuleLink(Instance& owner,const std::string& boot,DWORD pid,bool execution=false):core(owner,name(boot,L".core",execution)),worker(owner,name(boot,L".worker",execution)),corePid(pid){require(pid!=0,"module_link_peer");}
   void poll(DWORD workerPid){
     core.connect(corePid);worker.connect(workerPid);core.flush();worker.flush();core.read();worker.read();core.forward(worker);worker.forward(core);
   }

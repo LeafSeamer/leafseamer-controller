@@ -1,0 +1,133 @@
+{
+  "template_version": "extension-capability-template/1",
+  "template_id": "leafseamer.simulator.control",
+  "device_role": "device",
+  "device_kind": "simulator",
+  "actions": [
+    {
+      "action_id": "leafseamer.simulator.value.set",
+      "capability_version": "1.0.0",
+      "parameters_schema": {
+        "schema_id": "leafseamer.simulator.value.parameters.1",
+        "dialect": "https://json-schema.org/draft/2020-12/schema",
+        "document": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          },
+          "required": [
+            "value"
+          ]
+        },
+        "digest": "sha256:6cec61f296b9460c7516e5ced9bb68107750c260d03fdca271904e1d6b87904e"
+      },
+      "result_schema": {
+        "schema_id": "leafseamer.simulator.value.result.1",
+        "dialect": "https://json-schema.org/draft/2020-12/schema",
+        "document": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            "write_sequence": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,19}$(?![\\s\\S])"
+            }
+          },
+          "required": [
+            "value",
+            "write_sequence"
+          ]
+        },
+        "digest": "sha256:e93d267589b2c4e57a24fe3d96dc10cdb0ee7daefaafbf39632c55ac764f1fe9"
+      },
+      "resources": [
+        "device"
+      ],
+      "completion": {
+        "supported": [
+          "acknowledged",
+          "effect_verified",
+          "sent"
+        ],
+        "default": "effect_verified",
+        "evidence_policy_id": "leafseamer.simulator.correlated_readback.1"
+      },
+      "cancel": {
+        "mode": "before_dispatch_only"
+      },
+      "retry": {
+        "mode": "never"
+      },
+      "preconditions_schema": {
+        "schema_id": "leafseamer.simulator.no_preconditions.1",
+        "dialect": "https://json-schema.org/draft/2020-12/schema",
+        "document": {
+          "type": "object",
+          "additionalProperties": false
+        },
+        "digest": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e"
+      },
+      "read_set": [
+        "device"
+      ],
+      "write_set": [
+        "device"
+      ],
+      "evidence_timeout_ms": 1000,
+      "limits_profile": "leafseamer.simulator.control.limits.1",
+      "platforms": [
+        {
+          "os": "linux",
+          "arch": "x64",
+          "status": "untested"
+        },
+        {
+          "os": "windows",
+          "arch": "x64",
+          "status": "untested"
+        }
+      ],
+      "dependencies": []
+    }
+  ],
+  "triggers": [],
+  "state_schema": {
+    "schema_id": "leafseamer.simulator.control.state.1",
+    "dialect": "https://json-schema.org/draft/2020-12/schema",
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "sample_sequence": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,19}$(?![\\s\\S])"
+        },
+        "write_sequence": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]{0,19})$(?![\\s\\S])"
+        }
+      },
+      "required": [
+        "value",
+        "sample_sequence",
+        "write_sequence"
+      ]
+    },
+    "digest": "sha256:2c183f06ece6268971b1b8797389faa9a6b836b2ea4263bbf155b9f9e70917d7"
+  }
+}

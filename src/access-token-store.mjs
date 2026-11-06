@@ -40,8 +40,16 @@ export function accessTokenService({db, serviceId, authority, enabled, writer, t
     available();
     if (!db.inTransaction) fail('token_transaction_required');
     if (!input || Object.keys(input).sort().join(',') !== 'secret,token_id' || !uuid(input.token_id) || !uuid(audience)) fail('token_invalid');
-    const now = time(), row = rows(db, 'SELECT * FROM access_token WHERE token_id = ?', input.token_id)[0];
+    const row = rows(db, 'SELECT * FROM access_token WHERE token_id = ?', input.token_id)[0];
     if (!row || row.audience !== audience || !verifyOpaqueSecret('access_token', input.secret, row.verifier) || row.state !== 'active') fail('token_invalid');
+    return currentRecordedToken(input.token_id,audience);
+  }
+  // 只交给同库已封存来源的内部复核器；不通过tokens公开或接受HTTP按ID鉴权。
+  function currentRecordedToken(tokenId,audience){
+    available();if(!db.inTransaction)fail('token_transaction_required');
+    if(!uuid(tokenId)||!uuid(audience))fail('token_invalid');
+    const now=time(),row=rows(db,'SELECT * FROM access_token WHERE token_id=?',tokenId)[0];
+    if(!row||row.audience!==audience||row.state!=='active')fail('token_invalid');
     const session = rows(db, 'SELECT * FROM auth_session WHERE session_id = ?', row.session_id)[0];
     const credential = rows(db, 'SELECT * FROM session_refresh_credential WHERE credential_id = ?', row.credential_id)[0];
     if (!session || session.state !== 'active' || !credential || credential.session_id !== session.session_id || credential.state === 'revoked') fail('token_invalid');
@@ -113,5 +121,6 @@ export function accessTokenService({db, serviceId, authority, enabled, writer, t
     // audience必须由已认证的本地目标或mTLS对端导出；此函数不接受公开HTTP自报对端。
     verifyToken(input, audience) { return deliver(writer(() => authorizeToken(input, audience))); },
     authorizeToken,
+    currentRecordedToken,
   };
 }

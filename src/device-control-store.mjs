@@ -10,7 +10,7 @@ const uuid=()=>crypto.randomUUID();
 
 // 人员控制请求使用同库真实令牌、上下文和授权；屏障仅由核心内部提供者处理。
 export function deviceControlStore({db,service,bootId,writer,time,authorizeToken,contextCurrent,authority,devices,barriers}){
- const adapter=createHttpAdapter(selection),repository=deviceControlRepository(db,devices),scope={authority_service_id:service.service_id,database_instance_id:service.database_instance_id};
+ const adapter=createHttpAdapter(selection),repository=deviceControlRepository(db,devices,()=>barriers.domain()),scope={authority_service_id:service.service_id,database_instance_id:service.database_instance_id};
  let stopped=false;const running=new Set();
  const available=()=>need(!stopped&&Number(service.schema_revision)>=26,'unavailable');
  function authorize(token,permission='control.read'){

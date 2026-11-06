@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import {TLSSocket} from 'node:tls';
-import {createHttpAdapter} from './sdk/http.mjs';
+import {createHttpAdapter,WireError} from './sdk/http.mjs';
 import {contractSelection as selection} from './sdk/index.mjs';
 import {canonical} from './auth-clock-value.mjs';
 
@@ -13,10 +13,11 @@ const routes = new Map([
   ['/api/v1/devices', 'GET'],
 ]);
 const maximumBody = 16384, maximumPending = 16, bodyDeadline = 2000;
-const commandOperations = ['submitCommand', 'lookupCommandAdmission', 'rejectCommandAdmission'];
+const commandReads=['getCommand','getCommandEvidence','getCommandEvidenceRevision'];
+const commandOperations = ['submitCommand', 'lookupCommandAdmission', 'rejectCommandAdmission',...commandReads];
 const controlWrites=['acquireControl','releaseControl','offerTransfer','acceptTransfer','cancelTransfer'];
 const controlOperations=['getControl','getControlOperation','getTransfer','lookupControlRequest',...controlWrites];
-const readOperations = ['getSession', 'listDevices', 'getControl','getControlOperation','getTransfer'];
+const readOperations = ['getSession', 'listDevices', 'getControl','getControlOperation','getTransfer',...commandReads];
 const rawPairs = flat => Array.from({length: flat.length / 2}, (_, i) => [flat[2 * i], flat[2 * i + 1]]);
 const credentialPattern = /^v1\.([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([A-Za-z0-9_-]{43})$/;
 const cookieFlags = '; Path=/auth; Secure; HttpOnly; SameSite=Strict';
@@ -50,10 +51,13 @@ function failure(error) {
   if (['login_throttled', 'password_busy', 'token_capacity'].includes(error?.code)) return [429, 'CAPACITY_EXCEEDED'];
   if (error?.code === 'token_request_invalid') return [422, 'INVALID_REQUEST'];
   if (error?.code === 'command_request_invalid') return [422, 'INVALID_REQUEST'];
-  if (['command_permission', 'command_namespace'].includes(error?.code)) return [403, 'PERMISSION_DENIED'];
+  if (['command_permission', 'command_namespace','command_control_owner'].includes(error?.code)) return [403, 'PERMISSION_DENIED'];
+  if(error?.code==='command_control_conflict')return [409,'REVISION_CONFLICT'];
+  if(['command_capability','command_parameters','command_preconditions','command_completion','command_evidence_timeout'].includes(error?.code))return [422,'INVALID_REQUEST'];
+  if(error?.code==='command_not_found')return [404,'NOT_FOUND'];
   if (error?.code === 'command_conflict') return [409, 'IDEMPOTENCY_CONFLICT'];
   if (error?.code === 'command_capacity') return [429, 'CAPACITY_EXCEEDED'];
-  if (error?.code === 'command_admission_unavailable') return [503, 'WORKER_NOT_READY'];
+  if (['command_admission_unavailable','command_control_pending','command_execution_unavailable','command_gate_not_ready'].includes(error?.code)) return [503, 'WORKER_NOT_READY'];
   if (['control_permission','control_target_permission','control_context'].includes(error?.code)) return [403,'PERMISSION_DENIED'];
   if (error?.code==='control_input') return [422,'INVALID_REQUEST'];
   if (error?.code==='control_conflict') return [409,'REVISION_CONFLICT'];
@@ -75,7 +79,7 @@ function failure(error) {
 }
 
 // origin与sessions只能由可信本地启动装配。代理身份头不能开启认证入口。
-export function createAuthenticationHttp({serviceId, databaseInstanceId, serviceBootId, sessions = null, origin = null}) {
+export function createAuthenticationHttp({serviceId, databaseInstanceId, serviceBootId, sessions = null, origin = null, onFailure = null}) {
   const adapter = createHttpAdapter(selection);
   let site = null;
   if (origin !== null) {
@@ -93,14 +97,18 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
         details: {}, existing_command_id: null, existing_operation_id: null, retry_advice: 'do_not_retry'}} : {data})};
     // 命令裁决契约使用具名原结果及独立Error，不能套用身份信封。
     const commandError = {400: 'invalid', 401: 'unauthenticated', 403: 'forbidden', 409: 'conflict', 413: 'invalid', 422: 'invalid', 429: 'capacity', 503: 'unavailable'};
-    const body = Buffer.from(JSON.stringify(controlOperations.includes(request.operation_id) ?
+    const readError={400:'invalid',401:'unauthenticated',403:'forbidden',404:'not_found',413:'payload_too_large',422:'invalid_semantics',429:'capacity',503:'unavailable'};
+    const body = Buffer.from(JSON.stringify(commandReads.includes(request.operation_id)?
+      (code?{code:readError[status]??'unavailable',request_id:requestId,retry_action:'read_current'}:data):controlOperations.includes(request.operation_id) ?
       (code ? {code, message: code.toLowerCase(), retry_instruction: 'query_original'} : data) : commandOperations.includes(request.operation_id) ?
       (code ? {code: commandError[status] ?? 'unavailable', request_id: requestId} : data) : envelope));
     const headers = [['content-type', 'application/json'], ['content-length', String(body.length)],
       ['x-leafseamer-contract', selection.contract_id], ['x-leafseamer-contract-digest', selection.contract_digest],
       ['cache-control', 'no-store'], ['x-content-type-options', 'nosniff'], ['connection', 'close'], ...extraHeaders];
     // 任何响应字段或选择失配均在发送响应头前失败，不能交付半个可信结果。
-    await adapter.decodeResponse(body, adapter.prepareResponse(request, String(status), headers));
+    // 本地生成且受SDK大小上限约束的响应在微任务内完成校验，避免让出的定时器片被同步writer占满。
+    // 保留原解析截止、节点/字节预算及发送前当前性复核；外部请求仍用默认公平分片。
+    await adapter.decodeResponse(body, adapter.prepareResponse(request, String(status), headers),{yieldNow:()=>Promise.resolve()});
     beforeSend();
     if (!res.destroyed && !res.headersSent) { res.writeHead(status, Object.fromEntries(headers)); res.end(body); }
   }
@@ -159,11 +167,16 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
           const read=()=>operation==='getControlOperation'?sessions.getControlOperation(proof,parameters.operation_id):sessions.getTransfer(proof,parameters.device_id,parameters.transfer_id);
           const data=read();await reply(res,request,200,null,{data,beforeSend(){if(canonical(read())!==canonical(data))reject('control_changed');}});
         }
+      } else if(commandReads.includes(operation)){
+        const proof=tokenInput(req),p=request.parameters.path,read=()=>operation==='getCommand'?sessions.getCommand(proof,p.command_id):
+          operation==='getCommandEvidence'?sessions.getCommandEvidence(proof,p.command_id,request.parameters.query):sessions.getCommandEvidenceRevision(proof,p.command_id,p.evidence_id,p.revision),data=read();
+        await reply(res,request,200,null,{data,beforeSend(){if(canonical(read())!==canonical(data))reject('command_binding');}});
       } else if (commandOperations.includes(operation)) {
-        const proof = tokenInput(req), data = await sessions[operation](proof, body);
+        const proof = tokenInput(req), result = await sessions[operation](proof, body,{withStatus:true});
+        const data=operation==='submitCommand'?result.adjudication:result;
         const identity = operation === 'lookupCommandAdmission' ? body : data.identity;
         const permission = operation === 'rejectCommandAdmission' ? 'command.cancel' : 'command.read';
-        await reply(res, request, 200, null, {data, beforeSend() { sessions.confirmCommandResult(proof, identity, permission, data); }});
+        await reply(res, request, operation==='submitCommand'&&!result.replay?202:200, null, {data, beforeSend() { sessions.confirmCommandResult(proof, identity, permission, data); }});
       } else if (operation === 'createRequestContext') {
         const proof = tokenInput(req), data = sessions.createRequestContext(proof, body);
         await reply(res, request, 201, null, {data, beforeSend() {
@@ -179,6 +192,8 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
         await reply(res, request, 200, null, {data, beforeSend() { if (JSON.stringify(view()) !== JSON.stringify(data)) reject('local_authorization_denied'); }});
       }
     } catch (error) {
+      // 可信本机装配只接收分类，不传递凭据、请求正文或异常全文；观察失败不改变HTTP结果。
+      try{onFailure?.({operation_id:operation,error_name:error?.name??'Error',code:error instanceof WireError?error.reason:error?.code??'http_internal'});}catch{}
       const [status, code] = failure(error);
       await reply(res, request, status, code, {extraHeaders: status === 401 && operation !== 'getSession' ? [clearCookie] : []});
     }
@@ -216,7 +231,7 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
   }
   return Object.freeze({handle(req, res) {
     const pathname = req.url?.split('?')[0];
-    const method = routes.get(pathname) ?? (/^\/api\/v1\/devices\/[^/]+\/control$/.test(pathname)||/^\/api\/v1\/control-operations\/[^/]+$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+$/.test(pathname)?'GET':
+    const method = routes.get(pathname) ?? (/^\/api\/v1\/commands\/[^/]+(?:\/evidence(?:\/[^/]+\/revisions\/[^/]+)?)?$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control$/.test(pathname)||/^\/api\/v1\/control-operations\/[^/]+$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+$/.test(pathname)?'GET':
       /^\/api\/v1\/devices\/[^/]+\/control\/(acquire|release|transfers)$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+\/(accept|cancel)$/.test(pathname)||pathname==='/api/v1/control-requests/lookup'?'POST':null);
     if (!method) return false;
     if (req.method !== method) { empty(res, 405, {Allow: method}); return true; }

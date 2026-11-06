@@ -37,7 +37,7 @@ function policyFor(identity) {
 
 test('真实CNG挑战、Node证明、双库回执与监听形成闭环，设备闸门保持关闭', options, async t => {
   const dir = temporary(t), identity = initializeStorage(dir);
-  const migration = await migrateStorage(dir); assert.equal(migration.schema_revision, '26');
+  const migration = await migrateStorage(dir); assert.equal(migration.schema_revision, '48');
   assert(fs.existsSync(path.join(dir, migration.backup_file)));
   await initializeProcessHost(dir);
   let output = '';

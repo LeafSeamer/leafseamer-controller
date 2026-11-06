@@ -17,10 +17,10 @@ import crypto from 'node:crypto';
 import {certificate, supervisedFixture, browserFetch} from './https-auth-fixture.mjs';
 
 const material = certificate(), login = {login: 'synthetic-https-admin', password: 'synthetic-https-password-012345'};
-async function setup(t, qualified = true, commandPermissions = false, registerDevices = false, controlPermissions = false) {
+async function setup(t, qualified = true, commandPermissions = false, registerDevices = false, controlPermissions = false, schemaRevision = 50) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'leafseamer-https-')); let app;
   t.after(async () => { await app?.close(); assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir())); fs.rmSync(dir, {recursive: true, force: true}); });
-  initializeStorage(dir); await migrateStorage(dir);
+  initializeStorage(dir); await migrateStorage(dir,schemaRevision);
   const storage = openStorage(dir); let enrolled; const devices = [];
   try {
     const capability = storage.enrollment.begin(); enrolled = await storage.enrollment.complete({...login, mode: 'standalone', token_id: capability.token_id, secret: capability.secret});
@@ -106,7 +106,7 @@ test('实际HTTPS与SDK签发上下文，目标操作越权拒绝且注销关闭
   finally { db.close(); }
 });
 
-test('实际HTTPS永久拒收和迟到提交查原：同键异内容409，新动作503且不创建命令', {timeout: 15000}, async t => {
+test('实际HTTPS永久拒收和迟到提交查原：同键异内容409，无写权的新动作403且不创建命令', {timeout: 15000}, async t => {
   const a = await setup(t, true, true); await a.client.login(login);
   await a.client.issueToken({audience: a.app.identity.service_id, requested_scopes: ['request.create', 'command.read', 'command.cancel']});
   const context = (await a.client.createRequestContext({audience: a.app.identity.service_id, operations: ['lookupCommandAdmission', 'rejectCommandAdmission'], ttl_ms: 30000, max_unique_requests: 8})).body.data;
@@ -122,7 +122,8 @@ test('实际HTTPS永久拒收和迟到提交查原：同键异内容409，新动
   assert.deepEqual((await a.client.submitCommand({...content, context_id: context.context_id, idempotency_key: identity.key.idempotency_key})).body, rejected.body);
   const changed = {...content, parameters: {value: 2}};
   assert.equal((await a.client.rejectCommandAdmission({...request, rejection_operation_id: crypto.randomUUID(), content: changed, identity: {...identity, request_digest: digest(changed)}})).status, '409');
-  assert.equal((await a.client.submitCommand({...content, context_id: context.context_id, idempotency_key: crypto.randomUUID()})).status, '503');
+  const denied=await a.client.submitCommand({...content, context_id: context.context_id, idempotency_key: crypto.randomUUID()});
+  assert.equal(denied.status,'403');assert.equal(denied.body.code,'forbidden');
   await a.app.close();
   const db = new Database(path.join(a.dir, 'controller.sqlite'), {fileMustExist: true});
   try {
@@ -222,8 +223,8 @@ test('注销来源失信返回503并清SDK内存，不伪报本地或传播完�
 });
 
 
-test('HTTPS人员接管绑定Bearer会话CSRF，接纳后可查原且未确认屏障不生效',{timeout:15000},async t=>{
- const a=await setup(t,true,false,true,true);await a.client.login(login);
+for(const schema of [31,50])test('HTTPS人员接管绑定CSRF：schema'+schema+(schema===31?'保留旧受理与查原':'缺少监督来源拒绝且不消耗请求'),{timeout:15000},async t=>{
+ const a=await setup(t,true,false,true,true,schema);await a.client.login(login);
  const issued=await a.client.issueToken({audience:a.app.identity.service_id,requested_scopes:['request.create','control.read','control.acquire']});
  const csrf=a.browser.state.requests.at(-1).headers['x-csrf-token'],headers={Authorization:'Bearer '+issued.body.data.access_token,'X-CSRF-Token':csrf};
  const contextResponse=await a.send('POST','/api/v1/request-contexts',{audience:a.app.identity.service_id,selection,operations:['acquireControl'],ttl_ms:10000,max_unique_requests:8},headers);
@@ -233,7 +234,17 @@ test('HTTPS人员接管绑定Bearer会话CSRF，接纳后可查原且未确认�
  const route='/api/v1/devices/'+device+'/control/acquire';
  assert.equal((await a.send('POST',route,body,{...headers,'X-CSRF-Token':'invalid'})).status,401);
  assert.equal((await a.send('POST',route,body,{...headers,Origin:'https://other.invalid'})).status,403);
- const response=await a.send('POST',route,body,headers);assert.equal(response.status,202);const receipt=await response.json();assert.equal(receipt.result_kind,'control_operation');
+ const response=await a.send('POST',route,body,headers);
+ if(schema===50){
+  assert.equal(response.status,503);assert.equal((await response.json()).code,'WORKER_NOT_READY');
+  assert.deepEqual(await (await a.send('GET','/api/v1/devices/'+device+'/control',undefined,headers)).json(),before);
+  await a.app.close();
+  const db=new Database(path.join(a.dir,'controller.sqlite'),{readonly:true,fileMustExist:true});try{
+   assert.equal(db.prepare('SELECT count(*) FROM control_request').pluck().get(),0);
+   assert.equal(db.prepare('SELECT used_count FROM request_context WHERE context_id=?').pluck().get(context.context_id),0);
+  }finally{db.close();}return;
+ }
+ assert.equal(response.status,202);const receipt=await response.json();assert.equal(receipt.result_kind,'control_operation');
  const replay=await a.send('POST',route,{...body,force:false},headers);assert.equal(replay.status,200);assert.deepEqual(await replay.json(),receipt);
  const operation=await (await a.send('GET','/api/v1/control-operations/'+receipt.initial_result_ref.id,undefined,headers)).json();assert.equal(operation.state,'indeterminate');
  const current=await (await a.send('GET','/api/v1/devices/'+device+'/control',undefined,headers)).json();assert.equal(current.holder,null);assert.equal(current.effective_version,'0');assert.equal(current.reserved_version,'1');

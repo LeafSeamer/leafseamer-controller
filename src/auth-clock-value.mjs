@@ -51,7 +51,7 @@ export function context(value, scope, artifactDigest, now) {
     'health_profile_ref', 'system_time_source_ref', 'environment_approval_ref', 'state', 'holdover_ref', 'valid_before_tick_ns']);
   need(p.service_id === scope.service_id && r.service_id === scope.service_id && r.service_boot_id === scope.service_boot_id &&
     h.service_id === scope.service_id && h.service_boot_id === scope.service_boot_id, 'auth_clock_scope');
-  need(uuid(r.clock_domain_id) && h.clock_domain_id === r.clock_domain_id && hash(r.descriptor_digest) &&
+  need((uuid(r.clock_domain_id) || r.clock_domain_id === 'clock_' + r.descriptor_digest?.slice(7)) && h.clock_domain_id === r.clock_domain_id && hash(r.descriptor_digest) &&
     r.native_binary_digest === artifactDigest && hash(artifactDigest), 'auth_clock_runtime');
   need(typeof r.continuity === 'string' && r.continuity.length > 0 && r.continuity.length <= 128, 'auth_clock_continuity');
   for (const key of ['runtime_profile_ref', 'native_artifact_ref', 'environment_approval_ref']) need(same(r[key], p[key]), 'auth_clock_binding');
