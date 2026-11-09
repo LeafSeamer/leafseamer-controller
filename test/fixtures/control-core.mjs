@@ -12,7 +12,19 @@ const bootstrap = createCoreBootstrapChannel(process.stdin, process.stdout, {tim
 const assignment = await bootstrap.assignment(), receipt = await bootstrap.proveAndReceive(assignment); bootstrap.release();
 const policy = JSON.parse(options['--bootstrap-policy']), mode = options['--mode'];
 process.stderr.write(JSON.stringify({event: 'bootstrapped', pid: process.pid}) + '\n');
-if (mode === 'worker-register' || mode === 'worker-create' || mode === 'worker-retire') {
+if(mode==='core-refresh'){
+ const source=await connectCoreSupervisor({pipe:options['--supervisor-pipe'],channelId:options['--supervisor-channel'],policy,
+  binding:{descriptor:assignment.clock_domain_descriptor,receipt}});
+ const clock=openNativeClock(),original=source.observeCore(),expires=original.expires_tick_ns,requested=clock.tick();
+ const observations=await Promise.all(Array.from({length:6},()=>source.refreshCoreObservation()));
+ const fresh=observations.every(value=>BigInt(value.issued_tick_ns)>=requested&&value!==original&&value===source.observeCore());
+ await new Promise(resolve=>setTimeout(resolve,Number((BigInt(expires)-clock.tick())/1000000n)+50));
+ let oldError=null;try{source.assertCoreObservation(original);}catch(error){oldError=error.code;}
+ source.assertCurrent();source.assertCoreObservation(source.observeCore());source.close();
+ let closedError=null;try{await source.refreshCoreObservation();}catch(error){closedError=error.code;}
+ process.stderr.write(JSON.stringify({event:'core-refresh-done',fresh,unchanged:original.expires_tick_ns===expires,oldError,closedError})+'\n');
+ process.stdin.setEncoding('utf8').on('data',data=>{if(data==='stop\n')process.stdin.destroy();});process.stdin.resume();
+}else if (mode === 'worker-register' || mode === 'worker-create' || mode === 'worker-retire') {
   const source = await connectCoreSupervisor({pipe: options['--supervisor-pipe'], channelId: options['--supervisor-channel'], policy,
     binding: {descriptor: assignment.clock_domain_descriptor, receipt}});
   const clock = openNativeClock(), hash = value => 'sha256:' + crypto.createHash('sha256').update(canonicalize(value)).digest('hex');

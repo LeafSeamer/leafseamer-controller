@@ -1,3 +1,5 @@
+import {memoExecutionRead} from './execution-read-view.mjs';
+import {sqliteRows} from './sqlite-rows.mjs';
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {IdentityError} from './identity-crypto.mjs';
@@ -7,11 +9,12 @@ const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(valu
 const same=(a,b)=>canonicalize(a)===canonicalize(b);
 const exact=(v,keys)=>v&&Object.keys(v).sort().join(',')===keys.split(',').sort().join(',');
 const id=v=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\s\S])/.test(v);
-const rows=(db,sql,...args)=>{const q=db.prepare(sql),names=q.columns().map(c=>c.name);return q.raw().all(...args).map(row=>Object.fromEntries(names.map((n,i)=>[n,row[i]])));};
+const rows=sqliteRows;
 const frozen=value=>{if(value&&typeof value==='object'){Object.values(value).forEach(frozen);Object.freeze(value);}return value;};
-function read(body,digest){const value=JSON.parse(body);need(canonicalize(value)===body&&hash(value)===digest,'integrity');return value;}
+function readDocument(body,digest){const value=JSON.parse(body);need(canonicalize(value)===body&&'sha256:'+crypto.createHash('sha256').update(body).digest('hex')===digest,'integrity');return value;}
 // 内部同writer读取，不是外部授权入口；人员接口在调用前仍须验证真实令牌。
 export function extensionApprovalState({db,service,reference,currentReview,currentResolution}){
+ const read=(body,digest)=>memoExecutionRead(db,'extension-document',[body,digest],()=>readDocument(body,digest));
  const staticCapabilities=Number(service.schema_revision)>=18;
  function device(ref){
   const row=rows(db,'SELECT descriptor_body,descriptor_digest FROM device_record WHERE device_id=?',ref.object_id)[0];need(row,'capability_unavailable');

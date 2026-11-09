@@ -71,7 +71,7 @@ function readGuard(db,id){
  return {...saved,ack:{value:acknowledgement,ref:ref(id+'.response',acknowledgement),reply}};
 }
 export function selectCommandGuard(db,{id,binding,provider,tick,features}){
- need(db.inTransaction&&[53,54,55].includes(Number(db.pragma('user_version',{simple:true}))),'writer');
+ need(db.inTransaction&&[53,54,55,56,57].includes(Number(db.pragma('user_version',{simple:true}))),'writer');
  const prior=db.prepare('SELECT g.guard_id FROM command_guard_request g JOIN command_final_admission f ON f.transaction_id=g.final_transaction_id WHERE f.command_id=?').pluck().get(id);
  if(prior)return {saved:readCommandGuard(db,prior)};
  const actual=currentPreparedCommand(db,{id,binding,provider,tick}),v=actual.final.value;

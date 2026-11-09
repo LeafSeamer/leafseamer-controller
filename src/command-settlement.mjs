@@ -17,7 +17,12 @@ const written=result=>need(result.changes===1,'storage');
 function row(db,sql,...args){const q=db.prepare(sql),names=q.columns().map(v=>v.name),values=q.raw().get(...args);return values&&Object.fromEntries(names.map((n,i)=>[n,values[i]]));}
 function source(db,id){
  const dispatch=readCommandDispatch(db,id),v=dispatch.final.value,initial=readOriginalRecord(db,v.command_id),ready=readInitialReady(db,initial.source.ready_ref.id);
- need(dispatch.write&&same(ready.value.binding,v.seal.binding),'source');return {dispatch,initial,ready};
+ need(dispatch.write&&same(ready.value.binding,v.seal.binding),'source');
+ const ids=db.prepare(`SELECT f.permit_id FROM command_final_admission f JOIN command_transmission_issue i USING(permit_id)
+  WHERE f.binding_id=? AND i.issued_revision<=? ORDER BY f.permit_id`).pluck().all(initial.source.binding_ref.id,String(v.seal.issued_revision).padStart(20,'0'));
+ const dispatches=ids.map(permit=>permit===id?dispatch:readCommandDispatch(db,permit));
+ need(dispatches.every(item=>item.report&&same(item.final.value.seal.binding,v.seal.binding)),'cut_sources');
+ return {dispatch,initial,ready,dispatches};
 }
 function checkControl(value,source){
  const p=source.dispatch.final.value.permit,b=source.dispatch.final.value.seal.binding;
@@ -26,10 +31,10 @@ function checkControl(value,source){
   value.clock_domain_id===b.clock_domain_id&&value.descriptor_digest===b.descriptor_digest,'control');
 }
 function cutBody(source,barrierId){
- const v=source.dispatch.final.value,p=v.permit,t=p.transmission,b=v.seal.binding;
+ const v=source.dispatch.final.value,p=v.permit,b=v.seal.binding,transmissions=source.dispatches.map(item=>item.final.value.permit.transmission),intents=transmissions.map(t=>t.intent);
  const body={barrier_id:barrierId,operation_id:barrierId+'.operation',control_epoch:p.control_epoch,target_version:p.control_version,
   target_gate_revision:String(BigInt(source.ready.value.gate_after.gate_revision)+1n),issued_cut_revision:v.seal.issued_revision,
-  ledger_digest:digest([t.intent]),open_intents:[t.intent],transmission_ledger_digest:digest([t]),open_transmission_intents:[t],cancel_transmissions:[],cancel_ledger_digest:digest([])};
+  ledger_digest:digest(intents),open_intents:intents,transmission_ledger_digest:digest(transmissions),open_transmission_intents:transmissions,cancel_transmissions:[],cancel_ledger_digest:digest([])};
  const {barrier_id,...cut}=body;
  return {...body,attempt_binding:{cut_id:barrierId+'_cut',cut_digest:digest({type:'FENCE',target_exit_id:b.writer_exit_id,body:cut}),
   target_exit_id:b.writer_exit_id,attempt_ordinal:'1',previous_barrier_id:null}};
@@ -39,9 +44,9 @@ function currentSource(db,{id,binding,runtime}){
  const selected=source(db,id),b=selected.dispatch.final.value.seal.binding,control=currentControlSource(db,b.device_id),bound=currentDeviceExecutionBinding(db,runtime,b.device_id,b.ipc_session_id);
  need(b.ipc_session_id===binding.ipc_session_id&&same(bound.value.binding,b)&&same(bound.ref,selected.initial.source.binding_ref)&&
   !db.prepare('SELECT 1 FROM execution_session_end WHERE ipc_session_id=?').pluck().get(b.ipc_session_id),'binding');
- // 当前固定内存路径仅有这一次普通传输；不能把额外许可从关闭清单中省略。
+ // 截止到当前签发水位的全部同装配传输均须进入关闭清单，已完成历史也不省略。
  const issued=db.prepare('SELECT permit_id FROM command_final_admission WHERE binding_id=? ORDER BY permit_id').pluck().all(selected.initial.source.binding_ref.id);
- need(same(issued,[id]),'cut_inventory');checkControl(control.current.value,selected);return {...selected,control:control.current};
+ need(same(issued,selected.dispatches.map(item=>item.final.value.permit.permit_id)),'cut_inventory');checkControl(control.current.value,selected);return {...selected,control:control.current};
 }
 export function protectCommandForSettlement(db,{id,binding,runtime,tick}){
  need(db.inTransaction,'writer');const selected=source(db,id),b=selected.dispatch.final.value.seal.binding;
@@ -69,16 +74,22 @@ export function commitCommandClosure(db,{candidate,binding,runtime,tick}){
   .run(candidate.id,candidate.frame.body.barrier_id,selected.control.ref.id,item.record.record_id,item.transaction,canonical(value),digest(value)));
  dispatchEffect(db,item,candidate.id,'fence_request',value,tick());return readCommandClosure(db,candidate.id);
 }
-function expectedAck(saved,disposition,proof,tick){
- const request=saved.request.frame,b=request.body,binding=saved.source.dispatch.final.value.seal.binding,p=saved.source.dispatch.final.value.permit;
- need((disposition==='in_flight'&&proof==='transport_entered')||(disposition==='unknown'&&proof==='send_uncertain')||
-  (disposition==='not_sent'&&['never_received','discarded_unconsumed'].includes(proof)),'ack_disposition');
- const report=saved.source.dispatch.report?.reply.frame.body;if(report)need(report.disposition===disposition&&(disposition!=='not_sent'||proof==='discarded_unconsumed'),'ack_report');
+function expectedAck(saved,coverage,tick){
+ const request=saved.request.frame,b=request.body,binding=saved.source.dispatch.final.value.seal.binding;
+ need(Array.isArray(coverage)&&coverage.length===b.open_intents.length,'ack_coverage');
+ const transmission_coverage=saved.source.dispatches.map((item,index)=>{
+  const p=item.final.value.permit,{disposition,proof,intent}=coverage[index]??{};
+  need(same(intent,p.transmission.intent)&&((disposition==='in_flight'&&proof==='transport_entered')||
+   (disposition==='unknown'&&proof==='send_uncertain')||(disposition==='not_sent'&&['never_received','discarded_unconsumed'].includes(proof))),'ack_disposition');
+  const report=item.report?.reply.frame.body;need(report&&report.disposition===disposition&&(disposition!=='not_sent'||proof==='discarded_unconsumed'),'ack_report');
+  return {intent:p.transmission,disposition,proof};
+ });
+ const commands=kind=>[...new Set(coverage.filter(v=>v.disposition===kind).map(v=>v.intent.command_id))].sort(),inFlight=commands('in_flight');
  return {ack:{barrier_id:b.barrier_id,operation_id:b.operation_id,device_id:binding.device_id,controller_boot_id:binding.controller_boot_id,worker_boot_id:binding.worker_boot_id,
-  control_epoch:b.control_epoch,installed_version:b.target_version,discarded_permit_ids:disposition==='not_sent'?[p.permit_id]:[],
-  in_flight_command_ids:disposition==='in_flight'?[p.command_id]:[],unresolved_command_ids:disposition==='unknown'?[p.command_id]:[],all_write_exits_fenced:true,
+  control_epoch:b.control_epoch,installed_version:b.target_version,discarded_permit_ids:coverage.filter(v=>v.disposition==='not_sent').map(v=>v.intent.permit_id),
+  in_flight_command_ids:inFlight,unresolved_command_ids:commands('unknown').filter(id=>!inFlight.includes(id)),all_write_exits_fenced:true,
   clock_domain_id:binding.clock_domain_id,descriptor_digest:binding.descriptor_digest},issued_cut_revision:b.issued_cut_revision,ledger_digest:b.ledger_digest,gate_revision:b.target_gate_revision,
-  coverage:[{intent:p.transmission.intent,disposition,proof}],transmission_coverage:[{intent:p.transmission,disposition,proof}],attempt_binding:b.attempt_binding,
+  coverage,transmission_coverage,attempt_binding:b.attempt_binding,
   transmission_ledger_digest:b.transmission_ledger_digest,effective_tick_ns:tick,cancel_coverage:[],cancel_ledger_digest:b.cancel_ledger_digest};
 }
 export function readCommandClosure(db,id){return withExecutionReadView(db,()=>memoExecutionRead(db,'command-closure',id,()=>readClosure(db,id)));}
@@ -95,7 +106,7 @@ function readClosure(db,id){
  need(attempt&&attempt.record_id===r.record_id&&reply.replyRecord===r.record_id&&reply.frame.reply_to===request.frame.message_id&&
   reply.frame.ipc_session_id===request.frame.ipc_session_id&&reply.frame.device_id===request.frame.device_id&&
   BigInt(b.effective_tick_ns)>=BigInt(attempt.started_tick)&&BigInt(b.effective_tick_ns)<=reply.observedTick&&
-  same(b,expectedAck(saved,b.coverage[0]?.disposition,b.coverage[0]?.proof,b.effective_tick_ns))&&
+  same(b,expectedAck(saved,b.coverage,b.effective_tick_ns))&&
   same(ack,{format:'command-closure-ack/1',permit_id:id,request_ref:saved.ref,write_attempt_id:a.write_attempt_id,
    record_ref:{id:a.record_id,revision:'1',digest:reply.record.record_digest}}),'ack');
  return {...saved,ack:{value:ack,ref:ref(id+'.fence_ack',ack),reply}};
@@ -112,7 +123,7 @@ export function acceptCommandClosure(db,{binding,decoded,features,tick,receivedT
  for(const key of ['ipc_version','ipc_session_id','controller_boot_id','worker_boot_id','clock_domain_id','descriptor_digest','device_id'])need(frame[key]===saved.request.frame[key],'reply');
  const b=frame.body,attempt=row(db,'SELECT attempt_id,started_tick FROM execution_write_attempt WHERE record_id=?',saved.request.record.record_id);
  need(frame.type==='FENCE_ACK'&&attempt&&BigInt(b.effective_tick_ns)>=BigInt(attempt.started_tick)&&BigInt(b.effective_tick_ns)<=receivedTick&&
-  same(b,expectedAck(saved,b.coverage[0]?.disposition,b.coverage[0]?.proof,b.effective_tick_ns)),'reply');
+  same(b,expectedAck(saved,b.coverage,b.effective_tick_ns)),'reply');
  const item=preparedFrame(binding,frame,payload,'w2c',receivedTick,saved.request.record.record_id),value={format:'command-closure-ack/1',permit_id:id,
   request_ref:saved.ref,write_attempt_id:attempt.attempt_id,record_ref:{id:item.record.record_id,revision:'1',digest:item.record.record_digest}};
  insertFrame(db,item,'command_dispatch');written(db.prepare('INSERT INTO command_closure_ack VALUES(?,?,?,?,?,?)').run(id,item.record.record_id,item.transaction,attempt.attempt_id,canonical(value),digest(value)));
@@ -137,13 +148,16 @@ function settlement(db,closed,commit,evidenceRef=undefined){
  need(d.report,'report_required');const evidenceSource=evidenceRef===null?null:d.evidence;
  if(evidenceRef!==undefined&&evidenceRef!==null)need(evidenceSource&&same(evidenceSource.ref,evidenceRef),'observation_reference');
  const r=d.report.reply.frame.body,o=evidenceSource?.reply.frame.body.payload.observation,
-  encoded=readCommandEncoding(db,d.final.value.prepare_id),sample=row(db,'SELECT body_jcs,body_digest FROM device_baseline_sample WHERE sample_id=?',encoded.bound.initial_sample_ref.id);
+  encoded=readCommandEncoding(db,d.final.value.prepare_id),resourceRow=row(db,'SELECT body_jcs,body_digest FROM device_initial_resource WHERE source_id=?',closed.source.ready.dispatch.plan.resource_source_ref.id);
+ need(resourceRow,'resource');const resource=JSON.parse(resourceRow.body_jcs),{digest:resourceDigest,...resourceBody}=resource;
+ need(canonical(resource)===resourceRow.body_jcs&&digest(resourceBody)===resourceDigest&&resourceDigest===resourceRow.body_digest&&resourceDigest===closed.source.ready.dispatch.plan.resource_source_ref.digest,'resource');
+ const sampleRef=resource.inventory.baseline_ref,sample=row(db,'SELECT body_jcs,body_digest FROM device_baseline_sample WHERE sample_id=?',sampleRef.id);
  need(sample,'sample');const baseline=parse(sample.body_jcs,sample.body_digest);
- need(same(ref(baseline.sample_id,baseline),encoded.bound.initial_sample_ref)&&baseline.device_id===s.binding.device_id&&baseline.device_session_id===p.device_session_id,'sample');
- const succeeded=fixedMemoryCompletion({source:s,report:r,observation:o,receivedTick:evidenceSource?.reply.observedTick,baseline,coverage:closed.ack.reply.frame.body.transmission_coverage[0]});
+ need(same(ref(baseline.sample_id,baseline),sampleRef)&&baseline.device_id===s.binding.device_id&&baseline.device_session_id===p.device_session_id,'sample');
+ const succeeded=fixedMemoryCompletion({source:s,report:r,observation:o,receivedTick:evidenceSource?.reply.observedTick,baseline,coverage:closed.ack.reply.frame.body.transmission_coverage.find(v=>v.intent.intent.permit_id===p.permit_id)});
  const id=s.command_id,policy=initial.record.policy,closure={format:'fixed-memory-future-writes-closed/1',command_id:id,binding:s.binding,
-  final_admission_ref:d.final.ref,cut_ref:closed.ref,ack_ref:closed.ack.ref,transmissions:[p.transmission],automatic_resends:false},
-  module={format:'fixed-memory-settlement-proof/1',command_id:id,binding:s.binding,baseline_ref:encoded.bound.initial_sample_ref,
+  final_admission_ref:d.final.ref,cut_ref:closed.ref,ack_ref:closed.ack.ref,transmissions:closed.request.frame.body.open_transmission_intents,automatic_resends:false},
+  module={format:'fixed-memory-settlement-proof/1',command_id:id,binding:s.binding,baseline_ref:sampleRef,
    dispatch_ref:d.ref,report_ref:d.report.ref,observation_ref:evidenceSource?.ref??null,closed_ref:ref(id+'.writes-closed',closure),
    evidence_deadline_tick_ns:r.transport_entered_tick_ns===null?null:String(BigInt(r.transport_entered_tick_ns)+BigInt(s.deadline.evidence_timeout_ms)*1000000n),
    module_settled:succeeded},

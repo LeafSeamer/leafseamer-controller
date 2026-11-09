@@ -123,12 +123,14 @@ function validatePayloads(value,encoding,ready,features){
   validateValue(getSchema(routes.messages.find(v=>v.type===type).root),frame,numbers);assertDeviceExecutionFeatures(frame,features);
  }
 }
-export function commitCommandFinalAdmission(db,{id,provider,tick,features}){
+export function commitCommandFinalAdmission(db,options){return withExecutionReadView(db,()=>commitFinalAdmission(db,options));}
+function commitFinalAdmission(db,{id,provider,tick,features}){
  need(db.inTransaction&&Number(db.pragma('user_version',{simple:true}))>=52,'writer');
  const old=db.prepare('SELECT command_id FROM command_final_admission WHERE prepare_id=?').pluck().get(id);
  if(old)return {saved:readCommandRecord(db,old),replay:true};
  const current=selectCommandFinalization(db,{id,provider,tick}),initial=current.actual.command,encoding=current.encoding;
- need(!db.prepare('SELECT 1 FROM command_device_hold WHERE device_id=?').pluck().get(initial.source.binding.device_id),'resource_busy');
+ need(!db.prepare(`SELECT 1 FROM command_device_hold h WHERE device_id=?
+  ${Number(db.pragma('user_version',{simple:true}))>=57?'AND NOT EXISTS(SELECT 1 FROM command_hold_release r WHERE r.hold_id=h.hold_id)':''}`).pluck().get(initial.source.binding.device_id),'resource_busy');
  const before=db.prepare('SELECT count(*) FROM command_transmission_issue').pluck().get(),previous=String(BigInt(db.prepare('SELECT max(issued_revision) FROM command_transmission_issue').pluck().get()??'0'));
  need(before<limits.max_transmissions,'budget');
  const ids=Object.fromEntries(['transaction','commit','hold','ownership','guard','budget','intent','permit','transmission','resource','time','seal'].map(k=>[k,crypto.randomUUID()]));
@@ -204,7 +206,7 @@ export function observeCommandFinalAdmission(db,{commandId,binding,tick,readOnly
 
 // T2之后的当前资格与封存历史分离。只能采用原占用、原许可和原窗口，不续期、不重新签发。
 export function currentPreparedCommand(db,{id,binding,provider,tick}){
- need(db.inTransaction&&[52,53,54,55].includes(Number(db.pragma('user_version',{simple:true}))),'prepared_writer');
+ need(db.inTransaction&&[52,53,54,55,56,57].includes(Number(db.pragma('user_version',{simple:true}))),'prepared_writer');
  return withExecutionReadView(db,()=>{
   const saved=readCommandRecord(db,id),final=saved.lifecycle?.final_admission;need(final,'prepared_source');
   const v=final.value,b=v.seal.binding;

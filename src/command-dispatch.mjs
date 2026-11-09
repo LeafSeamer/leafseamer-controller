@@ -34,12 +34,12 @@ function applied(db,id,permit,phase,value){
   JOIN execution_dispatch_frame x USING(record_id,transaction_id) WHERE f.record_id=?`,id);need(r,'integrity');
  const frame=parse(r.frame_jcs,r.frame_digest),record=JSON.parse(r.record_jcs),{record_digest,...unsigned}=record,
   session=row(db,'SELECT binding_jcs,binding_digest FROM execution_session WHERE ipc_session_id=?',r.ipc_session_id);need(session,'integrity');
- const binding=parse(session.binding_jcs,session.binding_digest),type={request:'DISPATCH',report:'SEND_REPORT',evidence:'EVIDENCE_CANDIDATE',fence_request:'FENCE',fence_ack:'FENCE_ACK'}[phase],outgoing=['request','fence_request'].includes(phase);
+ const binding=parse(session.binding_jcs,session.binding_digest),type={request:'DISPATCH',report:'SEND_REPORT',evidence:'EVIDENCE_CANDIDATE',fence_request:'FENCE',fence_ack:'FENCE_ACK',deny_request:'DENY_ENCODING',deny_ack:'DENY_ENCODING_ACK',release_request:'RELEASE_ENCODING',release_ack:'RELEASE_ENCODING_ACK'}[phase],outgoing=['request','fence_request','deny_request','release_request'].includes(phase);
  need(canonical(record)===r.record_jcs&&digest(unsigned)===record_digest&&record_digest===r.record_digest&&
   r.wire.readUInt32BE(0)===r.wire.length-4&&hash(r.wire)===r.wire_digest&&same(JSON.parse(r.wire.subarray(4)),frame)&&
   r.domain_kind==='command_dispatch'&&r.phase===phase&&r.direction===(outgoing?'c2w':'w2c')&&frame.type===type&&
   r.message_type===type&&r.message_id===frame.message_id&&r.device_id===frame.device_id&&r.sequence===executionTick(BigInt(frame.seq))&&
-  frame.journal_mode==='durable'&&(phase==='fence_ack'?typeof frame.reply_to==='string'&&typeof r.reply_record_id==='string':frame.reply_to===null&&r.reply_record_id===null),'integrity');
+  frame.journal_mode==='durable'&&(['fence_ack','deny_ack','release_ack'].includes(phase)?typeof frame.reply_to==='string'&&typeof r.reply_record_id==='string':frame.reply_to===null&&r.reply_record_id===null),'integrity');
  for(const key of ['ipc_version','ipc_session_id','controller_boot_id','worker_boot_id','clock_domain_id','descriptor_digest'])need(frame[key]===binding[key],'binding');
  need(same(record,{record_id:id,session_ref:{id:binding.ipc_session_id,revision:'1',digest:session.binding_digest},direction:r.direction,sequence:frame.seq,
   message_id:frame.message_id,message_type:frame.type,frame_digest:r.frame_digest,wire_digest:r.wire_digest,wire_length:r.wire.length,
@@ -97,7 +97,7 @@ function readDispatch(db,id){
  saved.evidence={value:evidenceValue,ref:ref(id+'.evidence',evidenceValue),reply:evidenceReply};return saved;
 }
 export function selectCommandDispatch(db,{id,binding,provider,tick,features}){
- need(db.inTransaction&&[54,55].includes(Number(db.pragma('user_version',{simple:true}))),'writer');
+ need(db.inTransaction&&[54,55,56,57].includes(Number(db.pragma('user_version',{simple:true}))),'writer');
  const prior=db.prepare('SELECT d.permit_id FROM command_dispatch_request d JOIN command_final_admission f ON f.transaction_id=d.final_transaction_id WHERE f.command_id=?').pluck().get(id);
  if(prior)return {saved:readCommandDispatch(db,prior)};
  const guardId=db.prepare('SELECT g.guard_id FROM command_guard_request g JOIN command_final_admission f ON f.transaction_id=g.final_transaction_id WHERE f.command_id=?').pluck().get(id);need(guardId,'guard');

@@ -16,11 +16,12 @@ function queryIntake(request){const result=intakeTail.then(()=>intakeClient.quer
 const args=process.argv.slice(3),options=Object.fromEntries(Array.from({length:args.length/2},(_,i)=>[args[i*2],args[i*2+1]]));
 const report=value=>process.stderr.write(JSON.stringify({...value,reported_ms:performance.now()})+'\n');
 let firstManualChallenge=null,initialResource=null,initialResourceRequest=null,initialOpening=null,initialOpeningRequest=null;const manualCoreObservations=new Map();
-let commandServer=null,commandHttp=null;
+let commandServer=null,commandHttp=null,commandAgent=null;
 async function startCommandHttp(material){
  let handler;commandServer=https.createServer(material,(req,res)=>{if(!handler.handle(req,res)){res.writeHead(404);res.end();}});
  await new Promise(resolve=>commandServer.listen(0,'127.0.0.1',resolve));
  const origin='https://127.0.0.1:'+commandServer.address().port;
+ commandAgent=new https.Agent({keepAlive:true,maxSockets:1,ca:material.cert,rejectUnauthorized:true});
  const sessions={...manager.sessions,async submitCommand(...args){try{return await manager.sessions.submitCommand(...args);}
   catch(error){report({event:'http-command-error',stage:'submit',code:error.code,cause:error.cause?.code});throw error;}},
   getCommand(...args){try{return manager.sessions.getCommand(...args);}catch(error){report({event:'http-command-error',stage:'read',code:error.code,message:error.message,cause:error.cause?.code});throw error;}},
@@ -30,7 +31,7 @@ async function startCommandHttp(material){
   serviceBootId:receipt.member_boot_id,sessions,origin,onFailure:value=>report({event:'http-handler-failure',...value})});
  commandHttp=(method,route,value)=>new Promise((resolve,reject)=>{
   const body=value===undefined?null:Buffer.from(JSON.stringify(value));
-  const request=https.request(origin+route,{method,ca:material.cert,rejectUnauthorized:true,agent:false,headers:{Origin:origin,
+  const request=https.request(origin+route,{method,ca:material.cert,rejectUnauthorized:true,agent:commandAgent,headers:{Origin:origin,
    Authorization:'Bearer v1.'+commandToken.token_id+'.'+commandToken.secret,
    'X-LeafSeamer-Contract':contractSelection.contract_id,'X-LeafSeamer-Contract-Digest':contractSelection.contract_digest,
    ...(body?{'Content-Type':'application/json','Content-Length':body.length}:{})}},response=>{
@@ -41,12 +42,11 @@ async function startCommandHttp(material){
 }
 async function manualSourceFor(proof,device,refresh=true){
  if(refresh){
-  const previous=source.observeCore();
   await business.workerLaunches.runtime.refreshCurrent(key);
-  // 独立认证组从新的真实核心回复开始，不能把排队前已消耗的窗口当作完整两秒。
-  const until=performance.now()+1500;
-  while(source.observeCore()===previous){if(performance.now()>=until)throw new Error('fixture_core_refresh_timeout');await delay(10);}
+  await source.refreshCoreObservation();
  }
+ // 每次独立挑战使用新采集的实际认证时钟；不改变既有来源或已受理命令期限。
+ if(input.mode.includes('_guard_dispatch'))manager.real.refresh();
  const checks=input.mode.endsWith('_manual_challenge_checks'),requestId=crypto.randomUUID(),observation=source.observeCore(),challenge=manager.sessions.beginManualExecutionChallenge(proof,device,requestId);
  if(checks&&canonicalize(manager.sessions.beginManualExecutionChallenge(proof,device,requestId))!==canonicalize(challenge))throw new Error('manual_challenge_replay');
  await delay(10);
@@ -71,6 +71,35 @@ async function manualSourceFor(proof,device,refresh=true){
 async function checkCommand(stage,changes={}){
  try{await manager.sessions.submitCommand(commandToken,{...commandRequest,...changes,idempotency_key:crypto.randomUUID()});report({event:'command-source',stage,code:'unexpected_success'});}
  catch(error){report({event:'command-source',stage,code:error.code,message:error.message});}
+}
+async function runSuccessor(device){
+ const missing=await commandHttp('GET','/api/v1/commands/00000000-0000-4000-8000-000000000001');if(missing.status!==404)throw new Error('successor_http_connection');
+ const baseline=await moduleClient.captureBaseline(device);manager.real.refresh();
+ const manual=await manualSourceFor(commandToken,device),challenge=manager.sessions.beginDeviceEvaluatorChallenge({request_id:crypto.randomUUID(),policy_ref:evaluator.policy_ref,device_id:device});
+ const evaluated=manager.sessions.completeDeviceEvaluatorChallenge({request_id:crypto.randomUUID(),challenge_ref:{id:challenge.id,revision:'1',digest:challenge.digest},nonce:challenge.nonce,credential_id:evaluator.credential_id,secret:evaluator.secret});
+ const context=manager.sessions.currentManualAuthorizationContext({device_id:device,manual_source_ref:manual.ref,evaluator_source_ref:evaluated.ref});
+ const recovery=manager.sessions.requestDeviceAuthorizationRecovery(commandToken,{request_id:crypto.randomUUID(),device_id:device,
+  manual_source_ref:manual.ref,evaluator_source_ref:evaluated.ref,expected_state_ref:context.state_ref,expected_context_digest:context.context_digest});
+ const selected=manager.sessions.consumeDeviceAuthorizationRecovery(commandToken,recovery.receipt.id);
+ let evidence=manager.sessions.selectDeviceAuthorizationEvidence({request_id:crypto.randomUUID(),device_id:device,manual_source_ref:manual.ref,evaluator_source_ref:evaluated.ref,
+  expected_state_ref:selected.ref,expected_evidence_ref:null});
+ await business.workerLaunches.runtime.refreshCurrent(key);await source.refreshCoreObservation();
+ manager.real.refresh();const pendingManual=manualSourceFor(commandToken,device,false),next=manager.sessions.beginDeviceEvaluatorChallenge({request_id:crypto.randomUUID(),policy_ref:evaluator.policy_ref,device_id:device});
+ const nextEvaluator=manager.sessions.completeDeviceEvaluatorChallenge({request_id:crypto.randomUUID(),challenge_ref:{id:next.id,revision:'1',digest:next.digest},nonce:next.nonce,credential_id:evaluator.credential_id,secret:evaluator.secret}),nextManual=await pendingManual;
+ evidence=manager.sessions.selectDeviceAuthorizationEvidence({request_id:crypto.randomUUID(),device_id:device,manual_source_ref:nextManual.ref,evaluator_source_ref:nextEvaluator.ref,
+  expected_state_ref:selected.ref,expected_evidence_ref:evidence.ref});
+ const resource=manager.sessions.selectInitialDeviceResources({request_id:crypto.randomUUID(),device_id:device,expected_evidence_ref:evidence.ref});
+ const opening=manager.sessions.prepareInitialDeviceOpen({request_id:crypto.randomUUID(),device_id:device,expected_resource_ref:resource.ref});
+ report({event:'successor-resource',baseline,resource,opening,remaining_ms:Number((BigInt(opening.value.plan.expires_tick_ns)-clock.tick())/1000000n)});
+ const opened=await executionClient.initialOpen(opening.ref,{ready:true});report({event:'successor-stage',stage:'opened',remaining_ms:Number((BigInt(opening.value.plan.expires_tick_ns)-clock.tick())/1000000n)});
+ const request={...commandRequest,parameters:{value:23},idempotency_key:crypto.randomUUID(),dispatch:{mode:'immediate',max_queue_ms:10000}};
+ const accepted=await commandHttp('POST','/api/v1/commands',request);
+ if(accepted.status!==202)throw Object.assign(new Error('successor_http_admission'),{code:'successor_http_admission',cause:accepted.body});
+ report({event:'successor-stage',stage:'accepted',remaining_ms:Number((BigInt(opening.value.plan.expires_tick_ns)-clock.tick())/1000000n)});
+ for(const [stage,method]of [['encoded','whenCommandEncoded'],['finalized','whenCommandFinalized'],['guarded','whenCommandGuarded'],['dispatched','whenCommandDispatched']])business.workerLaunches[method](accepted.body.command_ref.object_id).then(()=>report({event:'successor-stage',stage,remaining_ms:Number((BigInt(opening.value.plan.expires_tick_ns)-clock.tick())/1000000n)}),()=>{});
+ const id=accepted.body.command_ref.object_id,cleaned=await business.workerLaunches.whenCommandCleaned(id),closed=await business.workerLaunches.whenCommandSettled(id);
+ const current=await commandHttp('GET','/api/v1/commands/'+id),replayed=await commandHttp('POST','/api/v1/commands',request);
+ report({event:'successor-command',opened,accepted,current,replayed,closed,cleaned,state:executionClient.state});
 }
 const boot=createCoreBootstrapChannel(process.stdin,process.stdout,{timeoutMs:10000});
 const assignment=await boot.assignment(),receipt=await boot.proveAndReceive(assignment);boot.release();
@@ -197,6 +226,7 @@ try{
       let manualSource=null,recoveryRequest=null,recoveryAccepted=null,consumedRecovery=null,competingRecovery=null;
       if(controlFlow){
         report({event:'initial-control-fence',first:await executionClient.initialFence(device),repeated:await executionClient.initialFence(device)});
+        if(commandHttp){const missing=await commandHttp('GET','/api/v1/commands/00000000-0000-4000-8000-000000000001');if(missing.status!==404)throw new Error('command_http_connection');}
         try{await manualSourceFor({...commandToken,secret:'A'.repeat(43)},device);report({event:'manual-source-bad-secret',code:'unexpected_success'});}
         catch(error){report({event:'manual-source-bad-secret',code:error.code});}
         const coreObservation=source.observeCore();source.assertCoreObservation(coreObservation);
@@ -226,11 +256,8 @@ try{
             authorizationEvidence=manager.sessions.selectDeviceAuthorizationEvidence({...evidenceRequest,manual_source_ref:freshManual.ref,evaluator_source_ref:freshEvaluator.ref});
             if(input.mode.includes('_dispatch_ready')){
               // 首次Evidence先在恢复窗口内采用，再等待实际新观察并续约。
-              const prior=source.observeCore();
               await business.workerLaunches.runtime.refreshCurrent(key);
-              const until=performance.now()+1000;
-              while(source.observeCore()===prior){if(performance.now()>=until)throw new Error('fixture_core_refresh_timeout');await delay(10);}
-              // 在生成新授权来源前采集真实认证时钟；受理后的原窗口不续期。
+              await source.refreshCoreObservation();
               if(input.mode.includes('_guard_dispatch'))manager.real.refresh();
               const manualPending=manualSourceFor(commandToken,device,false),next=manager.sessions.beginDeviceEvaluatorChallenge({request_id:crypto.randomUUID(),policy_ref:evaluator.policy_ref,device_id:device});
               const nextEvaluator=manager.sessions.completeDeviceEvaluatorChallenge({request_id:crypto.randomUUID(),challenge_ref:{id:next.id,revision:'1',digest:next.digest},nonce:next.nonce,credential_id:evaluator.credential_id,secret:evaluator.secret});
@@ -263,7 +290,7 @@ try{
                   report({event:'initial-ready',value:ready,
                     control:manager.sessions.getControl(commandToken,device)});
                   if(!input.mode.endsWith('_stale')){
-                    const request={...commandRequest,...(input.mode.endsWith('_closure_late')?{evidence_timeout_ms:1}:{}),idempotency_key:crypto.randomUUID(),dispatch:{mode:'immediate',max_queue_ms:input.mode.endsWith('_queue_deadline')?300:10000}};
+                    const request={...commandRequest,...((input.mode.endsWith('_closure_late')||input.mode.endsWith('_cleanup_late'))?{evidence_timeout_ms:1}:{}),idempotency_key:crypto.randomUUID(),dispatch:{mode:'immediate',max_queue_ms:input.mode.endsWith('_queue_deadline')?300:10000}};
                     let accepted,replayed,current,http_statuses,guardProof=null,preparedProof=null;
                     if(commandHttp){
                       const first=await commandHttp('POST','/api/v1/commands',request);
@@ -275,6 +302,8 @@ try{
                         preparedProof=guarded.qualification;
                         if(input.mode.includes('_guard_dispatch')){report({event:'ready-window',stage:'after-guard',remaining_ms:Number((BigInt(initialOpening.value.plan.expires_tick_ns)-clock.tick())/1000000n)});const dispatched=await business.workerLaunches.whenCommandDispatched(commandId);
                           const closed=input.mode.includes('_dispatch_closure')?await business.workerLaunches.whenCommandSettled(commandId):null;
+                          if(input.mode.includes('_closure_cleanup')){const cleaned=await business.workerLaunches.whenCommandCleaned(commandId),replayed=await executionClient.cleanupCommand(commandId);
+                            report({event:'command-cleaned',value:cleaned,replay_ref:replayed.ref,state:executionClient.state});}
                           const repeated=await executionClient.dispatchCommand(commandId);
                           report({event:'command-dispatched',value:dispatched,replay_ref:repeated.ref,replay_qualification:repeated.qualification});
                           if(closed){const again=await executionClient.closeCommand(commandId);report({event:'command-closed',value:closed,replay_ref:again.ref,state:executionClient.state});}}
@@ -314,7 +343,7 @@ try{
                         const committed=await business.workerLaunches.whenCommandFinalized(accepted.adjudication.command_ref.object_id);
                         report({event:'command-final-admission',record:committed.saved.record,value:committed.saved.lifecycle.final_admission.value,
                           observation:committed.observation,replay:committed.replay});
-                        report({event:'command-prepared-current',value:preparedProof??executionClient.currentPreparedCommand(committed.saved.source.command_id)});
+                        if(!input.mode.endsWith('_cleanup_successor'))report({event:'command-prepared-current',value:preparedProof??executionClient.currentPreparedCommand(committed.saved.source.command_id)});
                         if(input.mode.includes('_t2_guard')){
                           if(guardProof)report(guardProof);
                           else await business.workerLaunches.whenCommandGuarded(committed.saved.source.command_id);
@@ -327,7 +356,7 @@ try{
                     const readOnly=manager.token(['control.read']);
                     const terminalHttp=commandHttp?await commandHttp('GET','/api/v1/commands/'+accepted.adjudication.command_ref.object_id):null;
                     if(terminalHttp&&terminalHttp.status!==200)throw Object.assign(new Error('command_http_terminal'),{code:'command_http_terminal',cause:terminalHttp.body});
-                    if(input.mode.endsWith('_dispatch_closure')){
+                    if(input.mode.endsWith('_dispatch_closure')||input.mode.endsWith('_closure_cleanup')){
                       const commandId=accepted.adjudication.command_ref.object_id,first=await commandHttp('GET','/api/v1/commands/'+commandId+'/evidence?state_revision=5&limit=1'),
                         second=await commandHttp('GET','/api/v1/commands/'+commandId+'/evidence?state_revision=5&limit=1&cursor='+encodeURIComponent(first.body.next_cursor)),
                         original=await commandHttp('GET','/api/v1/commands/'+commandId+'/evidence/'+first.body.items?.[0]?.source_ref.id+'/revisions/1'),
@@ -344,6 +373,7 @@ try{
                   }
                   if(input.mode.endsWith('_stale')){await moduleClient.captureBaseline(device);await checkCommand('ready-stale');executionClient.currentReady(ready.ref);report({event:'ready-stale',code:'unexpected_success'});}
                   else{await checkCommand('ready-expired');report({event:'ready-expired',state:executionClient.state,control:manager.sessions.getControl(commandToken,device)});}
+                  if(input.mode.endsWith('_cleanup_successor'))await runSuccessor(device);
                   break moduleWork;
                 }
                 if(input.mode.endsWith('_stale')){await moduleClient.captureBaseline(device);await executionClient.initialOpen(initialOpening.ref);report({event:'open-stale',code:'unexpected_success'});}
@@ -569,4 +599,4 @@ try{
  }
 }
 report({event:'done',record:await source.queryLaunch(key)});
-process.stdin.setEncoding('utf8').on('data',data=>{if(data==='stop\n'){commandServer?.close();manager?.real.stop();intakeClient?.close();business?.close();source.close();process.stdin.destroy();}});process.stdin.resume();
+process.stdin.setEncoding('utf8').on('data',data=>{if(data==='stop\n'){commandAgent?.destroy();commandServer?.close();manager?.real.stop();intakeClient?.close();business?.close();source.close();process.stdin.destroy();}});process.stdin.resume();

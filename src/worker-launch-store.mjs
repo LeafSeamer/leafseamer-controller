@@ -1,3 +1,4 @@
+import {sqliteRows} from './sqlite-rows.mjs';
 import crypto from 'node:crypto';
 import {workerDependencies,currentWorkerDependencies} from './worker-dependencies.mjs';
 import {workerRuntimeStore} from './worker-runtime-store.mjs';
@@ -20,12 +21,11 @@ const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(valu
 const same=(a,b)=>canonicalize(a)===canonicalize(b);
 const id=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\s\S])/.test(value);
 const deepFreeze=value=>{if(value&&typeof value==='object'){for(const child of Object.values(value))deepFreeze(child);Object.freeze(value);}return value;};
-const rows=(db,sql,...args)=>{const query=db.prepare(sql),names=query.columns().map(column=>column.name);
-  return query.raw().all(...args).map(values=>Object.fromEntries(names.map((name,index)=>[name,values[index]])));};
+const rows=sqliteRows;
 
 // 启动意图准备属于核心内部writer，不是安装审批或LaunchAuthorization提供者。
 export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attachStop,openingSource,encodingSource){
-  const commandTasks=new Map(),guardTasks=new Map(),dispatchTasks=new Map(),settlementTasks=new Map(),finalAdmissionTasks=new Map(),encodingTails=new Map();
+  const commandTasks=new Map(),guardTasks=new Map(),dispatchTasks=new Map(),settlementTasks=new Map(),cleanupTasks=new Map(),finalAdmissionTasks=new Map(),encodingTails=new Map();
   let pending=0,acquiring=0,runtime=null,authorization=null;const modules=new Map(),contentPins=new Set(),executionJournals=new Set(),executionClients=new Map();attachStop?.(()=>{for(const client of executionClients.values())client?.close();for(const journal of executionJournals)try{journal.end();}catch{}for(const module of modules.values())module?.close();runtime?.close();authorization?.close();for(const pin of contentPins)pin.close();});
   const available=()=>{need(isOpen()&&db.open,'worker_launch_closed');need(!db.inTransaction,'worker_launch_outer_transaction');};
   const fields='launch_id,intent_digest,preparation_id,transaction_id,service_boot_id,intent_jcs';
@@ -81,12 +81,15 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
         const admitted=encoded.then(result=>Number(service.schema_revision)>=52&&result.response?.value.disposition==='prepared'?
           client.commandFinalAdmission(result.value.prepare_id):null);
         finalAdmissionTasks.set(id,admitted);admitted.catch(()=>{});
-        const guarded=admitted.then(result=>Number(service.schema_revision)>=53&&result?client.installCommandGuard(id):null);
+        // 自动派发只消费已安装回执；发送器在实际写入边界独立重核当前资格。
+        const guarded=admitted.then(result=>Number(service.schema_revision)>=53&&result?client.installCommandGuard(id,{qualify:Number(service.schema_revision)<57}):null);
         guardTasks.set(id,guarded);guarded.catch(()=>{});
         const dispatched=guarded.then(result=>Number(service.schema_revision)>=54&&result?client.dispatchCommand(id):null);
         dispatchTasks.set(id,dispatched);dispatched.catch(()=>{});
         const settled=dispatched.then(result=>Number(service.schema_revision)>=55&&result?client.closeCommand(id):null);
-        settlementTasks.set(id,settled);settled.catch(()=>{});encodingTails.set(candidate,settled);return encoded;
+        settlementTasks.set(id,settled);settled.catch(()=>{});
+        const cleaned=settled.then(result=>Number(service.schema_revision)>=56&&result?client.cleanupCommand(id):null);
+        cleanupTasks.set(id,cleaned);cleaned.catch(()=>{});encodingTails.set(candidate,cleaned);return encoded;
       });
       commandTasks.set(id,task);task.catch(()=>{});
     },
@@ -94,6 +97,7 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     whenCommandGuarded(id){available();const task=guardTasks.get(id)??commandTasks.get(id)?.then(()=>guardTasks.get(id));need(task,'execution_guard_not_queued');return task;},
     whenCommandDispatched(id){available();const task=dispatchTasks.get(id)??commandTasks.get(id)?.then(()=>dispatchTasks.get(id));need(task,'execution_dispatch_not_queued');return task;},
     whenCommandSettled(id){available();const task=settlementTasks.get(id)??commandTasks.get(id)?.then(()=>settlementTasks.get(id));need(task,'execution_settlement_not_queued');return task;},
+    whenCommandCleaned(id){available();const task=cleanupTasks.get(id)??commandTasks.get(id)?.then(()=>cleanupTasks.get(id));need(task,'execution_cleanup_not_queued');return task;},
     whenCommandFinalized(id){available();const task=finalAdmissionTasks.get(id)??commandTasks.get(id)?.then(()=>finalAdmissionTasks.get(id));need(task,'execution_finalization_not_queued');return task;},
     commandExecutionCurrent(device,{requireReady=false,preparedRef=null}={}){
       need(isOpen()&&db.open&&db.inTransaction&&Number(service.schema_revision)>=30,'command_execution_source');

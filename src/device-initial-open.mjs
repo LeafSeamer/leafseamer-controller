@@ -4,6 +4,7 @@ import {IdentityError} from './identity-crypto.mjs';
 import {seal,ref,digest,same,checked} from './auth-clock-value.mjs';
 import {readControlSource} from './device-control-source.mjs';
 import {readInitialFence} from './device-execution-control.mjs';
+import {readCommandClosure} from './command-settlement.mjs';
 import {memoExecutionRead,withExecutionReadView} from './execution-read-view.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('initial_open_'+code);};
 const freeze=v=>{if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Object.freeze(v);}return v;};
@@ -17,22 +18,24 @@ function decode(text,hash){const v=checked(JSON.parse(text));need(canonicalize(v
 export function deviceInitialOpen({db,writer,resourceCurrent,resourceRead,domain,attach}){
  function derive(id,source,selected){
   need(db.inTransaction,'writer');const s=source.value,i=s.inventory,b=s.binding;
-  need(s.format==='leafseamer-initial-resource-source/2'&&s.deny_snapshots&&
+  const successor=s.format==='leafseamer-device-resource-successor/1';
+  need((successor||s.format==='leafseamer-initial-resource-source/2')&&s.deny_snapshots&&
    BigInt(s.selected_tick_ns)<=BigInt(selected)&&BigInt(selected)<BigInt(s.expires_tick_ns),'source');
   const revision=db.prepare('SELECT revision FROM control_state_source WHERE source_id=? AND device_id=?').pluck().get(i.control_state_ref.id,b.device_id);
   need(revision!==undefined,'control');const control=readControlSource(db,b.device_id,String(revision));
   need(same(control.ref,i.control_state_ref)&&control.value.mode==='manual'&&control.value.holder&&
    control.value.pending_operation_id===null&&control.value.gate_state==='protected','control');
-  const fence=readInitialFence(db,i.initial_fence_ref.id);
-  need(fence?.confirmation&&same(fence.confirmation_ref,i.initial_confirmation_ref)&&same(fence.ref,i.initial_fence_ref),'fence');
+  const fence=successor?readCommandClosure(db,i.closing_ref.id.replace(/\.fence_request$/,'')):readInitialFence(db,i.initial_fence_ref.id);
+  const confirmation=successor?fence.ack?.ref:fence?.confirmation_ref;
+  need(confirmation&&same(confirmation,successor?i.closing_ack_ref:i.initial_confirmation_ref)&&same(fence.ref,successor?i.closing_ref:i.initial_fence_ref),'fence');
   const common={revision:'1',binding:b,control_authority_ref:i.control_authority_ref,initial_resource_ref:source.ref,selected_tick_ns:selected};
   const resourceSafety=signed({format_version:'initial-resource-safety/1',state_id:id+'_resource_safety',...common,state:'clear'},'state_digest');
   const gateSafety=signed({format_version:'initial-gate-safety/1',state_id:id+'_gate_safety',...common,state:'fenced',
-   control_state_ref:i.control_state_ref,fence_ref:fence.ref,confirmation_ref:fence.confirmation_ref},'state_digest');
+   control_state_ref:i.control_state_ref,fence_ref:fence.ref,confirmation_ref:confirmation},'state_digest');
   const resourceSafetyRef=reference(resourceSafety,'state_id','state_digest'),gateSafetyRef=reference(gateSafety,'state_id','state_digest');
-  const gate=signed({format_version:'initial-gate-storage/1',gate_id:id+'_gate',revision:'1',binding:b,gate_revision:'1',gate_token:id+'_token',
+  const gate=signed({format_version:'initial-gate-storage/1',gate_id:id+'_gate',revision:'1',binding:b,gate_revision:successor?fence.ack.reply.frame.body.gate_revision:'1',gate_token:id+'_token',
    barrier_id:fence.request.frame.body.barrier_id,phase:'fenced',activation_id:null,lease_until_tick_ns:s.expires_tick_ns,
-   gate_safety_ref:gateSafetyRef,confirmation_ref:fence.confirmation_ref},'record_digest');
+   gate_safety_ref:gateSafetyRef,confirmation_ref:confirmation},'record_digest');
   const resource=signed({format_version:'initial-resource-state/1',state_id:id+'_resource',revision:'1',binding:b,control_state_ref:i.control_state_ref,
    control_authority_ref:i.control_authority_ref,resource_safety_ref:resourceSafetyRef,provider_source_ref:source.ref,
    sampled_tick_ns:s.selected_tick_ns,expires_tick_ns:s.expires_tick_ns,holds:[],
@@ -53,7 +56,7 @@ export function deviceInitialOpen({db,writer,resourceCurrent,resourceRead,domain
   return seal({format:'leafseamer-initial-open/1',id,revision:'1',resource_source_ref:source.ref,authorization_evidence_ref:i.authorization_evidence_ref,
    resource_safety:resourceSafety,gate_safety:gateSafety,gate,resource,access,plan});
  }
- function read(reference){return memoExecutionRead(db,'initial-open',reference,()=>readOriginal(reference));}
+ function read(reference){return withExecutionReadView(db,()=>memoExecutionRead(db,'initial-open',reference,()=>readOriginal(reference)));}
  function readOriginal(reference){
   need(db.inTransaction,'writer');const row=db.prepare(`SELECT o.body_jcs,o.body_digest,o.request_id,o.request_digest,o.request_jcs,
    o.binding_id,o.resource_source_id,o.evidence_id,o.fence_id,o.gate_token,o.commit_id,c.body_jcs,c.body_digest,c.audit_jcs
@@ -88,9 +91,9 @@ export function deviceInitialOpen({db,writer,resourceCurrent,resourceRead,domain
     if(selected){const prior=read({id:selected[0],revision:'1',digest:selected[1]});
      need(same(prior.value.resource_source_ref,fixed.expected_resource_ref)&&prior.value.plan.binding.device_id===fixed.device_id,'source_binding');
      need(false,'already_selected');}
-    const source=resourceCurrent(fixed.expected_resource_ref),i=source.value.inventory;
+    const source=withExecutionReadView(db,()=>resourceCurrent(fixed.expected_resource_ref)),i=source.value.inventory;
     need(source.value.binding.device_id===fixed.device_id,'device');
-    need(!db.prepare('SELECT 1 FROM device_initial_open WHERE binding_id=?').pluck().get(i.binding_ref.id),'already_selected');
+    if(source.value.format!=='leafseamer-device-resource-successor/1')need(!db.prepare('SELECT 1 FROM device_initial_open WHERE binding_id=?').pluck().get(i.binding_ref.id),'already_selected');
     need(db.prepare('SELECT count(*) FROM device_initial_open').pluck().get()<16384,'capacity');
     const now=domain();need(now.ref.clock_domain_id===source.value.binding.clock_domain_id&&now.ref.descriptor_digest===source.value.binding.descriptor_digest,'clock');
     const value=derive(crypto.randomUUID(),source,now.tick),commit=seal({format:'initial-device-open-commit/1',id:crypto.randomUUID(),revision:'1',opening_ref:ref(value),request:fixed});

@@ -23,7 +23,7 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy}) 
   const lostListeners=new Set(),workerObservations=new WeakMap(),workerVersions=new Map(),coreObservations=new WeakMap();let workerEpoch=0,latestCoreObservation=null;
   const freeze=value=>{if(value&&typeof value==='object'){for(const item of Object.values(value))freeze(item);Object.freeze(value);}return value;};
   const notifyLost=error=>{for(const callback of [...lostListeners])try{callback(error);}catch{}};
-  let previousTick = null, tail = Promise.resolve(), queued = 0;
+  let previousTick = null, tail = Promise.resolve(), queued = 0, coreQuery = null;
   const fail = code => {
     if (failed || stopped) return;
     failed = new SupervisorError(code); clearTimeout(timer);
@@ -78,7 +78,9 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy}) 
     } catch (error) { fail(error instanceof SupervisorError ? error.code : 'supervisor_response_rejected'); throw failed ?? error; }
   }
   function query() {
-    return enqueue(async () => {
+    if(coreQuery)return coreQuery;
+    clearTimeout(timer);
+    coreQuery=enqueue(async () => {
       try {
         const {result, deadline,request,issued,received} = await exchange('LAUNCH_QUERY', key, 'LAUNCH_RESULT');
         check(result.type === 'LAUNCH_RESULT' && same(result.payload.key, key), 'supervisor_response_binding');
@@ -91,7 +93,8 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy}) 
         coreObservations.set(latestCoreObservation,deadline);
         timer = setTimeout(() => { void query().catch(() => {}); }, 500); return result;
       } catch (error) { fail(error instanceof SupervisorError ? error.code : 'supervisor_response_rejected'); throw failed ?? error; }
-    });
+    }).finally(()=>{coreQuery=null;});
+    return coreQuery;
   }
   async function putFence(snapshot) {
     assertCurrent();
@@ -292,6 +295,12 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy}) 
     scope,
     current() { assertCurrent(); return latest; },
     observeCore(){assertCurrent();check(latestCoreObservation,'supervisor_core_observation');return latestCoreObservation;},
+    async refreshCoreObservation(){
+      assertCurrent();const requested=now();await query();
+      // 合并在途查询，但调用开始前发出的观察不能冒充本次主动采集。
+      if(BigInt(latestCoreObservation.issued_tick_ns)<requested)await query();
+      assertCurrent();return latestCoreObservation;
+    },
     assertCoreObservation(value){assertCurrent();const deadline=coreObservations.get(value);
       check(deadline!==undefined&&now()<deadline&&same(value.response.payload.record.admission_receipt,receipt),'supervisor_core_observation');},
     subscribeLost(callback){check(typeof callback==='function','supervisor_listener');lostListeners.add(callback);if(failed||stopped)callback(failed??new SupervisorError('supervisor_stopped'));return ()=>lostListeners.delete(callback);},

@@ -1,3 +1,4 @@
+import {sqliteRows} from './sqlite-rows.mjs';
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 
@@ -6,7 +7,7 @@ const need=(value,code)=>{if(!value)throw new WorkerRuntimeError(code);};
 const same=(a,b)=>canonicalize(a)===canonicalize(b);
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 const freeze=value=>{if(value&&typeof value==='object'){for(const child of Object.values(value))freeze(child);Object.freeze(value);}return value;};
-const rows=(db,sql,...args)=>{const q=db.prepare(sql),names=q.columns().map(c=>c.name);return q.raw().all(...args).map(v=>Object.fromEntries(names.map((name,i)=>[name,v[i]])));};
+const rows=sqliteRows;
 
 // 核心内部采用点。调用方只给启动键，回执必须从本次绑定的监督连接取得。
 export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,extension,verifyDependencies}){
@@ -43,8 +44,9 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
   source.assertWorkerObservation(entry.observation);
   core();const selected=extension.current(entry.prepared.intent);verifyDependencies?.(entry.prepared.intent,selected);
   need(!db.prepare('SELECT 1 FROM worker_runtime_withdrawal WHERE runtime_id=?').pluck().get(entry.row.runtime_id),'worker_runtime_withdrawn');
+  return selected;
  }
- function check(entry){live();db.transaction(()=>checkInWriter(entry)).immediate();}
+ function check(entry){live();return db.transaction(()=>checkInWriter(entry)).immediate();}
  function withdrawFromWriter(entry,error){
   // 外层受理事务可能回滚，不能让回滚恢复进程资格或吞掉必须落盘的撤回。
   stopEntry(entry);retire(entry.prepared.intent);
@@ -60,9 +62,10 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
   entry.refreshing=(async()=>{try{
    check(entry);
    const {selected,observed}=await observe(entry.prepared.intent);
-   check(entry);source.assertWorkerObservation(observed);
+   const current=check(entry);source.assertWorkerObservation(observed);
    need(same(observed.receipt,entry.observation.receipt),'worker_runtime_receipt_changed');
-   db.transaction(()=>need(same(extension.current(entry.prepared.intent),selected),'worker_runtime_approval_changed')).immediate();
+   // 当前检查和下面比较之间不await；使用刚核验的同一份扩展资格。
+   need(same(current,selected),'worker_runtime_approval_changed');
    entry.observation=observed;
   }catch(error){withdraw(entry,error?.code?.startsWith('extension_')?'approval_changed':'source_changed');}
   finally{entry.refreshing=null;if(!entry.stopped){entry.timer=setTimeout(()=>{void refresh(entry);},500);entry.timer.unref();}}})();

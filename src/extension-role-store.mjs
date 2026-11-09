@@ -1,3 +1,5 @@
+import {memoExecutionRead} from './execution-read-view.mjs';
+import {sqliteRows} from './sqlite-rows.mjs';
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {decodeArtifactDocument} from './sdk/artifact-import.mjs';
@@ -6,10 +8,11 @@ const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(valu
 const same=(a,b)=>canonicalize(a)===canonicalize(b);
 const exact=(v,keys)=>v&&Object.keys(v).sort().join(',')===keys.split(',').sort().join(',');
 const id=v=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\s\S])/.test(v);
-const rows=(db,sql,...args)=>{const q=db.prepare(sql),names=q.columns().map(c=>c.name);return q.raw().all(...args).map(row=>Object.fromEntries(names.map((n,i)=>[n,row[i]])));};
+const rows=sqliteRows;
 const frozen=value=>{if(value&&typeof value==='object'){Object.values(value).forEach(frozen);Object.freeze(value);}return value;};
-function read(body,digest){const value=JSON.parse(body);need(canonicalize(value)===body&&hash(value)===digest,'integrity');return value;}
+function readDocument(body,digest){const value=JSON.parse(body);need(canonicalize(value)===body&&'sha256:'+crypto.createHash('sha256').update(body).digest('hex')===digest,'integrity');return value;}
 export function extensionRoleStore({db,service,available,reference,source,attachCurrent}){
+ const read=(body,digest)=>memoExecutionRead(db,'extension-document',[body,digest],()=>readDocument(body,digest));
  let active=0;const scope={authority:'controller',authority_service_id:service.service_id,database_instance_id:service.database_instance_id};
  const get=request=>rows(db,'SELECT * FROM extension_role_operation WHERE request_id=?',request)[0];
  const prior=input=>{const row=get(input.request_id);if(!row)return null;need(row.input_digest===hash(input)&&row.input_jcs===canonicalize(input),'conflict');return frozen(read(row.result_jcs,row.result_digest));};

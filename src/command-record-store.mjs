@@ -171,10 +171,10 @@ function readInitialRecord(db,id){
  return {source,record,adjudication,claim};
 }
 // 初始资格只接无attempt的排队claim；提交后路径须显式匹配唯一T2原件，调用方仍检查占用与全部出站帧。
-export function pendingInitialCommands(db,ready,preparedRef=null){
- need(db.inTransaction,'writer');const ids=db.prepare('SELECT command_id FROM ca_command_initial ORDER BY command_id').pluck().all();
+export function pendingInitialCommands(db,ready,preparedRef=null,retiredIds=[]){
+ need(db.inTransaction,'writer');const ids=db.prepare('SELECT command_id FROM ca_command_initial ORDER BY command_id').pluck().all().filter(id=>!retiredIds.includes(id));
  if(!ids.length)return [];
- need([49,50,51,52,53,54,55].includes(Number(db.pragma('user_version',{simple:true})))&&ready,'resource_successor_required');
+ need([49,50,51,52,53,54,55,56,57].includes(Number(db.pragma('user_version',{simple:true})))&&ready,'resource_successor_required');
  return ids.map(id=>{const saved=readCommandRecord(db,id);
   const final=saved.lifecycle?.final_admission;
   const prepared=preparedRef&&final&&same(final.ref,preparedRef)&&saved.record.state.resource_status==='held'&&saved.record.attempts.length===1;
@@ -240,6 +240,9 @@ export function readCommandRevision(db,id,revision){
 }
 export function readReportedCommandRecord(db,initial,dispatch){return readLifecycleRevision(db,initial,[4,dispatch.report.value.commit_id]);}
 function readLifecycleRevision(db,initial,head){
+ return memoExecutionRead(db,'command-lifecycle-revision',[initial.source.command_id,...head],()=>readLifecycleOriginal(db,initial,head));
+}
+function readLifecycleOriginal(db,initial,head){
  const row=db.prepare(`SELECT r.record_jcs,r.record_digest,r.state_jcs,r.state_digest,r.manifest_jcs,r.manifest_digest,
   c.body_jcs,c.body_digest,c.audit_jcs,c.notification_jcs,c.revision,c.command_id FROM command_lifecycle_revision r
   JOIN command_lifecycle_commit c USING(command_id,revision,commit_id) WHERE r.command_id=? AND r.revision=? AND r.commit_id=?`)

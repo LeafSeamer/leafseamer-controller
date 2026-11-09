@@ -14,7 +14,7 @@ import {seal, ref} from '../dist/auth-clock-value.mjs';
 import {fixture} from './auth-clock-fixture.mjs';
 import {certificate} from './https-auth-fixture.mjs';
 
-export async function startGuiFixture(guiRoot, {readPermissions = true} = {}) {
+export async function startGuiFixture(guiRoot, {readPermissions = true, commandPermissions = false} = {}) {
   guiRoot = path.resolve(guiRoot);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leafseamer-gui-'));
   let app, closed = false;
@@ -32,7 +32,7 @@ export async function startGuiFixture(guiRoot, {readPermissions = true} = {}) {
       try {
         const sessions = storage.sessions(clock), logged = await sessions.login(login), input = {credential_id: logged.credential_id, secret: logged.secret, csrf: logged.csrf};
         sessions.replaceLocalPermissions(input, {request_id: crypto.randomUUID(), principal_id: logged.session.principal_id, expected_revision: '1',
-          permissions: [...localIdentityPermissions, ...(readPermissions ? ['device.read', 'control.read'] : [])]}); sessions.logout(input);
+          permissions: [...localIdentityPermissions, ...(readPermissions ? ['device.read', 'control.read'] : []), ...(commandPermissions ? ['command.read', 'command.evidence.read'] : [])]}); sessions.logout(input);
       } finally { clock.stop(); }
       storage.registerDevice({request_id: crypto.randomUUID(), device_kind: 'synthetic-device', display_name: '测试设备'});
     } finally { storage.close(); }
@@ -54,7 +54,7 @@ export async function startGuiFixture(guiRoot, {readPermissions = true} = {}) {
     };
     app = await startController({dataDir: directory, port, tls: {...material, origin}, authenticationProvider: provider, guiDirectory: path.join(guiRoot, 'dist')});
     const spki = crypto.createHash('sha256').update(new crypto.X509Certificate(material.cert).publicKey.export({type: 'spki', format: 'der'})).digest('base64');
-    return {origin, spki, certificate: material.cert, login, state, close: cleanup};
+    return {origin, spki, certificate: material.cert, login, identity, state, close: cleanup};
   } catch (error) { await cleanup(); throw error; }
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

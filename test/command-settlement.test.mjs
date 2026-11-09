@@ -15,6 +15,11 @@ test('固定内存完成必须在原截止前收到完整后继观察，传输�
  for(const observation of [null,{...input.observation,bytes_written:7},{bytes_written:8,response:{value:8,write_sequence:'1'}},
   {bytes_written:8,response:{value:7,write_sequence:'0'}},{bytes_written:8,response:{value:7,write_sequence:'2'}}])assert.equal(fixedMemoryCompletion({...input,observation}),false);
  assert.equal(fixedMemoryCompletion({...input,coverage:{proof:'send_uncertain'}}),false);
+ const successor={...input,source:{...input.source,policies:{completion:{observation:{value:23}}}},
+  baseline:{value:{write_sequence:'1'}},observation:{bytes_written:8,response:{value:23,write_sequence:'2'}}};
+ assert.equal(fixedMemoryCompletion(successor),true);
+ for(const write_sequence of ['1','3'])assert.equal(fixedMemoryCompletion({...successor,
+  observation:{bytes_written:8,response:{value:23,write_sequence}}}),false);
 });
 test('schema54升级55保留身份，非空关闭帧双向关联且拒绝孤立请求',async t=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'leafseamer-command-settlement-'));

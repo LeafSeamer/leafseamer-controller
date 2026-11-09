@@ -14,6 +14,7 @@ import {selectCommandEncoding,commitCommandEncoding,readCommandEncoding,currentC
 import {commitCommandFinalAdmission,observeCommandFinalAdmission,currentPreparedCommand} from './command-final-admission.mjs';
 import {selectCommandDispatch,commitCommandDispatch,readCommandDispatch,startCommandDispatchWrite,acceptCommandDispatchReport,acceptCommandDispatchEvidence} from './command-dispatch.mjs';
 import {protectCommandForSettlement,selectCommandClosure,commitCommandClosure,readCommandClosure,currentCommandClosure,acceptCommandClosure,commitCommandSettlement} from './command-settlement.mjs';
+import {selectCommandPreparationCleanup,commitCommandPreparationCleanup,readCommandPreparationCleanup,currentCommandPreparationCleanup,acceptCommandPreparationCleanup} from './command-preparation-cleanup.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError(code);};
 const hash=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
 const freeze=value=>{if(value&&typeof value==='object'){for(const item of Object.values(value))freeze(item);Object.freeze(value);}return value;};
@@ -374,6 +375,43 @@ export function deviceExecutionJournal({db,current,currentInTransaction,core,isO
    try{available();const saved=db.transaction(()=>commitCommandSettlement(db,{id})).immediate();
     return freeze({record:saved.record,settlement_ref:saved.lifecycle.settlement.ref});
    }catch(error){fail(error);throw error;}
+  },
+  async prepareCommandCleanup(command,phase){
+   try{live();const features=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features;
+    const candidate=db.transaction(()=>{const id=db.prepare('SELECT permit_id FROM command_settlement WHERE command_id=?').pluck().get(command);
+     need(id,'execution_cleanup_source');return selectCommandPreparationCleanup(db,{id,phase,binding,runtime:currentInTransaction(),features,tick});}).immediate();
+    if(candidate.saved)return {...api.commandCleanupHistory(candidate.saved.value.permit_id),replay:true};
+    await decodeExecutionPayload(Buffer.from(JSON.stringify(candidate.frame)),'c2w');live();
+    const saved=db.transaction(()=>commitCommandPreparationCleanup(db,{candidate,binding,runtime:currentInTransaction(),tick})).immediate();
+    return {...api.commandCleanupHistory(saved.value.permit_id),replay:false};
+   }catch(error){fail(error);throw error;}
+  },
+  async sendCommandCleanup(transport,id,phase){
+   let write=null,finished=false;
+   try{live();const saved=db.transaction(()=>readCommandPreparationCleanup(db,id)).immediate(),request=saved.steps[phase].frame,payload=request.wire.subarray(4);
+    await decodeExecutionPayload(payload,'c2w');live();
+    const sent=await transport.send(payload,{beforeWrite(){live();need(!write,'execution_cleanup_write_reuse');
+     write=db.transaction(()=>{const actual=currentCommandPreparationCleanup(db,{id,phase,binding,runtime:currentInTransaction()}),attempt=crypto.randomUUID();
+      need(actual.steps[phase].frame.wire.equals(request.wire),'execution_cleanup_changed');
+      need(db.prepare('INSERT INTO execution_write_attempt VALUES(?,?,?)').run(attempt,request.record.record_id,executionTick(tick())).changes===1,'execution_cleanup_storage');
+      return {attempt_id:attempt};
+     }).immediate();
+    }});
+    need(write&&sent?.not_started!==true&&sent?.wire_length===payload.length+4,'execution_write_unknown');
+    const result=api.finishHandshakeWrite(write.attempt_id,'complete');finished=true;need(result.result==='complete','execution_write_unknown');return result;
+   }catch(error){if(write&&!finished)try{api.finishHandshakeWrite(write.attempt_id,'unknown');}catch{}fail(error);throw error;}
+  },
+  async receiveCommandCleanup(bytes){
+   need(!busy,'execution_receive_busy');busy=true;
+   try{live();const receivedTick=tick(),decoded=await decodeExecutionPayload(bytes,'w2c');live();
+    const features=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features;
+    const saved=db.transaction(()=>acceptCommandPreparationCleanup(db,{binding,decoded,features,tick,receivedTick})).immediate();return api.commandCleanupHistory(saved.value.permit_id);
+   }catch(error){fail(error);throw error;}finally{busy=false;}
+  },
+  commandCleanupHistory(id){
+   available();const saved=db.transaction(()=>readCommandPreparationCleanup(db,id)).immediate();need(saved.value.binding.ipc_session_id===binding.ipc_session_id,'execution_cleanup_history');
+   return freeze({value:saved.value,ref:saved.ref,qualification:null,steps:Object.fromEntries(Object.entries(saved.steps).map(([phase,step])=>
+    [phase,{value:step.value,ref:step.ref,frame:step.frame.frame}]))});
   },
   currentCommandGuard(id){
    try{live();const saved=db.transaction(()=>currentCommandGuard(db,{id,binding,provider:encodingSource?.(),tick,requireAck:true})).immediate();

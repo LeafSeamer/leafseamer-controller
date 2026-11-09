@@ -121,7 +121,7 @@ export function deviceAuthorizationEvidence({db,service,writer,currentContext,ma
  attachCurrent?.(currentInside);
  return Object.freeze({
   select(request){need(request&&Object.keys(request).sort().join(',')==='device_id,evaluator_source_ref,expected_evidence_ref,expected_state_ref,manual_source_ref,request_id'&&uuid(request.request_id),'input');
-   const fixed=structuredClone(request);return freeze(writer(()=>{
+   const fixed=structuredClone(request);return freeze(writer(()=>withExecutionReadView(db,()=>{
     const oldRequest=db.prepare('SELECT evidence_id,body_digest,request_digest FROM device_authorization_evidence WHERE request_id=?').raw().get(fixed.request_id);
     if(oldRequest){need(oldRequest[2]===digest(fixed),'conflict');return read({id:oldRequest[0],revision:'1',digest:oldRequest[1]});}
     const selected=currentContext({device_id:fixed.device_id,manual_source_ref:fixed.manual_source_ref,evaluator_source_ref:fixed.evaluator_source_ref});need(!selected.denied,'revoked');
@@ -146,7 +146,7 @@ export function deviceAuthorizationEvidence({db,service,writer,currentContext,ma
     written(previous?db.prepare('UPDATE device_authorization_evidence_head SET evidence_id=?,generation=?,commit_id=? WHERE state_id=? AND evidence_id=?').run(evidence.evidence_id,generation,commit.id,state.ref.id,previous.ref.id):
      db.prepare('INSERT INTO device_authorization_evidence_head VALUES(?,?,?,?)').run(state.ref.id,evidence.evidence_id,generation,commit.id));
     return currentInside(fixed.device_id);
-   }));
+   })));
   },
   current(device){return freeze(writer(()=>currentInside(device)));},
   lookup(reference){return freeze(writer(()=>read(reference)));}

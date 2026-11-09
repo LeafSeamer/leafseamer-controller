@@ -41,13 +41,18 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
      if(pending){if(pending.type!=='DISPATCH_RESULT'||pending.permit_id!==result.value.permit_id)throw new DeviceExecutionError('execution_dispatch_reply');
       if(result.evidence||result.report?.frame.body.socket_callback_observation_ref===null)pending.resolve(result);}return;
     }
+    if(['DENY_ENCODING_ACK','RELEASE_ENCODING_ACK'].includes(frame.type)&&negotiation){const result=await journal.receiveCommandCleanup(payload);check();
+     if(pending){if(pending.type!==frame.type||pending.message!==frame.reply_to)throw new DeviceExecutionError('execution_cleanup_reply');pending.resolve(result);}return;
+    }
     if(frame.type!=='HELLO')throw new DeviceExecutionError('execution_client_unsupported');
     const repeated=negotiation!==null,result=await journal.negotiate(payload);check();
     if(!repeated){await journal.sendHandshake(transport);check();negotiation=result;clearTimeout(timer);resolveReady();}
    }catch(error){close(error);throw error;}
   }});
   timer=setTimeout(()=>close(new DeviceExecutionError('execution_handshake_timeout')),5000);timer.unref();
-  poll=setInterval(()=>{try{check();current();}catch(error){close(error);}},100);poll.unref();
+  // Ready/Prepared监视在同一调用内核验实际运行来源；有设备监视时不再重复遍历。
+  // 设备资格撤回后仍由本轮询监视连接，领域写入边界始终独立复核。
+  poll=setInterval(()=>{try{check();if(qualifications.size===0)current();}catch(error){close(error);}},100);poll.unref();
   await ready;check();return Object.freeze({binding:journal.binding,negotiation,close,
    async initialFence(device){
     check();if(pending||encoding)throw new DeviceExecutionError('execution_control_busy');const selected=journal.prepareInitialFence(device);
@@ -77,13 +82,14 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
      const [,result]=await Promise.all([journal.sendCommandEncoding(transport,selected.value.prepare_id),response]);check();return result;
     }catch(error){close(error);throw error;}finally{if(call){clearTimeout(call.timer);if(pending===call)pending=null;}encoding=false;}
    },
-   async installCommandGuard(id){
+   async installCommandGuard(id,{qualify=true}={}){
     check();if(pending||encoding)throw new DeviceExecutionError('execution_control_busy');encoding=true;let call;
     try{const selected=await journal.prepareCommandGuard(id);check();
      if(selected.replay){if(!selected.ack)throw new DeviceExecutionError('execution_guard_result_unknown');return journal.commandGuardHistory(selected.value.guard_id);}
      let resolve,reject;const response=new Promise((yes,no)=>{resolve=yes;reject=no;});response.catch(()=>{});
      call={type:'GUARD_ACK',message:selected.request.frame.message_id,resolve,reject,timer:setTimeout(()=>close(new DeviceExecutionError('execution_guard_timeout')),5000)};pending=call;
-     await Promise.all([journal.sendCommandGuard(transport,selected.value.guard_id),response]);check();return journal.currentCommandGuard(selected.value.guard_id);
+     await Promise.all([journal.sendCommandGuard(transport,selected.value.guard_id),response]);check();
+     return qualify?journal.currentCommandGuard(selected.value.guard_id):journal.commandGuardHistory(selected.value.guard_id);
     }catch(error){close(error);throw error;}finally{if(call){clearTimeout(call.timer);if(pending===call)pending=null;}encoding=false;}
    },
    async dispatchCommand(id){
@@ -105,6 +111,18 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
      let resolve,reject;const response=new Promise((yes,no)=>{resolve=yes;reject=no;});response.catch(()=>{});
      call={type:'FENCE_ACK',closure:true,message:selected.request.frame.message_id,resolve,reject,timer:setTimeout(()=>close(new DeviceExecutionError('execution_closure_timeout')),5000)};pending=call;
      const [,result]=await Promise.all([journal.sendCommandClosure(transport,id),response]);return {...result,settlement:journal.settleCommand(id)};
+    }catch(error){close(error);throw error;}finally{if(call){clearTimeout(call.timer);if(pending===call)pending=null;}encoding=false;}
+   },
+   async cleanupCommand(id){
+    check();if(pending||encoding)throw new DeviceExecutionError('execution_control_busy');encoding=true;let call,result;
+    try{for(const [phase,ack,type] of [['deny_request','deny_ack','DENY_ENCODING_ACK'],['release_request','release_ack','RELEASE_ENCODING_ACK']]){
+      const selected=await journal.prepareCommandCleanup(id,phase);check();
+      if(selected.replay){if(!selected.steps[ack])throw new DeviceExecutionError('execution_cleanup_result_unknown');result=selected;continue;}
+      let resolve,reject;const response=new Promise((yes,no)=>{resolve=yes;reject=no;});response.catch(()=>{});
+      call={type,message:selected.steps[phase].frame.message_id,resolve,reject,timer:setTimeout(()=>close(new DeviceExecutionError('execution_cleanup_timeout')),5000)};pending=call;
+      [,result]=await Promise.all([journal.sendCommandCleanup(transport,selected.value.permit_id,phase),response]);check();
+      clearTimeout(call.timer);if(pending===call)pending=null;call=null;
+     }return result;
     }catch(error){close(error);throw error;}finally{if(call){clearTimeout(call.timer);if(pending===call)pending=null;}encoding=false;}
    },
    initialReady(openingId){

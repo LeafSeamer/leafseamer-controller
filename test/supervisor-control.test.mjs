@@ -48,6 +48,15 @@ async function raw(t, mode, setup) {
   return {dir, child, closed, status, output};
 }
 
+test('主动核心观察取得本次请求后的真实回复，并发合并不延长旧观察且关闭后拒绝',options,async t=>{
+ const run=await raw(t,'core-refresh'),done=await until(()=>run.output.frames.find(f=>f.event==='core-refresh-done'));
+ assert.equal(done.fresh,true);assert.equal(done.unchanged,true);
+ assert.equal(done.oldError,'supervisor_core_observation');assert.equal(done.closedError,'supervisor_unavailable');
+ assert.equal((await run.closed)[0],1);
+ const stopped=run.status.frames.at(-1);assert.equal(stopped.event,'process_group_empty');
+ assert.equal(stopped.control_failed,true);assert.equal(stopped.active_processes,0);
+});
+
 test('真实核心提交完整启动快照，原生持久ACK且拒绝历史deny复活与修订重放', options, async t => {
   const run = await raw(t, 'fence');
   const done = await until(() => run.output.frames.find(f => f.event === 'fence-done')); assert.equal(done.current, 'closed');
