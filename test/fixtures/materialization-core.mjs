@@ -10,15 +10,19 @@ import {openStorage} from '../../dist/storage.mjs';
 import {authenticated} from './extension-auth.mjs';
 import {createAuthenticationHttp} from '../../dist/auth-http.mjs';
 import {contractSelection} from '../../dist/sdk/index.mjs';
+import {loadGuiAssets} from '../../dist/gui-assets.mjs';
 let business=null,intakeClient=null,manager=null,moduleClient=null,executionClient=null,intakeTail=Promise.resolve(),commandToken=null,commandRequest=null,evaluator=null,evaluatorSource=null,authorizationContext=null,authorizationEvidence=null;
 // 运行刷新与启动授权共享单请求安装连接；装配层串行查询，不重发或复用旧观察。
 function queryIntake(request){const result=intakeTail.then(()=>intakeClient.queryIntake(request));intakeTail=result.catch(()=>{});return result;}
 const args=process.argv.slice(3),options=Object.fromEntries(Array.from({length:args.length/2},(_,i)=>[args[i*2],args[i*2+1]]));
 const report=value=>process.stderr.write(JSON.stringify({...value,reported_ms:performance.now()})+'\n');
 let firstManualChallenge=null,initialResource=null,initialResourceRequest=null,initialOpening=null,initialOpeningRequest=null;const manualCoreObservations=new Map();
-let commandServer=null,commandHttp=null,commandAgent=null;
+let commandServer=null,commandHttp=null,commandAgent=null,guiTimer=null;
 async function startCommandHttp(material){
- let handler;commandServer=https.createServer(material,(req,res)=>{if(!handler.handle(req,res)){res.writeHead(404);res.end();}});
+ let handler,gui;commandServer=https.createServer(material,(req,res)=>{
+  if(gui&&['GET','HEAD'].includes(req.method)&&gui.handle(req,res))return;
+  if(!handler.handle(req,res)){res.writeHead(404);res.end();}
+ });
  await new Promise(resolve=>commandServer.listen(0,'127.0.0.1',resolve));
  const origin='https://127.0.0.1:'+commandServer.address().port;
  commandAgent=new https.Agent({keepAlive:true,maxSockets:1,ca:material.cert,rejectUnauthorized:true});
@@ -29,6 +33,10 @@ async function startCommandHttp(material){
    catch(error){report({event:'http-command-error',stage:'confirm',code:error.code,cause:error.cause?.code});throw error;}}};
  handler=createAuthenticationHttp({serviceId:business.identity.service_id,databaseInstanceId:business.identity.database_instance_id,
   serviceBootId:receipt.member_boot_id,sessions,origin,onFailure:value=>report({event:'http-handler-failure',...value})});
+ if(input.gui){gui=loadGuiAssets(input.gui.directory,business.identity,origin);
+  const spki=crypto.createHash('sha256').update(new crypto.X509Certificate(material.cert).publicKey.export({type:'spki',format:'der'})).digest('base64');
+  report({event:'gui-endpoint',origin,spki});
+ }
  commandHttp=(method,route,value)=>new Promise((resolve,reject)=>{
   const body=value===undefined?null:Buffer.from(JSON.stringify(value));
   const request=https.request(origin+route,{method,ca:material.cert,rejectUnauthorized:true,agent:commandAgent,headers:{Origin:origin,
@@ -598,5 +606,13 @@ try{
    catch(error){if(error.code!=='supervisor_indeterminate'||performance.now()>=until)throw error;await delay(25);}}
  }
 }
+if(input.gui){guiTimer=setInterval(()=>{
+ if(!fs.existsSync(input.gui.revoke_request))return;clearInterval(guiTimer);
+ try{const current=manager.sessions.localPermissions(manager.auth);
+  const changed=manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id:manager.logged.session.principal_id,
+   expected_revision:current.revision,permissions:current.permissions.filter(permission=>permission!=='command.evidence.read')});
+  fs.writeFileSync(input.gui.revoke_result,JSON.stringify({state:'revoked',result:changed}));report({event:'gui-evidence-revoked'});
+ }catch(error){fs.writeFileSync(input.gui.revoke_result,JSON.stringify({state:'failed',code:error.code}));}
+},50);guiTimer.unref();}
 report({event:'done',record:await source.queryLaunch(key)});
-process.stdin.setEncoding('utf8').on('data',data=>{if(data==='stop\n'){commandAgent?.destroy();commandServer?.close();manager?.real.stop();intakeClient?.close();business?.close();source.close();process.stdin.destroy();}});process.stdin.resume();
+process.stdin.setEncoding('utf8').on('data',data=>{if(data==='stop\n'){clearInterval(guiTimer);commandAgent?.destroy();commandServer?.close();manager?.real.stop();intakeClient?.close();business?.close();source.close();process.stdin.destroy();}});process.stdin.resume();
