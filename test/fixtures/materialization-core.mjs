@@ -192,7 +192,7 @@ if(input.runtime){
  }
  if(controlFlow){
   const permissions=['control.read','control.acquire','device.command','device.recover','command.read','command.evidence.read','command.cancel','request.create',...(input.mode.endsWith('_successor_control')||input.mode.includes('_control_queued')||input.mode.endsWith('_control_unresolved')?['control.release']:[])];
-  const before=manager.sessions.localPermissions(manager.auth);manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id:manager.logged.session.principal_id,expected_revision:before.revision,permissions:[...new Set([...before.permissions,...permissions])]});
+  const before=manager.sessions.localPermissions(manager.auth);manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id:manager.logged.session.principal_id,expected_revision:before.revision,permissions:[...new Set([...before.permissions,...permissions,...(input.gui?['device.read']:[])])]});
   commandToken=manager.token(permissions);const device=intent.object_scope.device_ids[0],{contractSelection:selection}=await import('../../dist/sdk/index.mjs');
   const context=manager.sessions.createRequestContext(commandToken,{audience:business.identity.service_id,operations:['acquireControl','submitCommand'],selection,ttl_ms:60000,max_unique_requests:8});
   const original=manager.sessions.getControl(commandToken,device),accepted=await manager.sessions.changeControl(commandToken,'acquireControl',{device_id:device},{context_id:context.context_id,idempotency_key:'manual.command.owner',expected_control:{epoch:original.control_epoch,version:original.effective_version},reason:'模拟器人员控制'});
