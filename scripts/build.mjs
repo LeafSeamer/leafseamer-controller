@@ -5,6 +5,7 @@ import {fileURLToPath} from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const names = ['authority-source-window.mjs', 'supervisor-control.mjs', 'core-bootstrap.mjs', 'core-runtime.sql', 'cli.mjs', 'server.mjs', 'storage.mjs', 'storage.sql', 'identity.sql', 'identity-crypto.mjs', 'identity-store.mjs', 'local-admin.mjs', 'native-clock.mjs', 'clock-monitor.mjs', 'clock.sql', 'auth-clock.sql', 'auth-clock.mjs', 'auth-clock-value.mjs', 'auth-clock-store.mjs', 'session-store.mjs', 'session.sql', 'access-token-store.mjs', 'access-token.sql'];
 const files = await Promise.all(names.map(async name => [name, await fs.readFile(path.join(root, 'src', name))]));
+for(const name of ['peer-pairing.sql','peer-pairing-store.mjs','peer-pairing-value.mjs','peer-pairing-transport.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 files.push(['process-host.mjs', await fs.readFile(path.join(root, 'src/process-host.mjs'))]);
 files.push(['worker-bootstrap.mjs', await fs.readFile(path.join(root, 'src/worker-bootstrap.mjs'))]);
 for (const name of ['worker-launch-store.mjs','worker-launch.sql','worker-runtime-store.mjs','worker-runtime.sql','worker-dependencies.mjs','worker-dependencies.sql','extension-plan-store.mjs','extension-plan.sql','extension-activation-store.mjs','extension-activation.sql','worker-authorization-store.mjs','worker-authorization.sql']) files.push([name,await fs.readFile(path.join(root,'src',name))]);

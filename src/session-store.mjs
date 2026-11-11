@@ -16,6 +16,7 @@ import {deviceAuthorizationRecovery} from './device-authorization-recovery.mjs';
 import {deviceAuthorizationEvidence} from './device-authorization-evidence.mjs';
 import {deviceInitialResource} from './device-initial-resource.mjs';
 import {deviceInitialOpen} from './device-initial-open.mjs';
+import {peerPairingStore} from './peer-pairing-store.mjs';
 
 const HOUR = 3600000000000n, MINUTE = 60000000000n, MAX = (1n << 64n) - 1n;
 const fail = code => { throw new IdentityError(code); };
@@ -158,7 +159,17 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
       if (!last.permissions.includes(permission)) fail('device_read_denied'); return result;
     }));
   }
+  const peerPairings=Number(contextBinding?.service.schema_revision)>=59?peerPairingStore({db,service:contextBinding.service,bootId:contextBinding.bootId,writer,authenticated,authority,
+    time(){
+      if(typeof clock.pairingSample!=='function')fail('peer_pairing_clock_unavailable');
+      const sample=clock.pairingSample(),lower=clockInteger(sample.lower_ns),upper=clockInteger(sample.upper_ns),tick=clockInteger(sample.tick_ns);
+      const stored=db.prepare('SELECT digest,body FROM authentication_clock_acquisition WHERE id=? AND revision=?').raw().get(sample.acquisition_ref.id,sample.acquisition_ref.revision);
+      if(!stored||stored[0]!==sample.acquisition_ref.digest||lower>upper)fail('peer_pairing_clock_binding');const original=JSON.parse(stored[1].toString());
+      if(original.service_id!==serviceId||original.service_boot_id!==contextBinding.bootId||original.clock_domain_id!==sample.runtime_domain_ref.clock_domain_id||original.descriptor_digest!==sample.runtime_domain_ref.descriptor_digest)fail('peer_pairing_clock_binding');
+      return {lower,upper,tick,acquisition:sample.acquisition_ref,runtime_domain_ref:sample.runtime_domain_ref};
+    }}):null;
   return Object.freeze({
+    peerPairings,
     ...tokens, ...contexts, ...commands, ...serviceIdentities,
     selectManualExecutionSource(input,device){if(!manualAuthority)fail('manual_authority_unavailable');return manualAuthority.select(input,device);},
     beginManualExecutionChallenge(input,device,requestId){if(!manualAuthority)fail('manual_authority_unavailable');return manualAuthority.begin(input,device,requestId);},

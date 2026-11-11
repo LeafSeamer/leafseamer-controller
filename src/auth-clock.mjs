@@ -40,7 +40,7 @@ export function startAuthenticationClock(source, ledger, provider = null, {sched
       ledger.read(binding.runtime.clock_domain_id, tick(), evidence(), source.artifactDigest);
     } catch (error) { fail(error); }
   }
-  function current() {
+  function current(withDomain = false) {
     usable();
     try {
       const before = evidence(), now = tick(), domain = binding.runtime.clock_domain_id;
@@ -50,12 +50,13 @@ export function startAuthenticationClock(source, ledger, provider = null, {sched
       need(same(before, after) && observation.continuity_available && observation.continuity === binding.runtime.continuity, 'auth_clock_context_changed');
       const observed = captureInterval(observation, before.policy), predicted = extrapolate(record, clockInteger(observation.b));
       need(clockInteger(observed.upper_ns) >= clockInteger(predicted.lower_ns) && clockInteger(observed.lower_ns) <= clockInteger(predicted.upper_ns), 'auth_clock_disjoint');
-      return Object.freeze(ledger.read(domain, tick(), after, source.artifactDigest));
+      const at = tick(), value = ledger.read(domain, at, after, source.artifactDigest);
+      return Object.freeze(withDomain ? {...value, tick_ns: String(at), runtime_domain_ref: Object.freeze({clock_domain_id: domain, descriptor_digest: binding.runtime.descriptor_digest})} : value);
     } catch (error) { fail(error); throw new ClockError(failure); }
   }
   refresh();
   const timer = schedule && provider !== null ? setInterval(refresh, 500) : null; timer?.unref();
-  return Object.freeze({refresh, current,
+  return Object.freeze({refresh, current: () => current(), pairingSample: () => current(true),
     status() {
       if (!failure && binding && !stopped) { try { current(); } catch {} }
       return Object.freeze({state: failure ? 'faulted' : binding && !stopped ? 'available' : 'unqualified',
