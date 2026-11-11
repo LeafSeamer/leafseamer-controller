@@ -1,3 +1,4 @@
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 
@@ -8,7 +9,7 @@ const same=(a,b)=>canonicalize(a)===canonicalize(b);
 const id=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\s\S])/.test(value);
 const freeze=value=>{if(value&&typeof value==='object'){for(const child of Object.values(value))freeze(child);Object.freeze(value);}return value;};
 const reference=(service,kind,object,body)=>({kind,authority_service_id:service.service_id,database_instance_id:service.database_instance_id,object_id:object,revision:'1',digest:hash(body)});
-function read(text,digest){const value=JSON.parse(text);need(canonicalize(value)===text&&hash(value)===digest,'integrity');return value;}
+const read=cacheVerifiedDocument((text,digest)=>{const value=JSON.parse(text);need(canonicalize(value)===text&&hash(value)===digest,'integrity');return value;});
 function device(db,service,deviceId){
  const row=db.prepare('SELECT descriptor_body,descriptor_digest FROM device_record WHERE device_id=?').raw().get(deviceId);need(row,'device_missing');
  const body=read(row[0].toString('utf8'),row[1]);return {body,ref:reference(service,'device',deviceId,body)};

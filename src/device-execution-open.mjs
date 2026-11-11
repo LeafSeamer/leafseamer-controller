@@ -1,3 +1,4 @@
+import {sqliteRow} from './sqlite-rows.mjs';
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {DeviceExecutionError,executionWire} from './device-execution-channel.mjs';
@@ -9,7 +10,7 @@ const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError('execution_open_'+c
 const hash=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
 const digest=value=>hash(canonicalize(value)),same=(a,b)=>canonicalize(a)===canonicalize(b);
 const ref=(id,digest)=>({id,revision:'1',digest});
-const row=(db,sql,...args)=>{const q=db.prepare(sql),names=q.columns().map(c=>c.name),values=q.raw().get(...args);return values&&Object.fromEntries(names.map((n,i)=>[n,values[i]]));};
+const row=sqliteRow;
 function document(text,expected){const value=JSON.parse(text);need(canonicalize(value)===text&&digest(value)===expected,'integrity');return value;}
 function applied(db,id,openingId,phase,sourceDigest){
  const r=row(db,`SELECT f.*,e.effect_jcs,e.effect_digest,e.audit_jcs,e.audit_digest,e.committed_tick,x.domain_jcs,x.domain_digest,x.phase

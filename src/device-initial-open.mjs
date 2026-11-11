@@ -1,3 +1,4 @@
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {IdentityError} from './identity-crypto.mjs';
@@ -11,7 +12,7 @@ const freeze=v=>{if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Obj
 const signed=(value,key)=>({...value,[key]:digest(value)});
 const reference=(value,id,key)=>({id:value[id],revision:value.revision,digest:value[key]});
 const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/.test(v);
-function decode(text,hash){const v=checked(JSON.parse(text));need(canonicalize(v)===text&&v.digest===hash,'integrity');return v;}
+const decode=cacheVerifiedDocument((text,hash)=>{const v=checked(JSON.parse(text));need(canonicalize(v)===text&&v.digest===hash,'integrity');return v;});
 
 // 首次手动开放的持久前态与计划；没有出站seq、写尝试、ACK或Ready，不授予发送权。
 // 两安全状态从真实初始资源与FENCE确认初始化，不用任意revision=0或占位Ref代表风险已清除。

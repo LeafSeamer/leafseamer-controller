@@ -1,3 +1,4 @@
+import {sourceWindowContains} from './authority-source-window.mjs';
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {seal,ref,same,checked} from './auth-clock-value.mjs';
@@ -16,6 +17,7 @@ export function coreRuntimeSource({db,service,bootId,core,connected,observe,asse
  function currentSources(){
   need(db.inTransaction,'writer');connected();const parent=core(),observation=observe();currentObservation(observation);const now=domain();
   const request=observation.request,response=observation.response;
+  need(sourceWindowContains(observation,observation.issued_tick_ns,observation.expires_tick_ns),'window');
   need(request.type==='LAUNCH_QUERY'&&response.type==='LAUNCH_RESULT'&&response.reply_to===request.message_id&&
    request.channel_id===response.channel_id&&same(request.scope,response.scope)&&same(request.payload,response.payload.key)&&
    same(response.payload.record.admission_receipt,parent.receipt)&&request.scope.service_id===service.service_id&&
@@ -40,6 +42,7 @@ export function coreRuntimeSource({db,service,bootId,core,connected,observe,asse
   need(value.service_boot_id===bootId&&same(value.scope,{authority_service_id:service.service_id,database_instance_id:service.database_instance_id})&&
    same(value.core,parent)&&same(value.observation,observation)&&same(value.domain_ref,now.ref)&&
    BigInt(value.selected_tick_ns)<=BigInt(now.tick)&&BigInt(now.tick)<BigInt(value.expires_tick_ns),'not_current');
+  need(sourceWindowContains(observation,observation.issued_tick_ns,observation.expires_tick_ns)&&value.expires_tick_ns===observation.expires_tick_ns,'window');
   currentObservation(observation);return freeze({ref:reference,value});
  }
  return Object.freeze({current,

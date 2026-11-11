@@ -1,4 +1,7 @@
+import {authoritySourceWindowPolicy,authoritySourceWindowNs,sourceWindowContains} from './authority-source-window.mjs';
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import crypto from 'node:crypto';
+import {memoExecutionRead} from './execution-read-view.mjs';
 import canonicalize from 'canonicalize';
 import {seal,ref,same,checked,digest} from './auth-clock-value.mjs';
 import {IdentityError} from './identity-crypto.mjs';
@@ -7,7 +10,7 @@ import {collectAuthorizationDependencies,currentAuthorizationDependencies} from 
 const need=(v,c)=>{if(!v)throw new IdentityError('evaluator_source_'+c);};
 const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v);
 const fields=(v,n)=>need(v&&typeof v==='object'&&Object.keys(v).sort().join(',')===n.split(',').sort().join(','),'input');
-const unpack=(text,hash)=>{const v=checked(JSON.parse(text));need(canonicalize(v)===text&&v.digest===hash,'integrity');return v;};
+const unpack=cacheVerifiedDocument((text,hash)=>{const v=checked(JSON.parse(text));need(canonicalize(v)===text&&v.digest===hash,'integrity');return v;});
 const written=r=>need(r.changes===1,'storage');
 const deliver=v=>{if(v.denied)throw new IdentityError(v.denied);return v;};
 // 内部评估器取证；身份认证与核心单调观察分别复核，本原件不充当OPEN Requirement。
@@ -27,7 +30,8 @@ export function deviceEvaluatorSource({db,service,writer,time,management,princip
  }
  function prior(key,request,kind){const row=db.prepare('SELECT kind,request_digest,body_jcs,body_digest FROM device_evaluator_operation WHERE actor_key=? AND request_id=?').raw().get(key,request.request_id);
   if(!row)return null;need(row[0]===kind&&row[1]===digest(request),'conflict');return unpack(row[2],row[3]).result;}
- function policy(reference){const row=db.prepare('SELECT body_jcs,body_digest,principal_id,approval_id FROM device_evaluator_policy WHERE policy_id=?').raw().get(reference?.id);
+ function policy(reference){return memoExecutionRead(db,'evaluator-policy-original',reference,()=>readPolicy(reference));}
+ function readPolicy(reference){const row=db.prepare('SELECT body_jcs,body_digest,principal_id,approval_id FROM device_evaluator_policy WHERE policy_id=?').raw().get(reference?.id);
   need(row,'policy_missing');const v=unpack(row[0],row[1]);need(same(ref(v),reference)&&v.principal_id===row[2]&&v.approval_ref.id===row[3]&&v.service_id===service.service_id&&v.database_instance_id===service.database_instance_id,'integrity');return v;}
  function activePolicy(reference,now){const p=policy(reference);need(!db.prepare('SELECT 1 FROM device_evaluator_policy_revocation WHERE policy_id=?').pluck().get(p.id),'policy_revoked');
   const s=principal(p.principal_id),a=approval(s);need(same(ref(s),p.subject_ref)&&same(ref(a),p.approval_ref),'policy_changed');
@@ -38,16 +42,20 @@ export function deviceEvaluatorSource({db,service,writer,time,management,princip
   }
   need(now.lower>=BigInt(p.not_before_ns)&&now.lower>=BigInt(a.not_before_ns)&&now.upper<BigInt(a.expires_ns),'policy_validity');return {p,s,a};
  }
- function challenge(reference){const row=db.prepare('SELECT body_jcs,body_digest,policy_id,core_source_id,device_id FROM device_evaluator_challenge WHERE challenge_id=?').raw().get(reference?.id);
+ function challenge(reference){return memoExecutionRead(db,'evaluator-challenge-original',reference,()=>readChallenge(reference));}
+ function readChallenge(reference){const row=db.prepare('SELECT body_jcs,body_digest,policy_id,core_source_id,device_id FROM device_evaluator_challenge WHERE challenge_id=?').raw().get(reference?.id);
   need(row,'challenge_missing');const v=unpack(row[0],row[1]);need(same(ref(v),reference)&&v.policy_ref.id===row[2]&&v.core_runtime_source_ref.id===row[3]&&v.device_id===row[4],'integrity');return v;}
  function currentChallenge(v){need(coreSource,'runtime_unavailable');const now=supervised(()=>coreSource.domain());
+  need(sourceWindowContains(v,v.issued_tick_ns,v.expires_tick_ns),'challenge_window');
   need(same(v.domain_ref,now.ref)&&BigInt(v.issued_tick_ns)<=BigInt(now.tick)&&BigInt(now.tick)<BigInt(v.expires_tick_ns),'challenge_expired');
   const runtime=supervised(()=>coreSource.currentCoreSource(v.core_runtime_source_ref));need(same(runtime.value.domain_ref,now.ref),'runtime_domain');return {runtime,now};}
- function original(reference){const row=db.prepare('SELECT s.body_jcs,s.body_digest,s.challenge_id,s.credential_id,s.request_digest,o.body_jcs,o.body_digest FROM device_evaluator_source s JOIN device_evaluator_operation o USING(operation_id) WHERE source_id=?').raw().get(reference?.id);
+ function original(reference){return memoExecutionRead(db,'evaluator-source-original',reference,()=>readOriginal(reference));}
+ function readOriginal(reference){const row=db.prepare('SELECT s.body_jcs,s.body_digest,s.challenge_id,s.credential_id,s.request_digest,o.body_jcs,o.body_digest FROM device_evaluator_source s JOIN device_evaluator_operation o USING(operation_id) WHERE source_id=?').raw().get(reference?.id);
   need(row,'source_missing');const v=unpack(row[0],row[1]),op=unpack(row[5],row[6]);need(same(ref(v),reference)&&v.challenge_ref.id===row[2]&&v.credential_ref.id===row[3]&&v.response_digest===row[4]&&op.kind==='source'&&same(op.result,{ref:reference,value:v}),'integrity');return v;}
  function currentInside(reference){const v=original(reference),ch=challenge(v.challenge_ref),actual=currentChallenge(ch),now=time(),p=activePolicy(v.policy_ref,now);if(p.denied)return p;
   const c=credential(v.credential_ref.id);if(expired(c,now))return {denied:'evaluator_source_credential_expired'};
   const parent=allowed(c,now);need(c.state==='active'&&same(ref(c),v.credential_ref)&&same(ref(parent.subject),v.subject_ref)&&same(ref(parent.a),v.approval_ref)&&p.p.device_ids.includes(v.device_id),'identity_changed');
+  need(sourceWindowContains(v,v.selected_tick_ns,v.expires_tick_ns),'window');
   need(v.authentication_window&&v.expires_tick_ns===v.authentication_window.before_tick_ns,'window_missing');
   currentAuthenticationWindow({db,service,coreRuntime:actual.runtime,domain:actual.now.ref,acquisitionRef:v.authentication_acquisition_ref,
    selectedTick:v.selected_tick_ns,validFrom:[c.not_before_ns,p.p.not_before_ns,parent.a.not_before_ns].reduce((a,b)=>BigInt(a)>BigInt(b)?a:b),
@@ -80,8 +88,8 @@ export function deviceEvaluatorSource({db,service,writer,time,management,princip
    need(coreSource,'runtime_unavailable');const now=time(),p=activePolicy(request.policy_ref,now);if(p.denied)return p;need(p.p.device_ids.includes(request.device_id),'scope');
    const old=prior('core',request,'challenge');if(old){currentChallenge(old);return old;}
    need(db.prepare('SELECT count(*) FROM device_evaluator_challenge').pluck().get()<4096,'capacity');const runtime=supervised(()=>coreSource.selectCoreSource()),domain=supervised(()=>coreSource.domain()),op=crypto.randomUUID();
-   const end=[BigInt(runtime.value.expires_tick_ns),BigInt(domain.tick)+2000000000n].reduce((a,b)=>a<b?a:b);need(BigInt(domain.tick)<end,'challenge_expired');
-   const v=seal({format:'device-evaluator-challenge/1',id:crypto.randomUUID(),revision:'1',policy_ref:ref(p.p),device_id:request.device_id,core_runtime_source_ref:runtime.ref,
+   const end=[BigInt(runtime.value.expires_tick_ns),BigInt(domain.tick)+authoritySourceWindowNs].reduce((a,b)=>a<b?a:b);need(BigInt(domain.tick)<end,'challenge_expired');
+   const v=seal({format:'device-evaluator-challenge/1',source_window_policy:authoritySourceWindowPolicy,id:crypto.randomUUID(),revision:'1',policy_ref:ref(p.p),device_id:request.device_id,core_runtime_source_ref:runtime.ref,
     domain_ref:domain.ref,nonce:crypto.randomBytes(32).toString('base64url'),issued_tick_ns:domain.tick,expires_tick_ns:String(end)});
    written(db.prepare('INSERT INTO device_evaluator_challenge VALUES(?,?,?,?,?,?,?)').run(v.id,p.p.id,runtime.ref.id,v.device_id,canonicalize(v),v.digest,op));
    currentChallenge(v);return operation(op,'core',request,'challenge',v,now);
@@ -97,7 +105,7 @@ export function deviceEvaluatorSource({db,service,writer,time,management,princip
    const selected=supervised(()=>coreSource.domain());
    const window=selectAuthenticationWindow({db,service,coreRuntime:actual.runtime,domain:selected.ref,acquisitionRef:now.acquisition,selectedTick:selected.tick,
     validFrom,validBefore,capTick:ch.expires_tick_ns});
-   const op=crypto.randomUUID(),base={format:'device-evaluator-source/2',id:crypto.randomUUID(),revision:'1',device_id:ch.device_id,policy_ref:ref(p.p),subject_ref:ref(parent.subject),approval_ref:ref(parent.a),
+   const op=crypto.randomUUID(),base={format:'device-evaluator-source/2',source_window_policy:authoritySourceWindowPolicy,id:crypto.randomUUID(),revision:'1',device_id:ch.device_id,policy_ref:ref(p.p),subject_ref:ref(parent.subject),approval_ref:ref(parent.a),
     credential_ref:ref(c),issuer_id:parent.subject.issuer_id,issuer_epoch:parent.subject.issuer_epoch,principal_id:parent.subject.id,challenge_ref:ref(ch),response_id:input.request_id,response_digest:digest(request),
     authentication_acquisition_ref:now.acquisition,authentication_valid_from_ns:validFrom,authentication_valid_before_ns:validBefore,authentication_window:window,
     core_runtime_source_ref:ch.core_runtime_source_ref,domain_ref:selected.ref,selected_tick_ns:selected.tick,expires_tick_ns:window.before_tick_ns};

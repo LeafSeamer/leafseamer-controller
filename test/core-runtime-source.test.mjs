@@ -13,9 +13,9 @@ function fixture(t){
  const service={service_id:'controller',database_instance_id:'database'},domainRef={clock_domain_id:'domain',descriptor_digest:'sha256:'+'1'.repeat(64)};
  const parent={intent:{launch_id:'core'},receipt:{domain_ref:domainRef}},scope={...service,domain_ref:domainRef};
  let tick=10n,sequence=0,observation,observationError=null,connectionError=null;
- const advance=expires=>{const request={type:'LAUNCH_QUERY',message_id:'query.'+(++sequence),channel_id:'channel',scope,payload:{launch_id:'core'}};
+ const advance=(expires,policy)=>{const request={type:'LAUNCH_QUERY',message_id:'query.'+(++sequence),channel_id:'channel',scope,payload:{launch_id:'core'}};
   observation={request,response:{type:'LAUNCH_RESULT',reply_to:request.message_id,message_id:'response.'+sequence,channel_id:'channel',scope,
-   payload:{key:request.payload,record:{admission_receipt:parent.receipt}}},issued_tick_ns:String(tick),received_tick_ns:String(tick),expires_tick_ns:String(expires)};};
+   payload:{key:request.payload,record:{admission_receipt:parent.receipt}}},issued_tick_ns:String(tick),received_tick_ns:String(tick),expires_tick_ns:String(expires),...(policy?{source_window_policy:policy}:{})};};
  advance(20n);
  const source=coreRuntimeSource({db,service,bootId:'boot',core:()=>parent,connected(){if(connectionError)throw connectionError;},observe:()=>observation,
   assertObservation(value){if(observationError)throw observationError;if(tick>=BigInt(value.expires_tick_ns))throw new SupervisorError('supervisor_core_observation');},
@@ -36,4 +36,18 @@ test('真实监督通道错误不转换为可恢复的来源失效',t=>{
  const f=fixture(t),first=f.run(()=>f.source.select()),lost=new SupervisorError('supervisor_channel_closed');
  f.connectionError(lost);assert.throws(()=>f.run(()=>f.source.current(first.ref)),e=>e===lost);
  f.connectionError(null);f.observationError(lost);assert.throws(()=>f.run(()=>f.source.current(first.ref)),e=>e===lost);
+});
+
+test('新五秒观察不续期旧来源，较短原截止和当前连接检查仍生效',t=>{
+ const f=fixture(t);f.advance(2000000010n);const old=f.run(()=>f.source.select());
+ f.advance(5000000010n,'authority-source-window/2');const fresh=f.run(()=>f.source.select());
+ f.tick(2000000010n);
+ assert.throws(()=>f.run(()=>f.source.current(old.ref)),e=>e.code==='core_runtime_source_not_current');
+ assert.deepEqual(f.run(()=>f.source.current(fresh.ref)),fresh);
+ f.tick(5000000010n);
+ assert.throws(()=>f.run(()=>f.source.current(fresh.ref)),e=>e.code==='core_runtime_source_not_current');
+ f.advance(10000000011n,'authority-source-window/2');
+ assert.throws(()=>f.run(()=>f.source.select()),e=>e.code==='core_runtime_source_window');
+ f.advance(7000000011n);
+ assert.throws(()=>f.run(()=>f.source.select()),e=>e.code==='core_runtime_source_window');
 });

@@ -8,6 +8,8 @@ import {controlNeed as need,controlHash as hash,controlSame as same,controlActor
 const permissions={acquireControl:'control.acquire',releaseControl:'control.release',offerTransfer:'control.transfer',acceptTransfer:'control.accept',cancelTransfer:'control.transfer'};
 const uuid=()=>crypto.randomUUID();
 
+import {captureControlCommands} from './control-command-cut.mjs';
+
 // 人员控制请求使用同库真实令牌、上下文和授权；屏障仅由核心内部提供者处理。
 export function deviceControlStore({db,service,bootId,writer,time,authorizeToken,contextCurrent,authority,devices,barriers}){
  const adapter=createHttpAdapter(selection),repository=deviceControlRepository(db,devices,()=>barriers.domain()),scope={authority_service_id:service.service_id,database_instance_id:service.database_instance_id};
@@ -111,7 +113,7 @@ export function deviceControlStore({db,service,bootId,writer,time,authorizeToken
       record.reserved_version=next(record.reserved_version);const target={version:record.reserved_version,mode:holder?'manual':'automatic',holder};
       operation=seal({operation_id:uuid(),scope,device_id:record.device_id,revision:'1',identity,kind,requester:who,expected_control:version(record),target,state:'pending',
        barrier_selection_ref:null,effective_control_ref:null,failure_code:null},'operation_digest');repository.append('operation',operation,commit);
-      record.pending_change={operation_id:operation.operation_id,target,requested_by:who,reason:body.reason};record.gate_state='fencing';repository.touch('record',record,commit);bindTargets(operation);members=3;
+      record.pending_change={operation_id:operation.operation_id,target,requested_by:who,reason:body.reason};record.gate_state='fencing';repository.touch('record',record,commit);bindTargets(operation);if(Number(service.schema_revision)>=58)captureControlCommands(db,operation,commit,bootId);members=3;
       if(offer){offer.state='accepted';offer.accepted_operation_id=operation.operation_id;repository.touch('offer',offer,commit);members++;}
       resultKind='control_operation';resultRef=ref(operation,'operation_id','operation_digest');
      }

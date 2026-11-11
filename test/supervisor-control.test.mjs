@@ -220,6 +220,38 @@ function syntheticBinding() {
   return {binding: {descriptor: {supervisor_instance_id: 'supervisor'}, receipt}, policy: {service_id: 'service', database_instance_id: 'database'}};
 }
 
+test('合成监督端的新worker观察保留五秒原截止，刷新不续旧观察且deny立即撤回',options,async()=>{
+ const fixture=syntheticBinding();fixture.binding.descriptor.runtime_generation='generation';
+ const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
+ const ref=kind=>({kind,authority_service_id:'service',database_instance_id:'database',object_id:kind,revision:'1',digest:hash(kind)});
+ const intent={launch_id:'worker',service_id:'service',supervisor_instance_id:'supervisor',runtime_generation:'generation',member_id:'worker.member',role:'worker',
+  artifact_manifest_ref:fixture.binding.receipt.artifact_manifest_ref,containment_ref:{group_id:'worker.group',generation:'generation',backend:'windows_job'},
+  object_scope:{kind:'devices',device_ids:['device']},policy_revision:'1',extension_binding:{installation_ref:ref('installation'),approval_ref:ref('approval'),
+   review_ref:ref('review'),role_resolution_ref:ref('role_resolution'),configuration_ref:ref('configuration'),intake_ref:ref('intake'),platform_profile_ref:ref('platform_profile'),
+   host_installation_id:'host',host_trust_epoch:'1',manifest_digest:hash('manifest'),artifact_set_digest:hash('artifacts'),entry_id:'simulator',permissions_digest:hash('permissions')}};
+ const receipt={...fixture.binding.receipt,receipt_id:'worker.receipt',bootstrap_id:'worker.bootstrap',member_boot_id:'worker.boot',role:'worker',
+  launch_id:intent.launch_id,launch_intent_digest:hash(intent),member_id:intent.member_id,containment_ref:intent.containment_ref};
+ const channelId=crypto.randomBytes(16).toString('hex'),pipe='\\\\.\\pipe\\LeafSeamer.Control.'+channelId;let peer,source;
+ const server=net.createServer(socket=>{peer=socket;let buffer='';socket.on('error',()=>{});socket.on('data',chunk=>{
+  buffer+=chunk;if(!buffer.endsWith('\n'))return;const request=JSON.parse(buffer);buffer='';
+  const response={...request,message_id:'response-'+request.sequence,reply_to:request.message_id};
+  if(request.type==='LAUNCH_QUERY'){response.type='LAUNCH_RESULT';response.payload={key:request.payload,record:{key:request.payload,supervisor_instance_id:'supervisor',
+   state:'admitted_closed',creation_attempted:true,gate_state:'closed',retirement_evidence:null,admission_receipt:request.payload.launch_id==='worker'?receipt:fixture.binding.receipt}};}
+  else{response.type='FENCE_RESULT';response.payload={revision:request.payload.revision,snapshot_digest:request.payload.digest,journal_committed:true};}
+  socket.write(canonicalize(response)+'\n');
+ });});
+ await new Promise(resolve=>server.listen(pipe,resolve));
+ try{
+  source=await connectCoreSupervisor({pipe,channelId,...fixture});const old=await source.observeWorker(intent),deadline=old.confirmation_deadline_ns;
+  assert.equal(old.source_window_policy,'authority-source-window/2');assert.equal(BigInt(deadline)-BigInt(old.issued_tick_ns),5000000000n);
+  await delay(2100);source.assertWorkerObservation(old);const fresh=await source.observeWorker(intent);
+  assert.equal(old.confirmation_deadline_ns,deadline);assert.notEqual(fresh.confirmation_deadline_ns,deadline);
+  await delay(3000);assert.throws(()=>source.assertWorkerObservation(old),e=>e.code==='supervisor_worker_withdrawn');source.assertWorkerObservation(fresh);
+  const body={scope:source.scope,revision:'1',items:[{...fresh.key,disposition:'deny'}]};await source.putFence({...body,digest:hash(body)});
+  assert.throws(()=>source.assertWorkerObservation(fresh),e=>e.code==='supervisor_worker_withdrawn');
+ }finally{source?.close();peer?.destroy();await new Promise(resolve=>server.close(resolve));}
+});
+
 test('核心消费者拒绝借用其它成员、组或观察域的退役结果', options, async () => {
   const hash = value => 'sha256:' + crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
   for (const fault of ['member', 'group', 'domain']) {

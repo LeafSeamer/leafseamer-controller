@@ -1,3 +1,4 @@
+import {authoritySourceWindowPolicy,authoritySourceWindowNs} from './authority-source-window.mjs';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import canonicalize from './runtime/canonicalize.mjs';
@@ -88,9 +89,10 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy}) 
         check(record && same(record.key, key) && record.supervisor_instance_id === descriptor.supervisor_instance_id && record.state === 'admitted_closed' &&
           record.creation_attempted === true && record.gate_state === 'closed' && record.retirement_evidence === null && same(record.admission_receipt, receipt), 'supervisor_receipt_binding');
         lastDeadline = deadline; latest = result;
-        latestCoreObservation=freeze({format:'leafseamer-core-observation/1',request,response:result,
-          issued_tick_ns:String(issued),received_tick_ns:String(received),expires_tick_ns:String(deadline)});
-        coreObservations.set(latestCoreObservation,deadline);
+        const sourceDeadline=issued+authoritySourceWindowNs;
+        latestCoreObservation=freeze({format:'leafseamer-core-observation/1',source_window_policy:authoritySourceWindowPolicy,request,response:result,
+          issued_tick_ns:String(issued),received_tick_ns:String(received),expires_tick_ns:String(sourceDeadline)});
+        coreObservations.set(latestCoreObservation,sourceDeadline);
         timer = setTimeout(() => { void query().catch(() => {}); }, 500); return result;
       } catch (error) { fail(error instanceof SupervisorError ? error.code : 'supervisor_response_rejected'); throw failed ?? error; }
     }).finally(()=>{coreQuery=null;});
@@ -138,7 +140,8 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy}) 
     const requested={launch_id:fixed.launch_id,launch_intent_digest:'sha256:'+crypto.createHash('sha256').update(canonicalize(fixed)).digest('hex')};
     const epoch=workerEpoch,version=workerVersions.get(fixed.launch_id)??0;
     return enqueue(async()=>{
-      const {result,deadline}=await exchange('LAUNCH_QUERY',requested,'LAUNCH_RESULT');
+      const {result,issued}=await exchange('LAUNCH_QUERY',requested,'LAUNCH_RESULT');
+      const deadline=issued+authoritySourceWindowNs;
       const record=checkedLaunchResult(result,requested),admission=record?.admission_receipt;
       if(!record||record.state!=='admitted_closed'||record.creation_attempted!==true||record.gate_state!=='closed'||record.retirement_evidence!==null){
         workerVersions.set(fixed.launch_id,(workerVersions.get(fixed.launch_id)??0)+1);throw new SupervisorError('supervisor_worker_unavailable');
@@ -150,7 +153,8 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy}) 
         BigInt(admission.admitted_tick_ns)<=now();
       if(!valid){fail('supervisor_worker_binding');throw failed;}
       check(epoch===workerEpoch&&version===(workerVersions.get(fixed.launch_id)??0),'supervisor_worker_withdrawn');
-      const observed=freeze({key:requested,descriptor:structuredClone(descriptor),receipt:admission,confirmation_deadline_ns:String(deadline)});
+      const observed=freeze({key:requested,descriptor:structuredClone(descriptor),receipt:admission,source_window_policy:authoritySourceWindowPolicy,
+        issued_tick_ns:String(issued),confirmation_deadline_ns:String(deadline)});
       workerObservations.set(observed,{epoch,version,launch:fixed.launch_id,deadline});return observed;
     });
   }

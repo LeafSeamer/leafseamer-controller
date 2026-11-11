@@ -4,7 +4,7 @@ import {seal, ref} from '../dist/auth-clock-value.mjs';
 
 const epoch = 116444736000000000n, wall = 1700000000000000000n;
 const reference = () => ({id: crypto.randomUUID(), revision: '1', digest: 'sha256:' + 'a'.repeat(64)});
-export function fixture(scope, native = null) {
+export function fixture(scope, native = null, {sampleWindowPolicy=null}={}) {
   let now = 10000000000n, w = wall, generation = '0', broken = false;
   const source = {artifactDigest: 'sha256:' + 'b'.repeat(64), tick: () => now,
     capture() {
@@ -16,7 +16,8 @@ export function fixture(scope, native = null) {
   };
   const p = seal({id: crypto.randomUUID(), revision: '1', service_id: scope.service_id, runtime_profile_ref: reference(), native_artifact_ref: reference(),
     system_time_source_ref: reference(), environment_approval_ref: reference(), health_profile_ref: reference(), max_system_error_ns: native?'10000000':'1000',
-    wall_quantization_ns: '100', monotonic_quantization_ns: '10', drift_ppb: 1000000, capture_limit_ns: '20000000', sample_period_ns: '500000000', sample_ttl_ns: '2000000000'});
+    wall_quantization_ns: '100', monotonic_quantization_ns: '10', drift_ppb: 1000000, capture_limit_ns: '20000000', sample_period_ns: '500000000',
+    sample_ttl_ns:sampleWindowPolicy?'5000000000':'2000000000',...(sampleWindowPolicy?{sample_window_policy:sampleWindowPolicy}:{})});
   const activeSource=native?.source??source,descriptor=native?.descriptor;
   const capture=activeSource.capture(),deadline=native?String(activeSource.tick()+1000000000000n):'1000000000000';
   const r = seal({id: crypto.randomUUID(), revision: '1', ...scope, clock_domain_id: descriptor?.clock_domain_id??crypto.randomUUID(), descriptor_digest: descriptor?.descriptor_digest??'sha256:' + 'c'.repeat(64),

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import {initializeStorage, migrateStorage, openStorage} from '../dist/storage.mjs';
-import {seal, policy, captureInterval, extrapolate} from '../dist/auth-clock-value.mjs';
+import {seal, policy, captureInterval, extrapolate, acquisition} from '../dist/auth-clock-value.mjs';
 import {startAuthenticationClock} from '../dist/auth-clock.mjs';
 
 import {fixture} from './auth-clock-fixture.mjs';
@@ -21,6 +21,38 @@ function inspect(dir, fn) {
   try { return fn(db); } finally { db.close(); }
 }
 const counts = dir => inspect(dir, db => ['evidence', 'acquisition', 'head', 'fault'].map(name => db.prepare('SELECT count(*) FROM authentication_clock_' + name).pluck().get()));
+
+test('显式五秒认证策略从原采样计算，旧原件不延长，误差继续外推且到期拒绝',()=>{
+ const scope={service_id:crypto.randomUUID(),service_boot_id:crypto.randomUUID()},legacy=fixture(scope),fresh=fixture(scope,null,{sampleWindowPolicy:'authentication-clock-sample/2'});
+ const capture=legacy.source.capture(),old=acquisition(capture,legacy.evidence),next=acquisition(fresh.source.capture(),fresh.evidence);
+ assert.equal(BigInt(old.valid_before_tick_ns)-BigInt(old.b),2000000000n);
+ assert.equal(BigInt(next.valid_before_tick_ns)-BigInt(next.b),5000000000n);
+ assert.equal(capture.valid_before,old.valid_before_tick_ns);
+ assert.throws(()=>extrapolate(old,BigInt(old.b)+2000000000n),e=>e.code==='auth_clock_expired');
+ const view=extrapolate(next,BigInt(next.b)+3000000000n);
+ assert.equal(BigInt(view.lower_ns),wall-1122n+2997000000n);
+ assert.equal(BigInt(view.upper_ns),wall+1143n+3003000000n);
+ assert.throws(()=>extrapolate(next,BigInt(next.valid_before_tick_ns)),e=>e.code==='auth_clock_expired');
+ const {digest,...body}=fresh.evidence.policy;
+ for(const change of [{sample_ttl_ns:'2000000000'},{sample_window_policy:'unknown'},{sample_window_policy:null}])assert.throws(()=>policy(seal({...body,...change})));
+ const {sample_window_policy,...unmarked}=body;
+ assert.throws(()=>policy(seal(unmarked)));
+ assert.throws(()=>acquisition(fresh.source.capture(),fresh.evidence,old),e=>e.code==='auth_clock_transition');
+});
+
+test('五秒认证采集同库查原不续期，健康撤销和时钟跳变仍永久保护',async t=>{
+ for(const change of [f=>f.source.advance(5000000000n),f=>f.source.jump(1000000000n),f=>{f.evidence.health.state='unsynchronized';}]){
+  const dir=await directory(t),storage=openStorage(dir),f=fixture(storage.authenticationClock.scope,null,{sampleWindowPolicy:'authentication-clock-sample/2'});
+  const clock=startAuthenticationClock(f.source,storage.authenticationClock,f.provider,{schedule:false});
+  try{
+   const original=storage.authenticationClock.current(f.evidence.runtime.clock_domain_id);
+   f.source.advance(3000000000n);assert.equal(clock.current().acquisition_ref.id,original.id);
+   assert.equal(storage.authenticationClock.current(f.evidence.runtime.clock_domain_id).valid_before_tick_ns,original.valid_before_tick_ns);
+   change(f);assert.throws(()=>clock.current());assert.equal(clock.status().qualified,false);assert.equal(clock.status().durable,true);
+  }finally{clock.stop();storage.close();}
+  assert.deepEqual(counts(dir),[3,1,1,1]);
+ }
+});
 
 test('整数外包算法使用固定期望值，拒绝零误差、溢出和被篡改的policy', () => {
   const f = fixture({service_id: crypto.randomUUID(), service_boot_id: crypto.randomUUID()}), capture = f.source.capture();

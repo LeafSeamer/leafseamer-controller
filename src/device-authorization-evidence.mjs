@@ -1,3 +1,4 @@
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {IdentityError} from './identity-crypto.mjs';
@@ -9,11 +10,13 @@ const namedRef=v=>({id:v.evidence_id,revision:v.revision,digest:v.evidence_diges
 const freeze=v=>{if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Object.freeze(v);}return v;};
 const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v);
 const namedSeal=(v,key)=>({...v,[key]:digest(v)});
-function document(text,hash,key='digest'){
+const document=cacheVerifiedDocument((text,hash,key='digest')=>{
  const v=JSON.parse(text),{[key]:actual,...body}=v;need(canonicalize(v)===text&&actual===hash&&digest(body)===hash,'integrity');return v;
-}
+});
 function body(db,sql,...args){const row=db.prepare(sql).raw().get(...args);need(row,'source_missing');
- const v=JSON.parse(row[0]);need(canonicalize(v)===row[0]&&digest(v)===row[1],'source_integrity');return v;}
+ return memoExecutionRead(db,'device-evidence-source-document',row,()=>{
+  const v=JSON.parse(row[0]);need(canonicalize(v)===row[0]&&'sha256:'+crypto.createHash('sha256').update(row[0]).digest('hex')===row[1],'source_integrity');return v;
+ });}
 
 // 本机ordinary/manual设备资格的完整适用集合；不复用单条命令的授权使用或RunGrant。
 function revocationCut(db,service,selected,execution){

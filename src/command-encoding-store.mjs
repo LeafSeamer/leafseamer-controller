@@ -1,3 +1,5 @@
+import {sqliteRow} from './sqlite-rows.mjs';
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import crypto from 'node:crypto';
 import {canonical,digest,same} from './auth-clock-value.mjs';
 import {DeviceExecutionError,executionWire} from './device-execution-channel.mjs';
@@ -8,9 +10,9 @@ import {readInitialReady} from './device-initial-ready.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError('execution_encoding_'+code);};
 const ref=(id,value)=>({id,revision:'1',digest:digest(value)});
 const hash=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
-const parse=(text,expected)=>{const v=JSON.parse(text);need(canonical(v)===text&&digest(v)===expected,'integrity');return v;};
+const parse=cacheVerifiedDocument((text,expected)=>{const v=JSON.parse(text);need(canonical(v)===text&&digest(v)===expected,'integrity');return v;});
 const written=result=>need(result.changes===1,'storage');
-function row(db,sql,...args){const q=db.prepare(sql),names=q.columns().map(v=>v.name),r=q.raw().get(...args);return r&&Object.fromEntries(names.map((n,i)=>[n,r[i]]));}
+const row=sqliteRow;
 const reservation=(prepare,command)=>({format:'command-encoding-reservation/1',prepare_id:prepare,command_id:command,
  profile:{id:'leafseamer.simulator.encoding.limits.1',max_entries:256,max_bytes:2048},slots:1,max_bytes:8,state:'reserved'});
 function authority(actual,prepare,attempt){

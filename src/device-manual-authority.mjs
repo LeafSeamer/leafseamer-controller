@@ -1,3 +1,4 @@
+import {authoritySourceWindowPolicy,authoritySourceWindowNs,sourceWindowNs,sourceWindowContains} from './authority-source-window.mjs';
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {checked,seal,ref,same,digest} from './auth-clock-value.mjs';
@@ -8,6 +9,7 @@ import {selectAuthenticationWindow,currentAuthenticationWindow} from './authenti
 import {collectAuthorizationDependencies,currentAuthorizationDependencies} from './authorization-dependencies.mjs';
 import {selectedDeviceEvidenceDeadline} from './device-authorization-evidence.mjs';
 import {currentControlReference} from './device-initial-ready.mjs';
+import {memoExecutionRead} from './execution-read-view.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('manual_authority_'+code);};
 const freeze=v=>{if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Object.freeze(v);}return v;};
 const maximum=99999999999999999999n;
@@ -29,6 +31,9 @@ export function manualExecutionAuthority({db,service,writer,authorizeToken,curre
   return {control,policy,execution,binding,now,holder};
  }
  function original(reference){
+  return memoExecutionRead(db,'manual-authority-original',reference,()=>readOriginal(reference));
+ }
+ function readOriginal(reference){
   need(reference&&typeof reference.id==='string'&&reference.revision==='1','reference');
   const row=db.prepare(`SELECT s.body_jcs,s.body_digest,c.body_digest,c.audit_jcs,c.notification_jcs,
    s.device_id,s.binding_id,s.control_source_id,s.token_id,s.policy_id,s.acquisition_id,s.selected_tick,s.expires_tick FROM execution_manual_authority s
@@ -41,6 +46,9 @@ export function manualExecutionAuthority({db,service,writer,authorizeToken,curre
    value.selected_tick_ns.padStart(20,'0')===row[11]&&value.expires_tick_ns.padStart(20,'0')===row[12],'integrity');return value;
  }
  function challenge(reference){
+  return memoExecutionRead(db,'manual-challenge-original',reference,()=>readChallenge(reference));
+ }
+ function readChallenge(reference){
   need(reference&&reference.revision==='1','challenge_reference');
   const row=db.prepare(`SELECT c.body_jcs,c.body_digest,c.token_id,c.device_id,c.binding_id,c.control_source_id,c.core_source_id,k.audit_jcs,c.request_id
    FROM manual_execution_challenge c JOIN manual_execution_challenge_commit k USING(challenge_id) WHERE c.challenge_id=?`).raw().get(reference.id);
@@ -55,6 +63,7 @@ export function manualExecutionAuthority({db,service,writer,authorizeToken,curre
   need(same(v.binding,actual.binding)&&same(v.binding_ref,actual.execution.ref)&&currentControlReference(db,actual.control.current,v.control_state_ref)&&
    same(v.control_authority_ref,actual.control.authority.ref)&&same(v.holder,actual.holder)&&same(v.policy_ref,ref(actual.policy))&&
    v.session_id===proof.session_id&&v.credential_id===proof.credential_id&&v.authorization_digest===proof.authorization_digest,'challenge_binding');
+  need(sourceWindowContains(v,v.issued_tick_ns,v.expires_tick_ns),'challenge_window');
   need(BigInt(v.issued_tick_ns)<=BigInt(actual.now.tick)&&BigInt(actual.now.tick)<BigInt(v.expires_tick_ns),'challenge_expired');
   const runtime=coreSource.currentCoreSource(v.core_runtime_source_ref);need(same(runtime.value.domain_ref,actual.now.ref),'challenge_domain');return runtime;
  }
@@ -65,6 +74,7 @@ export function manualExecutionAuthority({db,service,writer,authorizeToken,curre
   need(same(actual.execution.ref,value.binding_ref)&&same(actual.control.authority.ref,value.control_authority_ref)&&
    currentControlReference(db,actual.control.current,value.control_state_ref)&&same(ref(actual.policy),value.policy_ref)&&same(actual.binding,value.binding)&&
    proof.authorization_digest===value.authorization.digest&&proof.session_id===value.session_id&&proof.credential_id===value.credential_id,'changed');
+  need(sourceWindowContains(value,value.selected_tick_ns,value.expires_tick_ns),'window');
   need(BigInt(value.selected_tick_ns)<=tick&&tick<BigInt(value.expires_tick_ns),'expired');
   const runtime=Number(service.schema_revision)>=35?coreSource.currentCoreSource(value.core_runtime_source_ref):null;
   let ch=null;
@@ -77,7 +87,7 @@ export function manualExecutionAuthority({db,service,writer,authorizeToken,curre
   }
   if(Number(service.schema_revision)>=38){
    need(value.authentication_window&&value.expires_tick_ns===value.authentication_window.before_tick_ns,'window');
-   const cap=[BigInt(value.selected_tick_ns)+2000000000n,BigInt(runtime.value.expires_tick_ns),...(ch?[BigInt(ch.expires_tick_ns)]:[])].reduce((a,b)=>a<b?a:b);
+   const cap=[BigInt(value.selected_tick_ns)+sourceWindowNs(value),BigInt(runtime.value.expires_tick_ns),...(ch?[BigInt(ch.expires_tick_ns)]:[])].reduce((a,b)=>a<b?a:b);
    currentAuthenticationWindow({db,service,coreRuntime:runtime,domain:actual.now.ref,acquisitionRef:value.authentication_acquisition_ref,selectedTick:value.selected_tick_ns,
     validFrom:[proof.session_not_before_ns,value.authorization.not_before_ns].reduce((a,b)=>BigInt(a)>BigInt(b)?a:b),validBefore:proof.expires_ns,capTick:String(cap)},value.authentication_window,actual.now.tick);
   }if(Number(service.schema_revision)>=39)currentAuthorizationDependencies(db,service,'manual',value);return value;
@@ -90,9 +100,9 @@ export function manualExecutionAuthority({db,service,writer,authorizeToken,curre
     const prior=db.prepare('SELECT challenge_id,body_digest FROM manual_execution_challenge WHERE token_id=? AND request_id=?').raw().get(input.token_id,requestId);
     if(prior){const v=challenge({id:prior[0],revision:'1',digest:prior[1]});need(v.binding.device_id===device,'challenge_conflict');checkChallenge(v,actual,proof);return v;}
     need(db.prepare('SELECT count(*) FROM manual_execution_challenge').pluck().get()<4096,'challenge_capacity');
-    const runtime=coreSource.selectCoreSource(),expires=[BigInt(actual.now.tick)+2000000000n,BigInt(runtime.value.expires_tick_ns)].reduce((a,b)=>a<b?a:b);
+    const runtime=coreSource.selectCoreSource(),expires=[BigInt(actual.now.tick)+authoritySourceWindowNs,BigInt(runtime.value.expires_tick_ns)].reduce((a,b)=>a<b?a:b);
     need(BigInt(actual.now.tick)<expires&&expires<=maximum,'clock');
-    const v=seal({format:'manual-execution-challenge/1',id:crypto.randomUUID(),revision:'1',request_id:requestId,nonce:crypto.randomBytes(32).toString('base64url'),
+    const v=seal({format:'manual-execution-challenge/1',source_window_policy:authoritySourceWindowPolicy,id:crypto.randomUUID(),revision:'1',request_id:requestId,nonce:crypto.randomBytes(32).toString('base64url'),
      binding:actual.binding,binding_ref:actual.execution.ref,control_state_ref:actual.control.current.ref,control_authority_ref:actual.control.authority.ref,
      holder:actual.holder,token_id:input.token_id,session_id:proof.session_id,credential_id:proof.credential_id,authorization_digest:proof.authorization_digest,
      policy_ref:ref(actual.policy),core_runtime_source_ref:runtime.ref,issued_tick_ns:actual.now.tick,expires_tick_ns:String(expires)});
@@ -114,8 +124,8 @@ export function manualExecutionAuthority({db,service,writer,authorizeToken,curre
    if(ch){const old=db.prepare('SELECT source_id,request_digest FROM manual_execution_challenge_response WHERE challenge_id=?').raw().get(ch.id);
     if(old){need(old[1]===digest(response),'challenge_conflict');const saved=db.prepare('SELECT body_digest FROM execution_manual_authority WHERE source_id=?').pluck().get(old[0]);
      need(saved,'challenge_integrity');const reference={id:old[0],revision:'1',digest:saved},value=currentInside(reference);return value.denied?value:{ref:reference,value};}}
-   const expires=[selected+2000000000n,...(coreRuntime?[BigInt(coreRuntime.value.expires_tick_ns)]:[]),...(ch?[BigInt(ch.expires_tick_ns)]:[])].reduce((a,b)=>a<b?a:b);
-   need(selected+2000000000n<=maximum,'clock');
+   const expires=[selected+authoritySourceWindowNs,...(coreRuntime?[BigInt(coreRuntime.value.expires_tick_ns)]:[]),...(ch?[BigInt(ch.expires_tick_ns)]:[])].reduce((a,b)=>a<b?a:b);
+   need(selected+authoritySourceWindowNs<=maximum,'clock');
    need(db.prepare('SELECT count(*) FROM execution_manual_authority').pluck().get()<4096,'capacity');
    const row=db.prepare('SELECT authorization_body,authorization_digest FROM access_token WHERE token_id=?').raw().get(input.token_id);
    need(row,'token');const authorization=checked(JSON.parse(row[0].toString()));
@@ -137,7 +147,7 @@ export function manualExecutionAuthority({db,service,writer,authorizeToken,curre
    const base={format:'manual-execution-authority-source/1',id:crypto.randomUUID(),revision:'1',binding:actual.binding,binding_ref:actual.execution.ref,
     control_state_ref:actual.control.current.ref,control_authority_ref:actual.control.authority.ref,holder:actual.holder,policy_ref:ref(actual.policy),
     token_id:input.token_id,session_id:proof.session_id,credential_id:proof.credential_id,authorization,authentication_acquisition_ref:proof.acquisition_ref,
-    selected_tick_ns:String(selected),expires_tick_ns:window?.before_tick_ns??String(expires),...(window?{authentication_window:window}:{}),...(authorizationState?{authorization_state_ref:authorizationState.ref}:{}),
+    source_window_policy:authoritySourceWindowPolicy,selected_tick_ns:String(selected),expires_tick_ns:window?.before_tick_ns??String(expires),...(window?{authentication_window:window}:{}),...(authorizationState?{authorization_state_ref:authorizationState.ref}:{}),
     ...(coreRuntime?{core_runtime_source_ref:coreRuntime.ref}:{}),...(ch?{challenge_ref:ref(ch),challenge_response_id:response.request_id,challenge_response_digest:digest(response)}:{})};
    const value=seal({...base,...(Number(service.schema_revision)>=39?{authorization_dependencies:collectAuthorizationDependencies(db,service,'manual',base)}:{})}),reference=ref(value),audit=canonicalize({kind:'manual_execution_source',source_ref:reference});
    if(ch)need(db.prepare('INSERT INTO manual_execution_challenge_response VALUES(?,?,?,?)').run(ch.id,value.id,response.request_id,digest(response)).changes===1,'challenge_storage');

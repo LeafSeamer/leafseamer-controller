@@ -80,6 +80,23 @@ async function checkCommand(stage,changes={}){
  try{await manager.sessions.submitCommand(commandToken,{...commandRequest,...changes,idempotency_key:crypto.randomUUID()});report({event:'command-source',stage,code:'unexpected_success'});}
  catch(error){report({event:'command-source',stage,code:error.code,message:error.message});}
 }
+async function releaseAfterCommands(device){
+ const token=manager.token(['control.read','control.release','request.create']),{contractSelection:selection}=await import('../../dist/sdk/index.mjs');
+ manager.real.refresh();const context=manager.sessions.createRequestContext(token,{audience:business.identity.service_id,operations:['releaseControl'],selection,ttl_ms:60000,max_unique_requests:8});
+ const before=manager.sessions.getControl(token,device),request={context_id:context.context_id,idempotency_key:crypto.randomUUID(),expected_control:{epoch:before.control_epoch,version:before.effective_version},reason:'完成命令后的控制释放'};
+ let accepted;try{accepted=await manager.sessions.changeControl(token,'releaseControl',{device_id:device},request);}catch(error){
+  if(!input.mode.endsWith('_control_queued_cut_omit'))throw error;
+  const after=manager.sessions.getControl(token,device);report({event:'command-control-rollback',code:error.code,before,after});
+  if(error.code!=='control_command_cut_storage'||canonicalize(before)!==canonicalize(after))throw error;
+  return;
+ }
+ if(input.mode.endsWith('_control_queued_cut_omit'))throw new Error('control_cut_omission_accepted');let operation;
+ const until=performance.now()+8000;
+ do{operation=manager.sessions.getControlOperation(token,accepted.receipt.initial_result_ref.id);if(operation.state!=='pending')break;if(performance.now()>=until)throw new Error('command_control_wait');await delay(20);}while(true);
+ const replay=await manager.sessions.changeControl(token,'releaseControl',{device_id:device},request);
+ report({event:'command-control-released',before,accepted,operation,replay,control:manager.sessions.getControl(token,device)});
+ if(operation.state!=='effective')throw Object.assign(new Error('command_control_not_effective'),{code:'command_control_not_effective'});
+}
 async function runSuccessor(device){
  const missing=await commandHttp('GET','/api/v1/commands/00000000-0000-4000-8000-000000000001');if(missing.status!==404)throw new Error('successor_http_connection');
  const baseline=await moduleClient.captureBaseline(device);manager.real.refresh();
@@ -114,6 +131,7 @@ const assignment=await boot.assignment(),receipt=await boot.proveAndReceive(assi
 const policy=JSON.parse(options['--bootstrap-policy']),input=JSON.parse(fs.readFileSync(options['--fixture']));
 const controlFlow=input.mode==='supervisor_create_module_writable'||input.mode.includes('_control_fence_')||(input.mode.includes('_manual_authority_')||input.mode.includes('_manual_challenge_')||input.mode.includes('_evidence_'))||(input.mode.includes('_evaluator_')||(input.mode.includes('_recovery_')||input.mode.includes('_consumption_')||input.mode.includes('_evidence_')));
 const source=await connectCoreSupervisor({pipe:options['--supervisor-pipe'],channelId:options['--supervisor-channel'],policy,binding:{descriptor:assignment.clock_domain_descriptor,receipt}});
+async function waitPastSource(deadline){while(clock.tick()<=BigInt(deadline))await delay(Math.max(1,Number((BigInt(deadline)-clock.tick())/1000000n)+25));}
 const clock=openNativeClock(),hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 const ref=kind=>({kind,authority_service_id:policy.service_id,database_instance_id:policy.database_instance_id,object_id:kind,revision:'1',digest:hash(kind)});
 const intent={launch_id:'worker.launch',service_id:policy.service_id,supervisor_instance_id:source.scope.supervisor_instance_id,
@@ -144,7 +162,7 @@ if(input.runtime){
    const response=await queryIntake(request);if(response.result?.status!=='available'||canonicalize(response.result.receipt)!==canonicalize(content.receipt))throw new Error('fixture_intake_unavailable');
    return {status:'available',content};}});
  business.workerLaunches.runtime.bindSource(source);business.extensionInstallations.bindRuntimeSource(source);business.workerLaunches.authorization.bindSource(source);
- manager=await authenticated({after(){}},{store:business},{native:{source:clock,descriptor:assignment.clock_domain_descriptor}});
+ manager=await authenticated({after(){}},{store:business},{native:{source:clock,descriptor:assignment.clock_domain_descriptor},sampleWindowPolicy:'authentication-clock-sample/2'});
  if(input.command_tls)await startCommandHttp(input.command_tls);
  if(input.mode==='supervisor_create_module_writable'||(input.mode.includes('_evaluator_')||(input.mode.includes('_recovery_')||input.mode.includes('_consumption_')||input.mode.includes('_evidence_')))){
   const objectRef=value=>({id:value.id,revision:value.revision,digest:value.digest}),now=manager.real.current();
@@ -173,7 +191,7 @@ if(input.runtime){
   report({event:'evaluator-policy',policy:evaluatorPolicy});
  }
  if(controlFlow){
-  const permissions=['control.read','control.acquire','device.command','device.recover','command.read','command.evidence.read','command.cancel','request.create'];
+  const permissions=['control.read','control.acquire','device.command','device.recover','command.read','command.evidence.read','command.cancel','request.create',...(input.mode.endsWith('_successor_control')||input.mode.includes('_control_queued')||input.mode.endsWith('_control_unresolved')?['control.release']:[])];
   const before=manager.sessions.localPermissions(manager.auth);manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id:manager.logged.session.principal_id,expected_revision:before.revision,permissions:[...new Set([...before.permissions,...permissions])]});
   commandToken=manager.token(permissions);const device=intent.object_scope.device_ids[0],{contractSelection:selection}=await import('../../dist/sdk/index.mjs');
   const context=manager.sessions.createRequestContext(commandToken,{audience:business.identity.service_id,operations:['acquireControl','submitCommand'],selection,ttl_ms:60000,max_unique_requests:8});
@@ -196,6 +214,9 @@ if(input.runtime){
   catch(error){report({event:'plan-invalidated',code:error.code});}
  }
  const registered=await business.workerLaunches.authorization.register(key);report({event:'registered',key,record:registered});
+ // 服务端在启动准备完成后显式交接物化通道，不消耗连接握手窗口。
+ const coordinatorDeadline=performance.now()+10000;
+ while(!fs.existsSync(options['--fixture']+'.coordinator-ready')){if(performance.now()>=coordinatorDeadline)throw new Error('fixture_coordinator_ready_timeout');await delay(20);}
 }
 try{
  if(input.materials){
@@ -289,20 +310,29 @@ try{
               if(input.mode.includes('_open_dispatch')){
                 report({event:'initial-open',value:initialOpening});
                 if(input.mode.includes('_dispatch_ready'))report({event:'ready-window',stage:'before-open',remaining_ms:Number((BigInt(initialOpening.value.plan.expires_tick_ns)-clock.tick())/1000000n)});
-                if(input.mode.endsWith('_expired')&&!input.mode.includes('_dispatch_ready')){await delay(2100);report({event:'open-expiry-boundary',tick:String(clock.tick()),expires:initialOpening.value.plan.expires_tick_ns});}
+                if(input.mode.endsWith('_expired')&&!input.mode.includes('_dispatch_ready')){await waitPastSource(initialOpening.value.plan.expires_tick_ns);report({event:'open-expiry-boundary',tick:String(clock.tick()),expires:initialOpening.value.plan.expires_tick_ns});}
                 const result=await executionClient.initialOpen(initialOpening.ref,{ready:input.mode.includes('_dispatch_ready')&&!input.mode.endsWith('_expired')});report({event:'open-confirmed',result,state:executionClient.state});
                 if(input.mode.includes('_dispatch_ready')){
                   report({event:'ready-window',stage:'after-open',remaining_ms:Number((BigInt(initialOpening.value.plan.expires_tick_ns)-clock.tick())/1000000n)});
-                  if(input.mode.endsWith('_expired'))await delay(2100);
+                  if(input.mode.endsWith('_expired'))await waitPastSource(initialOpening.value.plan.expires_tick_ns);
                   const ready=result.ready??executionClient.initialReady(initialOpening.ref.id);
                   report({event:'initial-ready',value:ready,
                     control:manager.sessions.getControl(commandToken,device)});
                   if(!input.mode.endsWith('_stale')){
-                    const request={...commandRequest,...((input.mode.endsWith('_closure_late')||input.mode.endsWith('_cleanup_late'))?{evidence_timeout_ms:1}:{}),idempotency_key:crypto.randomUUID(),dispatch:{mode:'immediate',max_queue_ms:input.mode.endsWith('_queue_deadline')?300:10000}};
+                    const request={...commandRequest,...((input.mode.endsWith('_closure_late')||input.mode.endsWith('_cleanup_late')||input.mode.endsWith('_control_unresolved'))?{evidence_timeout_ms:1}:{}),idempotency_key:crypto.randomUUID(),dispatch:{mode:'immediate',max_queue_ms:input.mode.endsWith('_queue_deadline')?300:10000}};
                     let accepted,replayed,current,http_statuses,guardProof=null,preparedProof=null;
+                    if(input.mode.includes('_control_queued')){
+                      accepted=await manager.sessions.submitCommand(commandToken,request,{withStatus:true});
+                      await releaseAfterCommands(device);
+                      report({event:'control-queued-command',accepted,current:manager.sessions.getCommand(commandToken,accepted.adjudication.command_ref.object_id)});
+                      if(input.mode.endsWith('_control_queued_cut_omit'))executionClient.close();
+                      break moduleWork;
+                    }
                     if(commandHttp){
                       const first=await commandHttp('POST','/api/v1/commands',request);
                       if(first.status!==202)throw Object.assign(new Error('command_http_admission'),{code:'command_http_admission',cause:first.body});
+                      if(input.mode.includes('_cleanup_successor_control'))for(const [stage,method]of [['encoded','whenCommandEncoded'],['finalized','whenCommandFinalized']])
+                        business.workerLaunches[method](first.body.command_ref.object_id).then(()=>report({event:'ready-window',stage,remaining_ms:Number((BigInt(initialOpening.value.plan.expires_tick_ns)-clock.tick())/1000000n)}),()=>{});
                       if(input.mode.includes('_t2_guard'))business.workerLaunches.whenCommandGuarded(first.body.command_ref.object_id).catch(error=>report({event:'guard-task-failed',code:error.code,message:error.message}));
                       // Guard正例先等待已受理的真实执行任务，再进行历史HTTP查询；避免查询负载消耗原短窗口。
                       if(input.mode.includes('_t2_guard')&&(!input.mode.endsWith('_omit')||input.mode.includes('_guard_dispatch'))){
@@ -351,7 +381,7 @@ try{
                         const committed=await business.workerLaunches.whenCommandFinalized(accepted.adjudication.command_ref.object_id);
                         report({event:'command-final-admission',record:committed.saved.record,value:committed.saved.lifecycle.final_admission.value,
                           observation:committed.observation,replay:committed.replay});
-                        if(!input.mode.endsWith('_cleanup_successor'))report({event:'command-prepared-current',value:preparedProof??executionClient.currentPreparedCommand(committed.saved.source.command_id)});
+                        if(!input.mode.includes('_cleanup_successor')&&!input.mode.endsWith('_control_unresolved'))report({event:'command-prepared-current',value:preparedProof??executionClient.currentPreparedCommand(committed.saved.source.command_id)});
                         if(input.mode.includes('_t2_guard')){
                           if(guardProof)report(guardProof);
                           else await business.workerLaunches.whenCommandGuarded(committed.saved.source.command_id);
@@ -359,7 +389,7 @@ try{
                       }
                     }
                     if(input.mode.endsWith('_execution_closed'))executionClient.close();
-                    await delay(2100);
+                    await waitPastSource(initialOpening.value.plan.expires_tick_ns);
                     const code=async action=>{try{await action();return 'unexpected_success';}catch(error){return error.code;}};
                     const readOnly=manager.token(['control.read']);
                     const terminalHttp=commandHttp?await commandHttp('GET','/api/v1/commands/'+accepted.adjudication.command_ref.object_id):null;
@@ -381,7 +411,8 @@ try{
                   }
                   if(input.mode.endsWith('_stale')){await moduleClient.captureBaseline(device);await checkCommand('ready-stale');executionClient.currentReady(ready.ref);report({event:'ready-stale',code:'unexpected_success'});}
                   else{await checkCommand('ready-expired');report({event:'ready-expired',state:executionClient.state,control:manager.sessions.getControl(commandToken,device)});}
-                  if(input.mode.endsWith('_cleanup_successor'))await runSuccessor(device);
+                  if(input.mode.includes('_cleanup_successor'))await runSuccessor(device);
+                  if(input.mode.endsWith('_successor_control')||input.mode.endsWith('_control_unresolved'))await releaseAfterCommands(device);
                   break moduleWork;
                 }
                 if(input.mode.endsWith('_stale')){await moduleClient.captureBaseline(device);await executionClient.initialOpen(initialOpening.ref);report({event:'open-stale',code:'unexpected_success'});}
@@ -454,7 +485,7 @@ try{
           report({event:'authorization-context-selected',value:manager.sessions.currentManualAuthorizationContext({device_id:device,manual_source_ref:afterConsumption.ref,evaluator_source_ref:refreshedEvaluator.ref})});
 
         }
-        await delay(2100);
+        await waitPastSource([manualSource.value.expires_tick_ns,coreObservation.expires_tick_ns,evaluatorSource?.value.expires_tick_ns??'0'].map(BigInt).reduce((a,b)=>a>b?a:b));
         if(initialResource){
           try{manager.sessions.currentInitialDeviceResources(initialResource.ref);report({event:'initial-resource-expired',code:'unexpected_success'});}catch(error){report({event:'initial-resource-expired',code:error.code});}
           report({event:'initial-resource-history',value:manager.sessions.lookupInitialDeviceResources(initialResource.ref),replayed:manager.sessions.selectInitialDeviceResources(initialResourceRequest)});

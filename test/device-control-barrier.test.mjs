@@ -66,3 +66,12 @@ test('屏障核验重新检查完整启动集合和当前域',async t=>{
  f.domain.ref={...f.domain.ref,clock_domain_id:'changed'};
  assert.throws(()=>f.db.transaction(()=>f.barrier.verify(f.operation,evidence))(),/control_barrier_changed/);
 });
+
+test('升级后的旧pending没有受理切点时保持未决，不补造切点或复用旧boot退出作为完整证明',async t=>{
+ const f=fixture(t),before=f.db.prepare('SELECT * FROM control_operation_revision').raw().all();
+ f.db.exec('CREATE TABLE control_command_cut(operation_id,device_id,commit_id,body_jcs,body_digest); PRAGMA user_version=58;');
+ await assert.rejects(f.barrier.protect(f.operation),/control_command_cut_missing/);
+ assert.deepEqual(f.db.prepare('SELECT * FROM control_operation_revision').raw().all(),before);
+ assert.equal(f.db.prepare('SELECT count(*) FROM control_command_cut').pluck().get(),0);
+ assert.equal(f.db.prepare('SELECT count(*) FROM control_barrier_evidence').pluck().get(),1);
+});

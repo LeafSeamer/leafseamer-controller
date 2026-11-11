@@ -31,12 +31,15 @@ export function checked(value) {
 export function policy(value) {
   fields(value, ['id', 'revision', 'digest', 'service_id', 'runtime_profile_ref', 'native_artifact_ref', 'system_time_source_ref',
     'environment_approval_ref', 'max_system_error_ns', 'wall_quantization_ns', 'monotonic_quantization_ns', 'drift_ppb',
-    'capture_limit_ns', 'sample_period_ns', 'sample_ttl_ns', 'health_profile_ref']);
+    'capture_limit_ns', 'sample_period_ns', 'sample_ttl_ns', 'health_profile_ref', ...(Object.hasOwn(value,'sample_window_policy')?['sample_window_policy']:[])]);
   checked(value); need(uuid(value.service_id), 'auth_clock_service');
   for (const key of ['runtime_profile_ref', 'native_artifact_ref', 'system_time_source_ref', 'environment_approval_ref', 'health_profile_ref']) reference(value[key]);
   for (const key of ['max_system_error_ns', 'wall_quantization_ns', 'monotonic_quantization_ns']) need(clockInteger(value[key]) > 0n, 'auth_clock_error_bound');
   need(Number.isSafeInteger(value.drift_ppb) && value.drift_ppb >= 0 && value.drift_ppb <= 1000000, 'auth_clock_drift');
-  need(value.capture_limit_ns === '20000000' && value.sample_period_ns === '500000000' && value.sample_ttl_ns === '2000000000', 'auth_clock_profile');
+  const extended=Object.hasOwn(value,'sample_window_policy');
+  need(!extended||value.sample_window_policy==='authentication-clock-sample/2','auth_clock_profile');
+  need(value.capture_limit_ns === '20000000' && value.sample_period_ns === '500000000' &&
+    value.sample_ttl_ns === (extended?'5000000000':'2000000000'), 'auth_clock_profile');
   return value;
 }
 
@@ -95,6 +98,7 @@ export function acquisition(capture, evidence, previous = null, id = crypto.rand
     max_system_error_ns: p.max_system_error_ns, wall_quantization_ns: p.wall_quantization_ns,
     monotonic_quantization_ns: p.monotonic_quantization_ns, drift_ppb: p.drift_ppb,
     lower_ns: bounds.lower_ns, upper_ns: bounds.upper_ns, effective_lower_ns: String(lower), effective_upper_ns: String(upper),
-    valid_before_tick_ns: capture.valid_before, sequence: String(bounded(previous ? clockInteger(previous.sequence) + 1n : 1n)),
+    // 原生归一化保留旧诊断期限；认证采集按明确批准的policy从原始b计算，不从提交时刻续期。
+    valid_before_tick_ns: String(bounded(clockInteger(capture.b)+clockInteger(p.sample_ttl_ns))), sequence: String(bounded(previous ? clockInteger(previous.sequence) + 1n : 1n)),
     parent_ref: previous ? ref(previous) : null});
 }

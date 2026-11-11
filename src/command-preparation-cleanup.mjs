@@ -1,3 +1,4 @@
+import {sqliteRow} from './sqlite-rows.mjs';
 import crypto from 'node:crypto';
 import {canonical,digest,same} from './auth-clock-value.mjs';
 import {DeviceExecutionError,executionWire} from './device-execution-channel.mjs';
@@ -15,7 +16,7 @@ const parse=(text,hash)=>{const value=JSON.parse(text);need(canonical(value)===t
 const written=result=>need(result.changes===1,'storage');
 const phases=['deny_request','deny_ack','release_request','release_ack'];
 const types={deny_request:'DENY_ENCODING',deny_ack:'DENY_ENCODING_ACK',release_request:'RELEASE_ENCODING',release_ack:'RELEASE_ENCODING_ACK'};
-function row(db,sql,...args){const q=db.prepare(sql),names=q.columns().map(v=>v.name),values=q.raw().get(...args);return values&&Object.fromEntries(names.map((n,i)=>[n,values[i]]));}
+const row=sqliteRow;
 function source(db,id){
  need(db.inTransaction,'writer');const command=db.prepare('SELECT command_id FROM command_settlement WHERE permit_id=?').pluck().get(id);need(command,'terminal_required');
  const saved=readCommandRecord(db,command),terminal=saved.lifecycle?.settlement,final=saved.lifecycle?.final_admission;
@@ -29,7 +30,7 @@ function retirement(selected,tick){return {format:'command-preparation-retiremen
  encoding_authorization_ref:selected.encoding.response.value.evidence.authorization_ref,
  selected_tick_ns:String(tick),reason:'command_finished'};}
 function current(db,id,binding,runtime){
- need([56,57].includes(Number(db.pragma('user_version',{simple:true}))),'version');const selected=source(db,id),b=selected.saved.source.binding,
+ need([56,57,58].includes(Number(db.pragma('user_version',{simple:true}))),'version');const selected=source(db,id),b=selected.saved.source.binding,
   actual=currentDeviceExecutionBinding(db,runtime,b.device_id,b.ipc_session_id);
  need(binding.ipc_session_id===b.ipc_session_id&&same(actual.ref,selected.saved.source.binding_ref)&&same(actual.value.binding,b)&&
   !db.prepare('SELECT 1 FROM execution_session_end WHERE ipc_session_id=?').pluck().get(b.ipc_session_id),'binding');return selected;

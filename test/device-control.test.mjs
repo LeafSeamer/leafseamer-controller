@@ -1,6 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import crypto from 'node:crypto';
 import {setup,inspect} from './fixtures/extension-installation.mjs';import {authenticated} from './fixtures/extension-auth.mjs';
-import {contractSelection as selection} from '../dist/sdk/index.mjs';
+import {contractSelection as selection,prepareControlChange} from '../dist/sdk/index.mjs';
+import {migrateStorage} from '../dist/storage.mjs';
 const permissions=['control.read','control.acquire','control.release','control.transfer','control.accept','control.emergency'];
 async function fixture(t,{fault=null}={}){const f=await setup(t,26),enroll=f.store.enrollment.begin();await f.store.enrollment.complete({token_id:enroll.token_id,secret:enroll.secret,login:'role.test',password:'Synthetic-role-password-123',mode:'standalone'});
  if(fault){f.close();inspect(f.dir,db=>db.exec(`CREATE TRIGGER control_fault BEFORE INSERT ON ${fault.table} BEGIN SELECT RAISE(${fault.mode==='IGNORE'?'IGNORE':"ABORT,'synthetic_control_failure'"}); END`));f.reopen();}
@@ -11,6 +12,8 @@ async function fixture(t,{fault=null}={}){const f=await setup(t,26),enroll=f.sto
 test('人员接管先持久预留版本，屏障缺失保持未决，同键重放不重复受理',async t=>{
  const f=await fixture(t),before=f.a.sessions.getControl(f.token,f.device),request={context_id:f.context.context_id,idempotency_key:'acquire',expected_control:{epoch:before.control_epoch,version:before.effective_version},reason:'测试接管'};
  const accepted=await f.a.sessions.changeControl(f.token,'acquireControl',{device_id:f.device},request);assert.equal(accepted.replay,false);
+ const prepared=await prepareControlChange({operation:'acquireControl',device_id:f.device,scope:before.scope,context:f.context,body:request});
+ assert.deepEqual(prepared.identity,accepted.receipt.identity);
  await new Promise(resolve=>setImmediate(resolve));const current=f.a.sessions.getControl(f.token,f.device);assert.equal(current.reserved_version,'1');assert.equal(current.effective_version,'0');assert.equal(current.holder,null);assert.equal(current.gate_state,'protected');assert.ok(current.pending_change);
  const op=f.a.sessions.getControlOperation(f.token,accepted.receipt.initial_result_ref.id);assert.equal(op.state,'indeterminate');
  const replay=await f.a.sessions.changeControl(f.token,'acquireControl',{device_id:f.device},{...request,force:false});assert.equal(replay.replay,true);assert.deepEqual(replay.receipt,accepted.receipt);
@@ -46,6 +49,27 @@ test('重启保留未决控制及预留版本，不自动恢复闸门或持有�
  await new Promise(resolve=>setImmediate(resolve));const original=f.a.sessions.getControl(f.token,f.device);f.close();
  const store=f.reopen(),a=await authenticated(t,{store});const token=a.token(['control.read']);
  assert.deepEqual(a.sessions.getControl(token,f.device),original);assert.equal(original.reserved_version,'1');assert.equal(original.effective_version,'0');assert.equal(original.gate_state,'protected');
+});
+
+test('旧未决控制连续升级57和58后重放保留原受理和预留版本，不补造历史命令切点',async t=>{
+ const f=await fixture(t),before=f.a.sessions.getControl(f.token,f.device);
+ const request={context_id:f.context.context_id,idempotency_key:'upgrade.pending',expected_control:{epoch:before.control_epoch,version:'0'},reason:'升级未决操作'};
+ const accepted=await f.a.sessions.changeControl(f.token,'acquireControl',{device_id:f.device},request);
+ await new Promise(resolve=>setImmediate(resolve));const original=f.a.sessions.getControl(f.token,f.device);f.close();
+ assert.equal((await migrateStorage(f.dir,57)).schema_revision,'57');
+ assert.equal((await migrateStorage(f.dir,58)).schema_revision,'58');
+ const store=f.reopen(),a=await authenticated(t,{store}),token=a.token(permissions);
+ const replay=await a.sessions.changeControl(token,'acquireControl',{device_id:f.device},request);
+ assert.equal(replay.replay,true);assert.deepEqual(replay.receipt,accepted.receipt);
+ await new Promise(resolve=>setImmediate(resolve));const current=a.sessions.getControl(token,f.device);
+ for(const field of ['control_epoch','reserved_version','effective_version','holder','gate_state','pending_change'])assert.deepEqual(current[field],original[field]);
+ assert.equal(a.sessions.getControlOperation(token,accepted.receipt.initial_result_ref.id).state,'indeterminate');
+ f.close();inspect(f.dir,db=>{
+  assert.equal(db.prepare('SELECT count(*) FROM control_command_cut').pluck().get(),0);
+  assert.equal(db.prepare('SELECT count(*) FROM control_request').pluck().get(),1);
+  assert.equal(db.prepare('SELECT count(*) FROM control_barrier_evidence').pluck().get(),0);
+  assert.deepEqual(db.pragma('foreign_key_check'),[]);
+ });
 });
 
 test('新手动命令核当前控制版本、持有人与未决状态，拒绝不占用命令或上下文预算',async t=>{

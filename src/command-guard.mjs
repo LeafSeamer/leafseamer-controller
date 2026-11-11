@@ -1,3 +1,5 @@
+import {sqliteRow} from './sqlite-rows.mjs';
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import {withExecutionReadView,memoExecutionRead} from './execution-read-view.mjs';
 import crypto from 'node:crypto';
 import {canonical,digest,same} from './auth-clock-value.mjs';
@@ -10,9 +12,9 @@ import {deviceExecutionVersion,assertDeviceExecutionFeatures} from './sdk/device
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError('command_guard_'+code);};
 const ref=(id,v)=>({id,revision:'1',digest:digest(v)});
 const hash=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
-const parse=(text,hash)=>{const v=JSON.parse(text);need(canonical(v)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===hash,'integrity');return v;};
+const parse=cacheVerifiedDocument((text,hash)=>{const v=JSON.parse(text);need(canonical(v)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===hash,'integrity');return v;});
 const written=result=>need(result.changes===1,'storage');
-function row(db,sql,...args){const q=db.prepare(sql),names=q.columns().map(v=>v.name),values=q.raw().get(...args);return values&&Object.fromEntries(names.map((n,i)=>[n,values[i]]));}
+const row=sqliteRow;
 const body=v=>({guard:v.guard,content_digest:v.permit.content_digest,schedule_guard:null,reference_context:null});
 function expectedAck(v){const g=v.guard;return {guard_id:g.guard_id,guard_digest:g.guard_digest,content_digest:v.permit.content_digest,
  permit_id:g.permit_id,command_id:g.command_id,installed_authorization_revision:g.authorization_revision,state:'installed',
@@ -71,7 +73,7 @@ function readGuard(db,id){
  return {...saved,ack:{value:acknowledgement,ref:ref(id+'.response',acknowledgement),reply}};
 }
 export function selectCommandGuard(db,{id,binding,provider,tick,features}){
- need(db.inTransaction&&[53,54,55,56,57].includes(Number(db.pragma('user_version',{simple:true}))),'writer');
+ need(db.inTransaction&&[53,54,55,56,57,58].includes(Number(db.pragma('user_version',{simple:true}))),'writer');
  const prior=db.prepare('SELECT g.guard_id FROM command_guard_request g JOIN command_final_admission f ON f.transaction_id=g.final_transaction_id WHERE f.command_id=?').pluck().get(id);
  if(prior)return {saved:readCommandGuard(db,prior)};
  const actual=currentPreparedCommand(db,{id,binding,provider,tick}),v=actual.final.value;

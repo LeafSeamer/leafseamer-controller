@@ -1,3 +1,5 @@
+import {sqliteRow} from './sqlite-rows.mjs';
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import crypto from 'node:crypto';
 import {withExecutionReadView,memoExecutionRead} from './execution-read-view.mjs';
 import {canonical,digest,same} from './auth-clock-value.mjs';
@@ -12,10 +14,10 @@ const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError('command_final_'+co
 const ref=(id,v)=>({id,revision:'1',digest:digest(v)});
 const signed=(v,key)=>({...v,[key]:digest(v)});
 const named=(v,id,key,revision='1')=>({id:v[id],revision,digest:v[key]});
-const parse=(text,hash)=>{const v=JSON.parse(text);need(canonical(v)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===hash,'integrity');return v;};
+const parse=cacheVerifiedDocument((text,hash)=>{const v=JSON.parse(text);need(canonical(v)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===hash,'integrity');return v;});
 const counter=v=>String(v).padStart(20,'0');
 const limits={format:'fixed-memory-transmission-budget/1',profile_id:'leafseamer.simulator.transmission.limits.1',max_transmissions:4096,max_bytes:32768,per_transmission:{attempts:1,transmissions:1,bytes:8}};
-function row(db,sql,...args){const q=db.prepare(sql),names=q.columns().map(v=>v.name),values=q.raw().get(...args);return values&&Object.fromEntries(names.map((n,i)=>[n,values[i]]));}
+const row=sqliteRow;
 function principal(db,encoding){
  const saved=row(db,'SELECT authorization_body,authorization_digest FROM access_token WHERE token_id=?',encoding.value.identity_snapshot.identity.token_id);
  need(saved,'authorization');const value=JSON.parse(saved.authorization_body.toString()),{digest:hash,...body}=value;
@@ -160,14 +162,14 @@ function commitFinalAdmission(db,{id,provider,tick,features}){
 export function readCommandFinalAdmission(db,initial,reference){return memoExecutionRead(db,'command-final-admission',reference,()=>readFinalAdmission(db,initial,reference));}
 function readFinalAdmission(db,initial,reference){
  need(db.inTransaction,'writer');const r=row(db,'SELECT * FROM command_final_admission WHERE command_id=?',initial.source.command_id);need(r,'missing');
- const value=parse(r.body_jcs,r.body_digest);need(same(ref(r.transaction_id,value),reference),'reference');
+ const value=parse(r.body_jcs,r.body_digest);need(same({id:r.transaction_id,revision:'1',digest:r.body_digest},reference),'reference');
  const encoding=readCommandEncoding(db,r.prepare_id),ready=readInitialReady(db,initial.source.ready_ref.id),grant=principal(db,encoding);
  const issue=row(db,'SELECT * FROM command_transmission_issue WHERE transaction_id=?',r.transaction_id),hold=row(db,'SELECT * FROM command_device_hold WHERE transaction_id=?',r.transaction_id),
   inventory=row(db,'SELECT * FROM command_attempt_inventory WHERE transaction_id=?',r.transaction_id);need(issue&&hold&&inventory,'write_set');
  const before=db.prepare('SELECT count(*) FROM command_transmission_issue WHERE issued_revision<?').pluck().get(issue.issued_revision),previous=db.prepare('SELECT max(issued_revision) FROM command_transmission_issue WHERE issued_revision<?').pluck().get(issue.issued_revision)??'0';
  const expected=materialize({initial,encoding,ready,grant,ids:value.ids,issue:String(BigInt(issue.issued_revision)),previous:String(BigInt(previous)),before,
   selected:value.seal.selected_tick_ns,sealed:value.seal.sealed_tick_ns});
- need(same(value,expected)&&r.transaction_id===value.ids.transaction&&r.commit_id===value.ids.commit&&r.command_id===value.command_id&&r.permit_id===value.ids.permit&&
+ need(r.body_jcs===canonical(expected)&&r.transaction_id===value.ids.transaction&&r.commit_id===value.ids.commit&&r.command_id===value.command_id&&r.permit_id===value.ids.permit&&
   r.hold_id===value.ids.hold&&r.attempt_id===value.attempt.attempt_id&&r.seal_id===value.ids.seal&&r.dispatch_intent_id===value.ids.intent&&r.binding_id===initial.source.binding_ref.id,'binding');
  need(encoding.response.value.disposition==='prepared'&&same(encoding.value.authorization.binding,initial.source.binding)&&
   encoding.value.command_id===initial.source.command_id&&issue.permit_id===r.permit_id&&issue.previous_revision===counter(previous)&&issue.charged_bytes===8&&
@@ -206,7 +208,7 @@ export function observeCommandFinalAdmission(db,{commandId,binding,tick,readOnly
 
 // T2之后的当前资格与封存历史分离。只能采用原占用、原许可和原窗口，不续期、不重新签发。
 export function currentPreparedCommand(db,{id,binding,provider,tick}){
- need(db.inTransaction&&[52,53,54,55,56,57].includes(Number(db.pragma('user_version',{simple:true}))),'prepared_writer');
+ need(db.inTransaction&&[52,53,54,55,56,57,58].includes(Number(db.pragma('user_version',{simple:true}))),'prepared_writer');
  return withExecutionReadView(db,()=>{
   const saved=readCommandRecord(db,id),final=saved.lifecycle?.final_admission;need(final,'prepared_source');
   const v=final.value,b=v.seal.binding;
@@ -220,6 +222,8 @@ export function currentPreparedCommand(db,{id,binding,provider,tick}){
    encoding.response?.value.disposition==='prepared'&&same(encoding.ref,v.encoding_ref)&&same(encoding.response.ref,v.encoding_response_ref),'prepared_changed');
   const now=tick();need(now>=BigInt(observation.observed_tick_ns)&&now>=BigInt(v.seal.sealed_tick_ns)&&
    now>=BigInt(actual.now.tick)&&now<BigInt(v.seal.send_window.before_tick_ns),'prepared_expired');
+  // 全部当前资格和原截止复核成功后，才合并该命令的周期监视；历史读取不经过这里。
+  provider.notePreparedQualification?.(saved.source.ready_ref,id);
   return {saved,final,encoding,observation,selected_tick_ns:String(now)};
  });
 }

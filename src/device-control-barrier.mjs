@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 import canonicalize from 'canonicalize';
 import {controlNeed as need,controlHash as hash,controlSame as same,controlFrozen as frozen} from './device-control-value.mjs';
+import {classifyControlCommands,readControlCommandCut} from './control-command-cut.mjs';
 
 // 当前产品只有受登记监督的模块出口；所有历史准备均进入切点，未知旧boot不作空集合。
 export function deviceControlBarrier({db,bootId,authorization,runtime,isOpen}){
@@ -12,9 +13,9 @@ export function deviceControlBarrier({db,bootId,authorization,runtime,isOpen}){
   need(isOpen()&&db.open,'unavailable');const row=db.prepare('SELECT r.body_jcs,r.body_digest FROM control_operation_revision r JOIN control_operation_head h USING(operation_id,revision) WHERE operation_id=?').raw().get(operation.operation_id);
   need(row&&hash(JSON.parse(row[0]))===row[1],'integrity');const current=JSON.parse(row[0]);
   need(['pending','indeterminate'].includes(current.state)&&current.device_id===operation.device_id&&same(current.target,operation.target),'conflict');
-  // 尚未接通命令执行的产品阶段，只能证明没有已接纳命令的出口集合。
-  // 后续接通派发必须提供命令切点与资源归类，不能复用本条空命令证明。
-  need(!db.prepare("SELECT 1 FROM ca_adjudication a JOIN ca_request_key k USING(key_id) WHERE k.device_id=? AND a.decision!='rejected'").pluck().get(operation.device_id),'command_barrier_required');
+  if(Number(db.pragma('user_version',{simple:true}))>=58){
+   const read=()=>readControlCommandCut(db,operation);if(db.inTransaction)read();else db.transaction(read)();
+  }else need(!db.prepare("SELECT 1 FROM ca_adjudication a JOIN ca_request_key k USING(key_id) WHERE k.device_id=? AND a.decision!='rejected'").pluck().get(operation.device_id),'command_barrier_required');
  }
  function historical(target){
   const rows=db.prepare('SELECT operation_id,body_jcs,body_digest FROM control_barrier_evidence ORDER BY operation_id').raw().all();
@@ -48,9 +49,10 @@ export function deviceControlBarrier({db,bootId,authorization,runtime,isOpen}){
     receipts.push(result);
    }
    pending(operation);need(same(authorization.domain().ref,domain.ref)&&same(targets(operation.operation_id),selected),'barrier_changed');
+   const commandSelection=Number(db.pragma('user_version',{simple:true}))>=58?db.transaction(()=>classifyControlCommands(db,operation))():null;
    const result=frozen({format:'leafseamer-control-exit-retirement/1',selection_id:crypto.randomUUID(),operation_id:operation.operation_id,
     device_id:operation.device_id,control_epoch:operation.expected_control.epoch,target_version:operation.target.version,service_boot_id:bootId,
-    domain_ref:domain.ref,targets:selected,receipts});issued.add(result);return result;
+    domain_ref:domain.ref,targets:selected,receipts,...(commandSelection?{command_selection:commandSelection}:{})});issued.add(result);return result;
   },
   verify(operation,evidence){
    need(db.inTransaction&&issued.has(evidence),'barrier_proof');pending(operation);
@@ -60,6 +62,7 @@ export function deviceControlBarrier({db,bootId,authorization,runtime,isOpen}){
    const actual=db.prepare('SELECT p.launch_id,p.intent_digest,p.service_boot_id FROM worker_launch_preparation p JOIN worker_launch_device d USING(launch_id) WHERE d.device_id=? ORDER BY p.launch_id').raw().all(operation.device_id)
     .map(([launch_id,launch_intent_digest,service_boot_id])=>({launch_id,launch_intent_digest,service_boot_id}));
    need(canonicalize(actual)===canonicalize(evidence.targets),'barrier_coverage');
+   if(Number(db.pragma('user_version',{simple:true}))>=58)need(same(evidence.command_selection,classifyControlCommands(db,operation)),'command_barrier_changed');
   }
  });
 }

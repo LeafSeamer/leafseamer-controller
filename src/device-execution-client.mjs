@@ -1,3 +1,4 @@
+import {executionQualificationWatch} from './execution-qualification-watch.mjs';
 import {executionSocket,executionTransport,DeviceExecutionError} from './device-execution-channel.mjs';
 
 // 核心内部装配。端点只取已采用成员boot，原生监督器核对两端实际PID。
@@ -6,7 +7,7 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
  let transport,closed=false,negotiation=null,resolveReady,rejectReady,timer,poll,pending=null,encoding=false,closeFailure=null,closeReason=null;const qualifications=new Map();
  const ready=new Promise((resolve,reject)=>{resolveReady=resolve;rejectReady=reject;});ready.catch(()=>{});
  function close(error=new DeviceExecutionError('execution_client_closed')){
-  if(closed)return;closed=true;closeReason=error.code??'execution_client_closed';clearTimeout(timer);clearInterval(poll);for(const q of qualifications.values())clearTimeout(q.timer);qualifications.clear();transport?.close(error);
+  if(closed)return;closed=true;closeReason=error.code??'execution_client_closed';clearTimeout(timer);clearInterval(poll);for(const q of qualifications.values())q.watch.stop();qualifications.clear();transport?.close(error);
   try{journal.end();}catch(error){closeFailure={code:error.code??'execution_close_failed',message:error.message};}
   try{invalidate();}catch{}rejectReady(error);try{onClose?.();}catch{}
   if(pending){clearTimeout(pending.timer);pending.reject(error);pending=null;}
@@ -17,9 +18,7 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
  function watchReady(selected){
   if(qualifications.has(selected.ref.id))return;
   const q={ref:selected.ref,device_id:selected.value.binding.device_id,command_id:null};
-  const inspect=()=>{try{if(q.command_id)journal.currentPreparedCommand(q.command_id);else journal.currentReady(q.ref.id);
-    if(!closed){q.timer=setTimeout(inspect,100);q.timer.unref();}}catch(error){close(error);}};
-  q.timer=setTimeout(inspect,100);q.timer.unref();
+  q.watch=executionQualificationWatch({inspect(){if(q.command_id)journal.currentPreparedCommand(q.command_id);else journal.currentReady(q.ref.id);},failed:close});
   qualifications.set(selected.ref.id,q);
  }
  try{
@@ -105,7 +104,7 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
     check();if(pending||encoding)throw new DeviceExecutionError('execution_control_busy');encoding=true;let call;
     try{const protectedReady=journal.protectCommandForSettlement(id),q=qualifications.get(protectedReady.ready_ref.id);
      id=protectedReady.permit_id;
-     if(q){clearTimeout(q.timer);qualifications.delete(protectedReady.ready_ref.id);}
+     if(q){q.watch.stop();qualifications.delete(protectedReady.ready_ref.id);}
      const selected=await journal.prepareCommandClosure(id);check();
      if(selected.replay){if(!selected.ack)throw new DeviceExecutionError('execution_closure_result_unknown');return {...journal.commandClosureHistory(id),settlement:journal.settleCommand(id)};}
      let resolve,reject;const response=new Promise((yes,no)=>{resolve=yes;reject=no;});response.catch(()=>{});
@@ -139,6 +138,16 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
     try{const result=journal.commandFinalAdmission(prepareId),q=qualifications.get(result.saved.source.ready_ref.id);
      if(!q)throw new DeviceExecutionError('execution_prepared_monitor');q.command_id=result.saved.source.command_id;return result;
     }catch(error){close(error);throw error;}
+   },
+   // 仅核心writer完成完整currentInitialReady后通知；只合并监视，不创建Ready或发送资格。
+   noteReadyQualification(reference){
+    const q=qualifications.get(reference.id);
+    if(!closed&&q&&q.command_id===null&&q.ref.digest===reference.digest&&q.ref.revision===reference.revision)q.watch.refresh();
+   },
+   // T2后的监视只能由完整Prepared复核刷新，不能借Ready局部成功延后。
+   notePreparedQualification(reference,id){
+    const q=qualifications.get(reference.id);
+    if(!closed&&q&&q.command_id===id&&q.ref.digest===reference.digest&&q.ref.revision===reference.revision)q.watch.refresh();
    },
    currentPreparedCommand(id){try{check();return journal.currentPreparedCommand(id);}catch(error){close(error);throw error;}},
    currentReady(reference){try{check();const selected=journal.currentReady(reference.id);

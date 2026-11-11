@@ -1,3 +1,4 @@
+import {sqliteRow} from './sqlite-rows.mjs';
 import crypto from 'node:crypto';
 import {canonical,digest,same} from './auth-clock-value.mjs';
 import {DeviceExecutionError,executionWire} from './device-execution-channel.mjs';
@@ -14,7 +15,7 @@ const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError('command_settlement
 const ref=(id,v)=>({id,revision:'1',digest:digest(v)});
 const parse=(text,hash)=>{const value=JSON.parse(text);need(canonical(value)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===hash,'integrity');return value;};
 const written=result=>need(result.changes===1,'storage');
-function row(db,sql,...args){const q=db.prepare(sql),names=q.columns().map(v=>v.name),values=q.raw().get(...args);return values&&Object.fromEntries(names.map((n,i)=>[n,values[i]]));}
+const row=sqliteRow;
 function source(db,id){
  const dispatch=readCommandDispatch(db,id),v=dispatch.final.value,initial=readOriginalRecord(db,v.command_id),ready=readInitialReady(db,initial.source.ready_ref.id);
  need(dispatch.write&&same(ready.value.binding,v.seal.binding),'source');

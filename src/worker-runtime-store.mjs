@@ -1,4 +1,5 @@
 import {sqliteRows} from './sqlite-rows.mjs';
+import {withExecutionReadView} from './execution-read-view.mjs';
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 
@@ -40,6 +41,9 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
   retire(entry.prepared.intent);
  }
  function checkInWriter(entry){
+  return withExecutionReadView(db,()=>checkCurrentInWriter(entry));
+ }
+ function checkCurrentInWriter(entry){
   need(db.inTransaction,'worker_runtime_writer');connected();need(!entry.stopped&&active.get(entry.prepared.intent.launch_id)===entry,'worker_runtime_withdrawn');
   source.assertWorkerObservation(entry.observation);
   core();const selected=extension.current(entry.prepared.intent);verifyDependencies?.(entry.prepared.intent,selected);

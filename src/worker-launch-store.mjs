@@ -62,7 +62,10 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     all(){return rows(db,'SELECT '+fields+' FROM worker_launch_preparation WHERE service_boot_id=? ORDER BY launch_id COLLATE BINARY',bootId).map(view);}}):null;
   const controlBarrier=Number(service.schema_revision)>=26?deviceControlBarrier({db,bootId,authorization,runtime,isOpen}):null;
   function openJournal(selected){
-    const journal=deviceExecutionJournal({db,core,isOpen,current:()=>runtime.current(selected),currentInTransaction:()=>runtime.currentInTransaction(selected),invalidate:()=>runtime.invalidate(selected),openingSource,encodingSource});
+    const journal=deviceExecutionJournal({db,core,isOpen,current:()=>runtime.current(selected),currentInTransaction:()=>runtime.currentInTransaction(selected),invalidate:()=>runtime.invalidate(selected),openingSource,encodingSource:()=>{
+      const provider=encodingSource?.();return provider&&{...provider,
+        notePreparedQualification(reference,id){executionClients.get(selected.launch_id)?.notePreparedQualification(reference,id);}};
+    }});
     journal.open();executionJournals.add(journal);return journal;
   }
   return Object.freeze({runtime,authorization,controlBarrier,
@@ -122,6 +125,7 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
         const selected=currentInitialReady(db,{binding:client.binding,runtime:active,id:readyId,provider:openingSource?.(),
           tick:()=>BigInt(controlBarrier.domain().tick),preparedRef});
         need(same(selected.value.binding,bound.value.binding),'command_execution_ready');
+        client.noteReadyQualification(selected.ref);
         ready={ref:selected.ref,value:selected.value,...(selected.prepared_resource?{prepared_resource:selected.prepared_resource}:{})};
       }
       return deepFreeze({...bound,negotiation:client.negotiation,channel_state:client.state,ready});

@@ -174,7 +174,7 @@ function readInitialRecord(db,id){
 export function pendingInitialCommands(db,ready,preparedRef=null,retiredIds=[]){
  need(db.inTransaction,'writer');const ids=db.prepare('SELECT command_id FROM ca_command_initial ORDER BY command_id').pluck().all().filter(id=>!retiredIds.includes(id));
  if(!ids.length)return [];
- need([49,50,51,52,53,54,55,56,57].includes(Number(db.pragma('user_version',{simple:true})))&&ready,'resource_successor_required');
+ need([49,50,51,52,53,54,55,56,57,58].includes(Number(db.pragma('user_version',{simple:true})))&&ready,'resource_successor_required');
  return ids.map(id=>{const saved=readCommandRecord(db,id);
   const final=saved.lifecycle?.final_admission;
   const prepared=preparedRef&&final&&same(final.ref,preparedRef)&&saved.record.state.resource_status==='held'&&saved.record.attempts.length===1;
@@ -207,9 +207,17 @@ function closureOutcome(db,initial,proof){
   same(proof.initial_command_ref,s.initial_ref)&&same(proof.previous_state_ref,record.state_ref)&&
   same(proof.deadline_ref,record.policy.original_deadline_ref),'closure_binding');
  need(record.state.phase==='queued'&&record.attempts.length===0&&initial.claim.hold_ref===null&&initial.claim.ownership_ref===null,'closure_prestate');
- need(same(outgoingCut(db,b.ipc_session_id,proof.outgoing.through),proof.outgoing),'closure_ledger');
  const boot=db.prepare('SELECT service_id,database_instance_id FROM service_boot WHERE service_boot_id=?').raw().get(proof.observer_boot_id);
  need(boot&&boot[0]===b.scope.authority_service_id&&boot[1]===b.scope.database_instance_id,'closure_observer');
+ if(proof.cause==='control_fenced'){
+  const cut=db.prepare('SELECT body_jcs,body_digest FROM control_command_cut WHERE operation_id=?').raw().get(proof.control_cut_ref?.id?.replace(/\.commands$/,''));
+  need(cut&&proof.outgoing===null&&proof.observed===null&&proof.end===null&&same(reference(JSON.parse(cut[0]).operation_id+'.commands',original(...cut)),proof.control_cut_ref),'closure_control_cut');
+  const value=JSON.parse(cut[0]),item=value.commands.find(v=>v.command_ref.id===s.command_id);
+  need(value.device_id===b.device_id&&item?.queued&&item.transmission===null&&same(item.binding,b)&&item.command_ref.revision==='1'&&item.command_ref.digest===record.record_digest&&
+   !db.prepare('SELECT 1 FROM command_final_admission WHERE command_id=?').pluck().get(s.command_id),'closure_control_cut');
+  return 'blocked';
+ }
+ need(same(outgoingCut(db,b.ipc_session_id,proof.outgoing.through),proof.outgoing),'closure_ledger');
  if(proof.cause==='execution_closed'){
   const ended=db.prepare('SELECT transaction_id,reason FROM execution_session_end WHERE ipc_session_id=?').raw().get(b.ipc_session_id);
   need(ended&&same(proof.end,{transaction_id:ended[0],reason:ended[1]})&&proof.observed===null,'closure_source');return 'blocked';
@@ -263,12 +271,13 @@ function readLifecycleOriginal(db,initial,head){
  return {...initial,record:expected.record,lifecycle:{commit_ref:reference(head[1],body),...(prepared?{final_admission:final}: {proof:body.proof})}};
 }
 // 内部同步writer从当前数据库及监督时钟生成关闭依据；HTTP不能提交proof或指定结论。
-export function closeQueuedCommand(db,id,{bootId,domain}){
+export function closeQueuedCommand(db,id,{bootId,domain,controlCut=null}){
  need(db.inTransaction&&Number(db.pragma('user_version',{simple:true}))>=50,'lifecycle_writer');
  const initial=readOriginalRecord(db,id),current=readLifecycle(db,initial);if(current.record.state.phase!=='queued'||current.record.attempts.length)return current;
  const s=initial.source,b=s.binding,end=db.prepare('SELECT transaction_id,reason FROM execution_session_end WHERE ipc_session_id=?').raw().get(b.ipc_session_id);
  let cause,observed=null;
- if(end)cause='execution_closed';
+ if(controlCut)cause='control_fenced';
+ else if(end)cause='execution_closed';
  else{
   observed=domain();if(!observed)return current;
   need(same(observed.ref,{clock_domain_id:b.clock_domain_id,descriptor_digest:b.descriptor_digest}),'closure_clock');
@@ -278,8 +287,8 @@ export function closeQueuedCommand(db,id,{bootId,domain}){
   else return current;
  }
  const proof={format:'queued-command-stop-source/1',scope:b.scope,binding:b,initial_command_ref:s.initial_ref,previous_state_ref:initial.record.state_ref,
-  deadline_ref:initial.record.policy.original_deadline_ref,observer_boot_id:bootId,cause,observed,end:end?{transaction_id:end[0],reason:end[1]}:null,
-  outgoing:outgoingCut(db,b.ipc_session_id)};
+  deadline_ref:initial.record.policy.original_deadline_ref,observer_boot_id:bootId,cause,observed,end:!controlCut&&end?{transaction_id:end[0],reason:end[1]}:null,
+  outgoing:controlCut?null:outgoingCut(db,b.ipc_session_id),...(controlCut?{control_cut_ref:controlCut}:{})};
  const outcome=closureOutcome(db,initial,proof),value=closedProjection(initial,outcome,cause),commit=crypto.randomUUID();
  const body={format:'command-queued-closure/1',commit_id:commit,command_id:id,revision:'2',previous_state_ref:initial.record.state_ref,
   record_digest:value.record.record_digest,state_digest:digest(value.state),proof};

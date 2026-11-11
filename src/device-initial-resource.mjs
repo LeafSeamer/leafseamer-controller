@@ -1,3 +1,4 @@
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import {dispatchRiskFrame} from './command-dispatch.mjs';
 import {guardOnlyFrame} from './command-guard.mjs';
 import {encodingOnlyFrame} from './command-encoding-store.mjs';
@@ -17,7 +18,7 @@ const need=(ok,code)=>{if(!ok)throw new IdentityError('initial_resource_'+code);
 const freeze=v=>{if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Object.freeze(v);}return v;};
 const objectRef=(id,v)=>({id,revision:'1',digest:digest(v)});
 const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/.test(v);
-function decode(text,hash){const v=checked(JSON.parse(text));need(canonicalize(v)===text&&v.digest===hash,'integrity');return v;}
+const decode=cacheVerifiedDocument((text,hash)=>{const v=checked(JSON.parse(text));need(canonicalize(v)===text&&v.digest===hash,'integrity');return v;});
 
 // 初始来源原件保持空库存；精确T2后继另返回非空资源当前资格，不能替代hold释放或恢复。
 // 全部输入取自同一writer内的实际运行、已批准固定模块、原始采样、屏障与命令/出站账本。
@@ -45,8 +46,8 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
    fence.ack.frame.body.cancel_coverage.length===0,'fence');
   // 同Ready下的排队claim不产生attempt或hold；schema51编码帧另须精确持久准备账本。
   // 编码只占独立缓存预留，派发或其他历史仍拒绝；此路径不证明非空hold释放。
-  const admissions=[49,50,51,52,53,54,55,56,57].includes(Number(service.schema_revision))?pendingInitialCommands(db,ready,preparedRef,history?.commandIds):[];
-  if(![49,50,51,52,53,54,55,56,57].includes(Number(service.schema_revision)))need(!db.prepare('SELECT 1 FROM ca_command_initial c JOIN ca_request_key k USING(key_id) WHERE k.device_id=? LIMIT 1').pluck().get(device),'command_history');
+  const admissions=[49,50,51,52,53,54,55,56,57,58].includes(Number(service.schema_revision))?pendingInitialCommands(db,ready,preparedRef,history?.commandIds):[];
+  if(![49,50,51,52,53,54,55,56,57,58].includes(Number(service.schema_revision)))need(!db.prepare('SELECT 1 FROM ca_command_initial c JOIN ca_request_key k USING(key_id) WHERE k.device_id=? LIMIT 1').pluck().get(device),'command_history');
   let sent=db.prepare(`SELECT record_id,record_digest,message_type,sequence FROM execution_frame_record
    WHERE ipc_session_id=? AND direction='c2w' AND (device_id=? OR device_id IS NULL) ORDER BY sequence`).raw().all(b.ipc_session_id,device).filter(v=>v[0]!==ownOpen?.id);
   sent=sent.filter(v=>{const old=history?.outgoing.get(v[0]);if(!old)return true;need(old.digest===v[1],'retired_frame');return false;});
@@ -130,7 +131,7 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
   need(!readyRef||ready,'ready');
   let successor=null;
   if(preparedRef){
-   need(ready&&[52,53,54,55,56,57].includes(Number(service.schema_revision)),'prepared_version');
+   need(ready&&[52,53,54,55,56,57,58].includes(Number(service.schema_revision)),'prepared_version');
    const held=db.prepare(`SELECT command_id,transaction_id FROM command_device_hold h WHERE device_id=?
     ${Number(service.schema_revision)>=57?'AND NOT EXISTS(SELECT 1 FROM command_hold_release r WHERE r.hold_id=h.hold_id)':''}`).raw().all(saved.value.binding.device_id);
    need(held.length===1&&held[0][1]===preparedRef.id,'prepared_hold');

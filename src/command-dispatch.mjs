@@ -1,3 +1,5 @@
+import {sqliteRow} from './sqlite-rows.mjs';
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import crypto from 'node:crypto';
 import {canonical,digest,same} from './auth-clock-value.mjs';
 import {DeviceExecutionError,executionWire} from './device-execution-channel.mjs';
@@ -10,10 +12,10 @@ import {withExecutionReadView,memoExecutionRead} from './execution-read-view.mjs
 import {deviceExecutionVersion,assertDeviceExecutionFeatures} from './sdk/device-execution.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError('command_dispatch_'+code);};
 const ref=(id,v)=>({id,revision:'1',digest:digest(v)});
-const parse=(text,hash)=>{const v=JSON.parse(text);need(canonical(v)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===hash,'integrity');return v;};
+const parse=cacheVerifiedDocument((text,hash)=>{const v=JSON.parse(text);need(canonical(v)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===hash,'integrity');return v;});
 const written=result=>need(result.changes===1,'storage');
 const hash=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
-function row(db,sql,...args){const q=db.prepare(sql),names=q.columns().map(v=>v.name),values=q.raw().get(...args);return values&&Object.fromEntries(names.map((n,i)=>[n,values[i]]));}
+const row=sqliteRow;
 function dispatchBody(db,guard){
  const v=guard.final.value,encoding=readCommandEncoding(db,v.prepare_id),initial=readOriginalRecord(db,v.command_id),ready=readInitialReady(db,initial.source.ready_ref.id);
  return {permit:v.permit,gate_token:ready.value.gate_after.gate_token,send_window:v.permit.transmission.send_window,request:encoding.request.frame.body.request,
@@ -97,7 +99,7 @@ function readDispatch(db,id){
  saved.evidence={value:evidenceValue,ref:ref(id+'.evidence',evidenceValue),reply:evidenceReply};return saved;
 }
 export function selectCommandDispatch(db,{id,binding,provider,tick,features}){
- need(db.inTransaction&&[54,55,56,57].includes(Number(db.pragma('user_version',{simple:true}))),'writer');
+ need(db.inTransaction&&[54,55,56,57,58].includes(Number(db.pragma('user_version',{simple:true}))),'writer');
  const prior=db.prepare('SELECT d.permit_id FROM command_dispatch_request d JOIN command_final_admission f ON f.transaction_id=d.final_transaction_id WHERE f.command_id=?').pluck().get(id);
  if(prior)return {saved:readCommandDispatch(db,prior)};
  const guardId=db.prepare('SELECT g.guard_id FROM command_guard_request g JOIN command_final_admission f ON f.transaction_id=g.final_transaction_id WHERE f.command_id=?').pluck().get(id);need(guardId,'guard');
