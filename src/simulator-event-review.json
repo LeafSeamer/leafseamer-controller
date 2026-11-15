@@ -1,0 +1,16 @@
+{
+  "format": "leafseamer-fixed-event-review/1",
+  "review_id": "leafseamer.simulator.control.events",
+  "revision": "1",
+  "module_digest": "sha256:ce88c13de948385621a9c8e483a85f94144648649c035d119c2f46db1ac157c0",
+  "protocol_io_policy_digest": "sha256:f35fe925b713feeb6401163aecdf24323b291f578cefd7325684ed60290ec195",
+  "template_digest": "sha256:e57b13701020987098398cabe65e7068c5896344e65c2e0f69955e610f68df6a",
+  "capture_api": "leafseamer-device-event-capture/1",
+  "event_type": "leafseamer.simulator.value.written",
+  "capture_boundary": "fixed_virtual_device_successful_memory_write",
+  "delivery_semantics": "discrete",
+  "baseline": "original_write_sequence",
+  "write_sequence": "baseline_plus_capture_sequence",
+  "value_minimum": -2147483648,
+  "value_maximum": 2147483647
+}

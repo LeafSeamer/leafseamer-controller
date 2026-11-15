@@ -99,7 +99,7 @@ function readDispatch(db,id){
  saved.evidence={value:evidenceValue,ref:ref(id+'.evidence',evidenceValue),reply:evidenceReply};return saved;
 }
 export function selectCommandDispatch(db,{id,binding,provider,tick,features}){
- need(db.inTransaction&&[54,55,56,57,58].includes(Number(db.pragma('user_version',{simple:true}))),'writer');
+ need(db.inTransaction&&[54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70].includes(Number(db.pragma('user_version',{simple:true}))),'writer');
  const prior=db.prepare('SELECT d.permit_id FROM command_dispatch_request d JOIN command_final_admission f ON f.transaction_id=d.final_transaction_id WHERE f.command_id=?').pluck().get(id);
  if(prior)return {saved:readCommandDispatch(db,prior)};
  const guardId=db.prepare('SELECT g.guard_id FROM command_guard_request g JOIN command_final_admission f ON f.transaction_id=g.final_transaction_id WHERE f.command_id=?').pluck().get(id);need(guardId,'guard');

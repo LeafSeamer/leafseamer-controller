@@ -10,14 +10,17 @@ import {openStorage} from '../../dist/storage.mjs';
 import {authenticated} from './extension-auth.mjs';
 import {createAuthenticationHttp} from '../../dist/auth-http.mjs';
 import {contractSelection} from '../../dist/sdk/index.mjs';
+import {automationPeer} from './automation-peer.mjs';
 import {loadGuiAssets} from '../../dist/gui-assets.mjs';
+import {corePerformance} from './core-performance.mjs';
 let business=null,intakeClient=null,manager=null,moduleClient=null,executionClient=null,intakeTail=Promise.resolve(),commandToken=null,commandRequest=null,evaluator=null,evaluatorSource=null,authorizationContext=null,authorizationEvidence=null;
 // 运行刷新与启动授权共享单请求安装连接；装配层串行查询，不重发或复用旧观察。
 function queryIntake(request){const result=intakeTail.then(()=>intakeClient.queryIntake(request));intakeTail=result.catch(()=>{});return result;}
 const args=process.argv.slice(3),options=Object.fromEntries(Array.from({length:args.length/2},(_,i)=>[args[i*2],args[i*2+1]]));
-const report=value=>process.stderr.write(JSON.stringify({...value,reported_ms:performance.now()})+'\n');
+const performanceCapture=await corePerformance(JSON.parse(fs.readFileSync(options['--fixture'],'utf8')).performance_capture);
+const report=value=>{const entry={...value,reported_ms:performance.now()};performanceCapture.record(entry);process.stderr.write(JSON.stringify(entry)+'\n');if(['unavailable','core-source-lost'].includes(value.event))void performanceCapture.stop().catch(()=>{});};
 let firstManualChallenge=null,initialResource=null,initialResourceRequest=null,initialOpening=null,initialOpeningRequest=null;const manualCoreObservations=new Map();
-let commandServer=null,commandHttp=null,commandAgent=null,guiTimer=null;
+let commandServer=null,commandHttp=null,commandAgent=null,guiTimer=null,automationRegistration=null,bindingPeer=null;
 async function startCommandHttp(material){
  let handler,gui;commandServer=https.createServer(material,(req,res)=>{
   if(gui&&['GET','HEAD'].includes(req.method)&&gui.handle(req,res))return;
@@ -126,11 +129,32 @@ async function runSuccessor(device){
  const current=await commandHttp('GET','/api/v1/commands/'+id),replayed=await commandHttp('POST','/api/v1/commands',request);
  report({event:'successor-command',opened,accepted,current,replayed,closed,cleaned,state:executionClient.state});
 }
+async function verifyCapturedEvents(device){
+const qualified=moduleClient.qualifiedEventCapture(device);
+const firstEvent=await moduleClient.readEvents(device,1),repeated=await moduleClient.readEvents(device,1),r=firstEvent.body.result;
+const firstPublished=moduleClient.publishedEvents(device);
+let wrong;try{await moduleClient.acknowledgeEvents(device,{through_sequence:r.batch.through_sequence,batch_digest:'sha256:'+'0'.repeat(64)});wrong='unexpected_success';}catch(error){wrong=error.code;}
+const receipt={through_sequence:r.batch.through_sequence,batch_digest:r.batch_digest};await moduleClient.acknowledgeEvents(device,receipt);await moduleClient.acknowledgeEvents(device,receipt);
+const secondEvent=await moduleClient.readEvents(device),s=secondEvent.body.result;await moduleClient.acknowledgeEvents(device,{through_sequence:s.batch.through_sequence,batch_digest:s.batch_digest});
+const empty=await moduleClient.readEvents(device);await moduleClient.acknowledgeEvents(device,{through_sequence:empty.body.result.batch.through_sequence,batch_digest:empty.body.result.batch_digest});
+const published=moduleClient.publishedEvents(device),suffix=moduleClient.publishedEvents(device,'1');
+if(input.automation_peer){
+ bindingPeer=await automationPeer({business,manager,config:input.automation_peer,device,refresh:()=>business.workerLaunches.runtime.refreshCurrent(key),report});
+ report({event:'event-source-published',published});await bindingPeer.phase('events');
+}
+const stopped=await moduleClient.stopEvents(device);let afterStop;try{moduleClient.qualifiedEventCapture(device);afterStop='unexpected_success';}catch(error){afterStop=error.code;}
+if(bindingPeer)await bindingPeer.phase('events-stopped');
+report({event:'module-events-captured',first:firstEvent,repeated,second:secondEvent,empty,stopped,wrong,qualified,afterStop,firstPublished,published,suffix});
+ await moduleClient.stopReadOnly(device);await moduleClient.connectReadOnly(device);await moduleClient.captureBaseline(device);
+const started=await moduleClient.startEvents(device),newEmpty=await moduleClient.readEvents(device),newPublished=moduleClient.publishedEvents(device),newStopped=await moduleClient.stopEvents(device);
+report({event:'module-events-new-session',started,empty:newEmpty,stopped:newStopped,published:newPublished});
+}
 const boot=createCoreBootstrapChannel(process.stdin,process.stdout,{timeoutMs:10000});
 const assignment=await boot.assignment(),receipt=await boot.proveAndReceive(assignment);boot.release();
 const policy=JSON.parse(options['--bootstrap-policy']),input=JSON.parse(fs.readFileSync(options['--fixture']));
 const controlFlow=input.mode==='supervisor_create_module_writable'||input.mode.includes('_control_fence_')||(input.mode.includes('_manual_authority_')||input.mode.includes('_manual_challenge_')||input.mode.includes('_evidence_'))||(input.mode.includes('_evaluator_')||(input.mode.includes('_recovery_')||input.mode.includes('_consumption_')||input.mode.includes('_evidence_')));
 const source=await connectCoreSupervisor({pipe:options['--supervisor-pipe'],channelId:options['--supervisor-channel'],policy,binding:{descriptor:assignment.clock_domain_descriptor,receipt}});
+source.subscribeLost(error=>report({event:'core-source-lost',code:error.code}));
 async function waitPastSource(deadline){while(clock.tick()<=BigInt(deadline))await delay(Math.max(1,Number((BigInt(deadline)-clock.tick())/1000000n)+25));}
 const clock=openNativeClock(),hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 const ref=kind=>({kind,authority_service_id:policy.service_id,database_instance_id:policy.database_instance_id,object_id:kind,revision:'1',digest:hash(kind)});
@@ -164,6 +188,11 @@ if(input.runtime){
  business.workerLaunches.runtime.bindSource(source);business.extensionInstallations.bindRuntimeSource(source);business.workerLaunches.authorization.bindSource(source);
  manager=await authenticated({after(){}},{store:business},{native:{source:clock,descriptor:assignment.clock_domain_descriptor},sampleWindowPolicy:'authentication-clock-sample/2'});
  if(input.command_tls)await startCommandHttp(input.command_tls);
+ if(input.mode.endsWith('_capabilities')){
+  const before=manager.sessions.localPermissions(manager.auth);
+  manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id:manager.logged.session.principal_id,expected_revision:before.revision,permissions:[...new Set([...before.permissions,'device.read'])]});
+  commandToken=manager.token(['device.read']);
+ }
  if(input.mode==='supervisor_create_module_writable'||(input.mode.includes('_evaluator_')||(input.mode.includes('_recovery_')||input.mode.includes('_consumption_')||input.mode.includes('_evidence_')))){
   const objectRef=value=>({id:value.id,revision:value.revision,digest:value.digest}),now=manager.real.current();
   const principal=manager.sessions.createServicePrincipal(manager.auth,{request_id:crypto.randomUUID(),display_name:'模拟器评估器身份',purpose:'controller_evaluator'});
@@ -238,13 +267,40 @@ try{
     report({event:'admitted',record:current});
     if(business){const adopted=await business.workerLaunches.runtime.adopt(key);business.workerLaunches.runtime.current(key);report({event:'runtime-adopted',binding:adopted});}
     moduleWork: if(input.mode.startsWith('supervisor_create_module')){
-      moduleClient=await business.workerLaunches.openModule(key);const device=intent.object_scope.device_ids[0];
+      const eventCaptureMode=input.mode.endsWith('_capture_events');
+      moduleClient=await business.workerLaunches.openModule(key,{events:eventCaptureMode});const device=intent.object_scope.device_ids[0];
       if(input.mode==='supervisor_create_module'||input.mode.includes('_binding_')){
         const execution=business.workerLaunches.openExecutionJournal(key);
         report({event:'execution-session',binding:execution.binding,controller_boot_id:receipt.member_boot_id});
       }
       const connected=await moduleClient.connectReadOnly(device),first=await moduleClient.captureBaseline(device),second=await moduleClient.captureBaseline(device);
       const accepted=moduleClient.currentBaseline(device);
+      if(eventCaptureMode){
+       const started=await moduleClient.startEvents(device),empty=await moduleClient.readEvents(device);
+       await moduleClient.acknowledgeEvents(device,{through_sequence:empty.body.result.batch.through_sequence,batch_digest:empty.body.result.batch_digest});
+       report({event:'module-events-started',started,empty});
+      }
+      if(input.mode.endsWith('_capabilities')){
+       manager.real.refresh();report({event:'capabilities-connected',response:await commandHttp('GET','/api/v1/devices/'+device+'/capabilities')});
+       const bindings=business.workerLaunches.deviceAutomation(device);automationRegistration=bindings.registration_ref;report({event:'automation-bindings-connected',bindings});
+       if(input.automation_peer){bindingPeer=await automationPeer({business,manager,config:input.automation_peer,device,refresh:()=>business.workerLaunches.runtime.refreshCurrent(key),report});await bindingPeer.phase('connected');}
+       if(input.gui){
+        report({event:'gui-capabilities-ready'});const until=performance.now()+60000;let refreshed=0;
+        while(true){
+         if(performance.now()>=until)throw new Error('gui_capabilities_timeout');
+         if(performance.now()-refreshed>500){await business.workerLaunches.runtime.refreshCurrent(key);refreshed=performance.now();}
+         if(fs.existsSync(input.gui.capability_request)){
+          const request=JSON.parse(fs.readFileSync(input.gui.capability_request,'utf8'));fs.unlinkSync(input.gui.capability_request);
+          if(request.operation==='finish')break;
+          if(request.operation==='disconnect')await moduleClient.stopReadOnly(device);
+          else if(request.operation==='reconnect'){await moduleClient.connectReadOnly(device);await moduleClient.captureBaseline(device);}
+          else throw new Error('gui_capabilities_operation');
+          fs.writeFileSync(input.gui.capability_result,JSON.stringify(request));
+         }
+         await delay(20);
+        }
+       }
+      }
       if(controlFlow||input.mode.includes('_handshake_')){
         const execution=executionClient=await business.workerLaunches.openExecution(key);
         report({event:'execution-session',binding:execution.binding,controller_boot_id:receipt.member_boot_id});
@@ -412,6 +468,7 @@ try{
                   if(input.mode.endsWith('_stale')){await moduleClient.captureBaseline(device);await checkCommand('ready-stale');executionClient.currentReady(ready.ref);report({event:'ready-stale',code:'unexpected_success'});}
                   else{await checkCommand('ready-expired');report({event:'ready-expired',state:executionClient.state,control:manager.sessions.getControl(commandToken,device)});}
                   if(input.mode.includes('_cleanup_successor'))await runSuccessor(device);
+                  if(eventCaptureMode)await verifyCapturedEvents(device);
                   if(input.mode.endsWith('_successor_control')||input.mode.endsWith('_control_unresolved'))await releaseAfterCommands(device);
                   break moduleWork;
                 }
@@ -522,6 +579,11 @@ try{
         await checkCommand('old-control',{expected_control:{...commandRequest.expected_control,version:'0'}});
       }
       const disconnected=await moduleClient.stopReadOnly(device);
+      if(input.mode.endsWith('_capabilities')){
+       manager.real.refresh();report({event:'capabilities-disconnected',response:await commandHttp('GET','/api/v1/devices/'+device+'/capabilities')});
+       try{business.workerLaunches.deviceAutomation(device,automationRegistration);report({event:'automation-bindings-disconnected',code:'unexpected_success'});}catch(error){report({event:'automation-bindings-disconnected',code:error.code});}
+       if(bindingPeer)await bindingPeer.phase('disconnected');
+      }
       if(controlFlow){
         await checkCommand('disconnected');
         try{manager.sessions.currentManualExecutionSource(manualSource.ref);report({event:'manual-source-disconnected',code:'unexpected_success'});}
@@ -533,6 +595,12 @@ try{
       catch(error){report({event:'module-disconnected-read',code:error.code});}
       await delay(10);
       const reconnected=await moduleClient.connectReadOnly(device),third=await moduleClient.captureBaseline(device);
+      if(input.mode.endsWith('_capabilities')){
+       manager.real.refresh();report({event:'capabilities-reconnected',response:await commandHttp('GET','/api/v1/devices/'+device+'/capabilities')});
+       try{business.workerLaunches.deviceAutomation(device,automationRegistration);report({event:'automation-bindings-old-registration',code:'unexpected_success'});}catch(error){report({event:'automation-bindings-old-registration',code:error.code});}
+       report({event:'automation-bindings-reconnected',bindings:business.workerLaunches.deviceAutomation(device)});
+       if(bindingPeer)await bindingPeer.phase('reconnected');
+      }
       const fresh=moduleClient.currentBaseline(device);report({event:'module-samples',connected,first,second,disconnected,reconnected,third,accepted,fresh});
       if(controlFlow){
         await checkCommand('before-rebind');report({event:'execution-rebound',binding:moduleClient.bindExecution(device)});
@@ -608,6 +676,8 @@ try{
 
     if(observed){try{source.assertWorkerObservation(observed);report({event:'withdrawn-observation',code:'unexpected_success'});}catch(error){report({event:'withdrawn-observation',code:error.code});}}
     if(business){try{business.workerLaunches.runtime.current(key);}catch{}report({event:'runtime-withdrawn',binding:business.workerLaunches.runtime.query(key)});}
+    if(business&&input.mode.endsWith('_capabilities')){try{business.workerLaunches.deviceAutomation(intent.object_scope.device_ids[0]);report({event:'automation-bindings-withdrawn',code:'unexpected_success'});}catch(error){report({event:'automation-bindings-withdrawn',code:error.code});}}
+    if(bindingPeer)await bindingPeer.phase('withdrawn',{running:false});
     const retirementDeadline=performance.now()+5000;
     for(;;){try{report({event:'retired',result:await source.retireWorker(intent,'revoked')});break;}
       catch(error){if(error.code!=='supervisor_indeterminate'||performance.now()>=retirementDeadline)throw error;await delay(25);}}
@@ -645,5 +715,7 @@ if(input.gui){guiTimer=setInterval(()=>{
   fs.writeFileSync(input.gui.revoke_result,JSON.stringify({state:'revoked',result:changed}));report({event:'gui-evidence-revoked'});
  }catch(error){fs.writeFileSync(input.gui.revoke_result,JSON.stringify({state:'failed',code:error.code}));}
 },50);guiTimer.unref();}
+await bindingPeer?.close();
 report({event:'done',record:await source.queryLaunch(key)});
+await performanceCapture.stop();
 process.stdin.setEncoding('utf8').on('data',data=>{if(data==='stop\n'){clearInterval(guiTimer);commandAgent?.destroy();commandServer?.close();manager?.real.stop();intakeClient?.close();business?.close();source.close();process.stdin.destroy();}});process.stdin.resume();

@@ -52,7 +52,7 @@ test('显式运行刷新共享同一观察，失败撤回后不能靠刷新复�
  assert.equal(calls,1);release();const refreshed=await Promise.all([first,second]);
  assert.deepEqual(refreshed,[original,original]);assert.equal(calls,1);
  x.source.beforeObserve=null;x.source.unavailable=true;
- await assert.rejects(x.runtime.refreshCurrent(x.key),/worker_runtime_withdrawn/);
+ await assert.rejects(x.runtime.refreshCurrent(x.key),error=>error.code==='worker_runtime_withdrawn'&&error.cause?.message==='worker_exited');
  x.source.unavailable=false;
  await assert.rejects(x.runtime.refreshCurrent(x.key),/worker_runtime_unavailable/);
  assert.ok(x.runtime.query(x.key).withdrawal);assert.throws(()=>x.runtime.current(x.key),/worker_runtime_unavailable/);

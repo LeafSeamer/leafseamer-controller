@@ -1,0 +1,13 @@
+{
+  "format": "leafseamer-fixed-footprint-review/1",
+  "review_id": "leafseamer.simulator.control.footprint",
+  "revision": "3",
+  "semantics_revision": "3",
+  "module_digest": "sha256:ce88c13de948385621a9c8e483a85f94144648649c035d119c2f46db1ac157c0",
+  "protocol_io_policy_digest": "sha256:f35fe925b713feeb6401163aecdf24323b291f578cefd7325684ed60290ec195",
+  "template_digest": "sha256:e57b13701020987098398cabe65e7068c5896344e65c2e0f69955e610f68df6a",
+  "parameter_scope": "all_allowed_parameters",
+  "action_id": "leafseamer.simulator.value.set",
+  "effect_scope": "entire_virtual_device_and_shared_worker",
+  "safe_failure_classes": []
+}

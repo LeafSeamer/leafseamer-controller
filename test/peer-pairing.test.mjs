@@ -54,7 +54,7 @@ test('配对操作写入被忽略时，revision、head和操作必须一起回�
 test('58到59迁移保留既有身份和会话行，追加独立配对表且可重新打开',async t=>{
  const f=await fixture(t,{revision:58});f.real.stop();f.close();let before;
  inspect(f.dir,db=>{before=['identity_issuer','local_principal','auth_session'].map(table=>db.prepare('SELECT * FROM '+table).raw().all());});
- const migration=await migrateStorage(f.dir);assert.equal(migration.schema_revision,'59');inspect(f.dir,db=>{
+ const migration=await migrateStorage(f.dir,59);assert.equal(migration.schema_revision,'59');inspect(f.dir,db=>{
   assert.deepEqual(['identity_issuer','local_principal','auth_session'].map(table=>db.prepare('SELECT * FROM '+table).raw().all()),before);
   assert.deepEqual(db.pragma('foreign_key_check'),[]);assert.equal(db.prepare('SELECT count(*) FROM peer_pairing_head').pluck().get(),0);
  });f.reopen();assert.equal(f.store.identity.schema_revision,'59');

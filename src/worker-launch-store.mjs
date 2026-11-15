@@ -6,10 +6,15 @@ import {workerAuthorizationStore} from './worker-authorization-store.mjs';
 import {connectDeviceModule} from './device-module-client.mjs';
 import {deviceModuleJournal} from './device-module-store.mjs';
 import {deviceCatalogStore} from './device-catalog-store.mjs';
+import {deviceEventSourceStore} from './device-event-source.mjs';
+import {deviceEventScopeStore} from './device-event-scope.mjs';
+import {deviceEventSourceRef} from './peer-device-events.mjs';
 import {deviceControlBarrier} from './device-control-barrier.mjs';
 import {deviceExecutionJournal,executionJournalHistory} from './device-execution-journal.mjs';
 import {connectDeviceExecution} from './device-execution-client.mjs';
 import {currentDeviceExecutionBinding} from './device-execution-binding.mjs';
+import {readDeviceCapabilities} from './device-capability-view.mjs';
+import {readDeviceAutomationBindings} from './device-automation-binding.mjs';
 import {currentInitialReady} from './device-initial-ready.mjs';
 import {currentControlSource} from './device-control-source.mjs';
 import canonicalize from 'canonicalize';
@@ -68,7 +73,25 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     }});
     journal.open();executionJournals.add(journal);return journal;
   }
-  return Object.freeze({runtime,authorization,controlBarrier,
+  function currentDeviceCatalogInput(device){
+      need(isOpen()&&db.open&&db.inTransaction&&Number(service.schema_revision)>=25,'device_capabilities_unavailable');
+      const candidates=rows(db,`SELECT r.launch_id,p.intent_digest FROM worker_runtime_binding r
+       JOIN worker_launch_preparation p USING(launch_id) JOIN worker_launch_device d USING(launch_id)
+       LEFT JOIN worker_runtime_withdrawal w USING(runtime_id) WHERE d.device_id=? AND r.service_boot_id=? AND w.runtime_id IS NULL LIMIT 5`,device,bootId);
+      need(candidates.length===1,'device_capabilities_unavailable');const candidate=candidates[0],module=modules.get(candidate.launch_id);
+      need(module,'device_capabilities_unavailable');const active=runtime.currentInTransaction({launch_id:candidate.launch_id,launch_intent_digest:candidate.intent_digest});
+      const selected=extensionSource.current(active.binding.launch_intent),dependencies=currentWorkerDependencies(db,service,active.binding.launch_intent,selected);
+      return {service,device,runtime:active,selected,dependencies,channel:module.binding.ipc_session_id};
+  }
+  function readDeviceEventsCurrent(device,expectedSourceRef=null,after='0',limit=32){
+    need(isOpen()&&db.open&&db.inTransaction&&Number(service.schema_revision)>=64,'device_events_writer');
+    const input=currentDeviceCatalogInput(device),module=modules.get(input.runtime.binding.launch_intent.launch_id);
+    need(module,'device_events_unavailable');const value=module.publishedEvents(device,after,limit);
+    need(expectedSourceRef===null||hash(deviceEventSourceRef(value.registration))===hash(expectedSourceRef),'device_events_source_changed');return value;
+  }
+  function readDeviceEvents(...args){available();return db.transaction(()=>readDeviceEventsCurrent(...args)).immediate();}
+  const eventScopes=Number(service.schema_revision)>=65?deviceEventScopeStore({db,service,bootId,currentSource:readDeviceEventsCurrent}):null;
+  return Object.freeze({runtime,authorization,controlBarrier,eventScopes,
     queueCommandEncoding(id){
       if(commandTasks.has(id))return;
       // 受理响应先完成本轮微任务；后台执行从下一事件轮开始，避免占用响应校验预算。
@@ -102,6 +125,10 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     whenCommandSettled(id){available();const task=settlementTasks.get(id)??commandTasks.get(id)?.then(()=>settlementTasks.get(id));need(task,'execution_settlement_not_queued');return task;},
     whenCommandCleaned(id){available();const task=cleanupTasks.get(id)??commandTasks.get(id)?.then(()=>cleanupTasks.get(id));need(task,'execution_cleanup_not_queued');return task;},
     whenCommandFinalized(id){available();const task=finalAdmissionTasks.get(id)??commandTasks.get(id)?.then(()=>finalAdmissionTasks.get(id));need(task,'execution_finalization_not_queued');return task;},
+    deviceCapabilitiesCurrent(device){return readDeviceCapabilities(db,currentDeviceCatalogInput(device));},
+    deviceAutomation(device,expectedRegistrationRef=null){available();return db.transaction(()=>readDeviceAutomationBindings(db,currentDeviceCatalogInput(device),expectedRegistrationRef)).immediate();},
+    deviceAutomationCurrent(device,expectedRegistrationRef=null){return readDeviceAutomationBindings(db,currentDeviceCatalogInput(device),expectedRegistrationRef);},
+    deviceEvents:readDeviceEvents,
     commandExecutionCurrent(device,{requireReady=false,preparedRef=null}={}){
       need(isOpen()&&db.open&&db.inTransaction&&Number(service.schema_revision)>=30,'command_execution_source');
       const candidates=rows(db,`SELECT r.launch_id,p.intent_digest,s.ipc_session_id FROM execution_session s
@@ -143,19 +170,20 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
         onClose:()=>executionClients.delete(selected.launch_id)});available();runtime.current(selected);executionClients.set(selected.launch_id,client);return client;
       }catch(error){executionClients.delete(selected.launch_id);client?.close();throw error;}
     },
-    async openModule(value){
+    async openModule(value,{events=false}={}){
       available();need(Number(service.schema_revision)>=25,'worker_module_migration_required');const selected=key(value),active=runtime.current(selected);need(!modules.has(selected.launch_id)&&modules.size<4,'worker_module_capacity');
+      need(typeof events==='boolean'&&(!events||Number(service.schema_revision)>=63),'worker_module_event_migration_required');
       const reference=active.binding.launch_intent.extension_binding.configuration_ref;
       const row=db.prepare('SELECT body_jcs,body_digest FROM extension_configuration WHERE configuration_id=? AND revision=?').raw().get(reference.object_id,Number(reference.revision));
       need(row&&row[1]===reference.digest,'worker_module_configuration');const body=JSON.parse(row[0]);need(canonicalize(body)===row[0]&&hash(body)===row[1],'worker_module_configuration');
       modules.set(selected.launch_id,null);
-      const current=()=>runtime.current(selected);
+      const current=()=>db.inTransaction?runtime.currentInTransaction(selected):runtime.current(selected);
       const catalog=deviceCatalogStore({db,current,select(intent){const selected=extensionSource.current(intent);return {selected,dependencies:currentWorkerDependencies(db,service,intent,selected)};}});
-      const journal=deviceModuleJournal(db,current);
+      const journal=deviceModuleJournal(db,current),eventSource=events&&Number(service.schema_revision)>=64?deviceEventSourceStore({db,current,catalog}):null;
       let module;
-      try{module=await connectDeviceModule({current,invalidate:()=>runtime.invalidate(selected),configuration:{reference,value:body.configuration},
+      try{module=await connectDeviceModule({events,eventSource,current,invalidate:()=>runtime.invalidate(selected),configuration:{reference,value:body.configuration},
         journal:{open:journal.open,record(direction,frame){journal.record(direction,frame);if(direction==='w2c')catalog.receive(frame);}},catalog,
-        onClose:()=>modules.delete(selected.launch_id)});
+        onClose:()=>{try{eventSource?.close();}finally{modules.delete(selected.launch_id);}}});
         available();current();modules.set(selected.launch_id,module);return module;
       }catch(error){modules.delete(selected.launch_id);module?.close();try{runtime.invalidate(selected);}catch{}throw error;}
     },

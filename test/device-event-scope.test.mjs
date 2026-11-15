@@ -1,0 +1,76 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+import path from 'node:path';
+import {fileURLToPath,pathToFileURL} from 'node:url';
+import Database from 'better-sqlite3';
+import {spawnSync} from 'node:child_process';
+const root=process.env.LEAFSEAMER_CONTROLLER_PACKAGE_UNDER_TEST??fileURLToPath(new URL('../',import.meta.url));
+const {deviceEventScopeStore,eventScopeReference}=await import(pathToFileURL(path.join(root,'dist/device-event-scope.mjs')));
+const {canonical,digest}=await import(pathToFileURL(path.join(root,'dist/auth-clock-value.mjs')));
+const id=()=>crypto.randomUUID();
+function fixture(t){
+ const db=new Database(':memory:');t.after(()=>db.close());db.pragma('foreign_keys=ON');
+ db.exec('CREATE TABLE service_boot(service_boot_id TEXT PRIMARY KEY); CREATE TABLE device_event_source(registration_id TEXT PRIMARY KEY,device_id TEXT,body_jcs TEXT,body_digest TEXT); CREATE TABLE device_source_event(registration_id TEXT,source_sequence TEXT);');
+ db.exec('CREATE TABLE device_subscription_scope ('+fs.readFileSync(path.join(root,'dist/device-event-scope.sql'),'utf8').split('CREATE TABLE device_subscription_scope (')[1]);
+ const service={service_id:id(),database_instance_id:id(),schema_revision:'65'},bootId=id(),device=id(),registration_id=id();db.prepare('INSERT INTO service_boot VALUES(?)').run(bootId);
+ const registration={registration_id,revision:'1',source_key:{authority_service_id:service.service_id,database_instance_id:service.database_instance_id,registration_id,source_stream_id:device,source_epoch:id()},
+  binding_ref:{target:{kind:'device',device_id:device}},canonical_delivery:'ordered_subscription'};
+ db.prepare('INSERT INTO device_event_source VALUES(?,?,?,?)').run(registration_id,device,canonical(registration),digest(registration));
+ const value={registration,highest_committed_sequence:'0',fault:null};
+ const currentSource=(selected,expected)=>{assert.equal(selected,device);if(expected)assert.equal(expected.object_id,registration.registration_id);return structuredClone(value);};
+ const args={db,service,bootId,currentSource},store=deviceEventScopeStore(args),request={request_id:id(),device_ids:[device]};
+ return {db,service,bootId,device,registration,value,args,store,request};
+}
+test('范围固定真实来源原件和完整集合，重复登记只查原，新增事件推进前沿不改范围',t=>{
+ const f=fixture(t),created=f.store.register(f.request);assert.deepEqual(f.store.register(f.request),created);
+ const body=created.registration;assert.deepEqual(created.scope_ref,eventScopeReference(body));assert.equal(body.selector.window,null);assert.deepEqual(body.selector.entity_ids,[f.registration.registration_id]);
+ assert.deepEqual(body.scope.projection_profile_ref,eventScopeReference(body.profile));assert.deepEqual(body.scope.collections[0].selector_ref,eventScopeReference(body.selector));
+ assert.deepEqual(f.store.current(created.scope_ref).current_frontiers.map(s=>s.registration_sequence),['0']);
+ f.db.prepare('INSERT INTO device_source_event VALUES(?,?)').run(f.registration.registration_id,'1');f.value.highest_committed_sequence='1';
+ const latest=f.store.current(created.scope_ref);assert.deepEqual(latest.registration,body);assert.equal(latest.current_frontiers[0].registration_sequence,'1');
+ assert.deepEqual(f.db.pragma('foreign_key_check'),[]);
+});
+test('拒绝重算摘要引用、缺失正文、缺口、来源变化及故障，撤销和重启不恢复范围',t=>{
+ const f=fixture(t),created=f.store.register(f.request),ref=created.scope_ref;
+ assert.throws(()=>f.store.current({...ref,content_digest:'b'.repeat(64)}),{code:'event_scope_reference'});
+ assert.throws(()=>f.store.register({...f.request,device_ids:[id()]}),{code:'event_scope_conflict'});
+ f.value.highest_committed_sequence='2';assert.throws(()=>f.store.current(ref),{code:'event_scope_source_frontier'});f.value.highest_committed_sequence='0';
+ f.value.fault={reason:'capture_failed'};assert.throws(()=>f.store.current(ref),{code:'event_scope_source_fault'});f.value.fault=null;
+ f.value.registration.source_key.source_epoch=id();assert.throws(()=>f.store.current(ref),{code:'event_scope_source_original'});f.value.registration.source_key.source_epoch=created.registration.sources[0].source_key.source_epoch;
+ const restarted=deviceEventScopeStore({...f.args,bootId:id()});assert.throws(()=>restarted.current(ref),{code:'event_scope_inactive'});
+ const result=f.store.revoke(ref);assert.deepEqual(f.store.revoke(ref),result);assert.throws(()=>f.store.current(ref),{code:'event_scope_inactive'});assert.deepEqual(f.store.register(f.request),created);
+});
+test('登记主记录、完整成员和封存缺一回滚，禁止孤立范围提交或封存后增写',t=>{
+ for(const table of ['device_subscription_scope','device_subscription_scope_member','device_subscription_scope_seal']){
+  const f=fixture(t);f.db.exec('CREATE TRIGGER omit_scope BEFORE INSERT ON '+table+' BEGIN SELECT RAISE(IGNORE); END');
+  assert.throws(()=>f.store.register(f.request),{code:'event_scope_storage'});
+  for(const name of ['device_subscription_scope','device_subscription_scope_member','device_subscription_scope_seal'])assert.equal(f.db.prepare('SELECT count(*) FROM '+name).pluck().get(),0);
+  f.db.exec('DROP TRIGGER omit_scope');const created=f.store.register(f.request);assert.equal(f.store.current(created.scope_ref).registration.entity_id,created.registration.entity_id);
+  assert.throws(()=>f.db.prepare('DELETE FROM device_subscription_scope_member').run(),/immutable_event_scope/);
+  const insertIncomplete=seal=>f.db.transaction(()=>{const body={...created.registration,entity_id:id()},hash=digest(body);
+   f.db.prepare('INSERT INTO device_subscription_scope VALUES(?,?,?,?,?,?,?)').run(body.entity_id,id(),digest('incomplete'),f.bootId,canonical(body),hash,body.entity_id);
+   if(seal)f.db.prepare('INSERT INTO device_subscription_scope_seal VALUES(?,?)').run(body.entity_id,hash);
+  }).immediate();
+  assert.throws(()=>insertIncomplete(false),/FOREIGN KEY/);assert.throws(()=>insertIncomplete(true),/scope_members_incomplete/);
+  const member=f.db.prepare('SELECT * FROM device_subscription_scope_member').raw().get();assert.throws(()=>f.db.prepare('INSERT INTO device_subscription_scope_member VALUES(?,?,?,?)').run(...member),/scope_sealed/);
+  assert.equal(f.db.prepare('SELECT count(*) FROM device_subscription_scope').pluck().get(),1);
+ }
+});
+test('输入不接受过滤器、重复设备或越界数量，缺少来源不能部分登记',t=>{
+ const f=fixture(t);for(const request of [{...f.request,filter:{}},{...f.request,device_ids:[]},{...f.request,device_ids:[f.device,f.device]},{...f.request,device_ids:Array.from({length:33},id)}])
+  assert.throws(()=>f.store.register(request),{code:'event_scope_input'});
+ f.db.prepare('DELETE FROM device_event_source').run();assert.throws(()=>f.store.register(f.request),{code:'event_scope_source_original'});assert.equal(f.db.prepare('SELECT count(*) FROM device_subscription_scope').pluck().get(),0);
+});
+test('实际生成的Profile、Selector和Scope均符合所采用SDK图，不改变通道模型',t=>{
+ const f=fixture(t),{registration}=f.store.register(f.request);
+ const script=`import sys,json
+from jsonschema import Draft202012Validator,FormatChecker
+graph=json.load(open(sys.argv[1],encoding='utf8')); data=json.load(sys.stdin)
+for model,key in [('registry__Profile','profile'),('registry__Selector','selector'),('channel__ScopeSpec','scope')]:
+ Draft202012Validator({'$ref':'#/$defs/'+model,'$defs':graph['$defs']},format_checker=FormatChecker()).validate(data[key])
+print('fixed models validated')`;
+ const checked=spawnSync(process.env.LEAFSEAMER_SCHEMA_PYTHON??'python',['-I','-B','-c',script,path.join(root,'dist/sdk/contract/models.schema.json')],{input:JSON.stringify(registration),encoding:'utf8',windowsHide:true});
+ assert.equal(checked.status,0,checked.stderr||checked.error?.message);assert.match(checked.stdout,/fixed models validated/);
+});

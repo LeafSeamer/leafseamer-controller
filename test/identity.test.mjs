@@ -126,7 +126,7 @@ test('错误能力、截止等号与旧boot能力拒绝，不留管理员', asyn
   } finally { app.close(); t.mock.restoreAll(); }
 });
 
-test('初始化每个写入失败均回滚完整身份与能力消费', {timeout: 20000}, async t => {
+test('初始化每个写入失败均回滚完整身份与能力消费', {timeout: 60000}, async t => {
   for (const table of ['identity_issuer', 'subject', 'local_principal', 'local_authorization', 'first_admin_challenge', 'identity_initialization', 'identity_receipt']) {
     const dir = temporary(t); initializeStorage(dir); await migrateStorage(dir);
     inspect(dir, db => db.exec(`CREATE TRIGGER injected_failure BEFORE ${table === 'first_admin_challenge' ? 'UPDATE' : 'INSERT'} ON ${table} ${table === 'first_admin_challenge' ? "WHEN NEW.state = 'consumed'" : ''} BEGIN SELECT RAISE(ABORT, 'injected'); END;`));

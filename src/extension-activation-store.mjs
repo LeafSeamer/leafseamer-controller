@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import canonicalize from 'canonicalize';
 import {IdentityError} from './identity-crypto.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('extension_activation_'+code);};
@@ -8,7 +9,7 @@ const exact=(value,keys)=>value&&Object.keys(value).sort().join(',')===keys.spli
 const id=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\s\S])/.test(value);
 const frozen=value=>{if(value&&typeof value==='object'){Object.values(value).forEach(frozen);Object.freeze(value);}return value;};
 const actor=proof=>({principal_id:proof.principal_id,session_id:proof.session_id,credential_id:proof.credential_id,issuer_id:proof.issuer_id,issuer_epoch:proof.issuer_epoch});
-function read(text,digest){const value=JSON.parse(text);need(canonicalize(value)===text&&hash(value)===digest,'integrity');return value;}
+const read=cacheVerifiedDocument((text,digest)=>{const value=JSON.parse(text);need(canonicalize(value)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===digest,'integrity');return value;});
 
 // 只受理当前人员确认的计划并占用资源；accepted不等于active_closed或启动授权。
 export function extensionActivationStore({db,service,bootId,available,reference,launch,plans}){

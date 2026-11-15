@@ -1,0 +1,55 @@
+{
+  "format": "leafseamer-fixed-binding-review/1",
+  "review_id": "leafseamer.simulator.control.bindings",
+  "revision": "3",
+  "footprint_review_digest": "sha256:6c4fb7047c73e47b5d8eac12a62229480243f597df05f0d5bef08f8cbcc1f056",
+  "parameter_scope": "all_allowed_parameters",
+  "parameter_slots": [
+    {
+      "pointer": "/value",
+      "value_type": {
+        "kind": "binary64",
+        "unit": null
+      }
+    }
+  ],
+  "observation_projections": [
+    {
+      "pointer": "/value",
+      "value_type": {
+        "kind": "binary64",
+        "unit": null
+      }
+    },
+    {
+      "pointer": "/sample_sequence",
+      "value_type": {
+        "kind": "integer_string",
+        "unit": null
+      }
+    },
+    {
+      "pointer": "/write_sequence",
+      "value_type": {
+        "kind": "integer_string",
+        "unit": null
+      }
+    }
+  ],
+  "result_projections": [
+    {
+      "pointer": "/value",
+      "value_type": {
+        "kind": "binary64",
+        "unit": null
+      }
+    },
+    {
+      "pointer": "/write_sequence",
+      "value_type": {
+        "kind": "integer_string",
+        "unit": null
+      }
+    }
+  ]
+}

@@ -174,7 +174,7 @@ function readInitialRecord(db,id){
 export function pendingInitialCommands(db,ready,preparedRef=null,retiredIds=[]){
  need(db.inTransaction,'writer');const ids=db.prepare('SELECT command_id FROM ca_command_initial ORDER BY command_id').pluck().all().filter(id=>!retiredIds.includes(id));
  if(!ids.length)return [];
- need([49,50,51,52,53,54,55,56,57,58].includes(Number(db.pragma('user_version',{simple:true})))&&ready,'resource_successor_required');
+ need([49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70].includes(Number(db.pragma('user_version',{simple:true})))&&ready,'resource_successor_required');
  return ids.map(id=>{const saved=readCommandRecord(db,id);
   const final=saved.lifecycle?.final_admission;
   const prepared=preparedRef&&final&&same(final.ref,preparedRef)&&saved.record.state.resource_status==='held'&&saved.record.attempts.length===1;

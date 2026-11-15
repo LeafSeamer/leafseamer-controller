@@ -46,7 +46,7 @@ test('持久管理员权限成为默认真实token来源，不使用合成权限
     const token = app.issue(), verified = app.sessions.verifyToken(tokenInput(token), app.storage.identity.service_id);
     assert.equal(verified.active, true); assert.deepEqual(verified.permissions, ['identity.read']);
     assert.throws(() => app.issue(['device.command']), e => e.code === 'local_authorization_denied');
-    assert.throws(() => app.issue(['identity.read'], crypto.randomUUID()), e => e.code === 'local_authorization_audience');
+    assert.throws(() => app.issue(['identity.read'], crypto.randomUUID()), e => e.code === 'remote_authorization_missing');
   } finally { app.close(); }
   inspect(app.dir, db => {
     assert.equal(JSON.parse(db.prepare('SELECT body FROM local_permission_revision').pluck().get().toString()).digest, grant.digest);

@@ -1,12 +1,14 @@
 import crypto from 'node:crypto';
 import {TLSSocket} from 'node:tls';
 import {canonical, digest, same,seal,ref} from './auth-clock-value.mjs';
-import {createOpaqueSecret,verifyOpaqueSecret} from './identity-crypto.mjs';
+import {createOpaqueSecret,verifyOpaqueSecret} from './opaque-secret.mjs';
 import {pairingNeed as need,pairingFields as fields,pairingUuid as uuid,pairingInteger as integer,pairingTranscript,sealPairing,pairingCertificate} from './peer-pairing-value.mjs';
 
 // 本机受信装配提供配置；普通请求只能引用预登记的配置摘要，不能导入CA或指定回调地址。
-export function peerPairingStore({db,service,bootId,writer,time,authenticated,authority}){
- let configuration=null;
+export function peerPairingStore({db,service,bootId,writer,time,authenticated,authority,
+ issuerIdentity=()=>db.prepare('SELECT issuer_id,issuer_epoch FROM identity_issuer').raw().get(),
+ humanPrincipal=id=>!!db.prepare("SELECT 1 FROM subject WHERE principal_id=? AND kind='human'").pluck().get(id)}){
+ let configuration=null;const revocationChecks=new Map();
  const write=result=>need(result.changes===1,'storage');
  function read(id,revision=null){
   uuid(id);const row=revision===null?db.prepare('SELECT r.body_jcs,r.body_digest FROM peer_pairing_revision r JOIN peer_pairing_head h USING(binding_id,revision) WHERE binding_id=?').raw().get(id):
@@ -20,19 +22,21 @@ export function peerPairingStore({db,service,bootId,writer,time,authenticated,au
    db.prepare('INSERT INTO peer_pairing_head VALUES(?,?)').run(value.binding_id,Number(value.revision)));
   need(same(read(value.binding_id),value),'integrity');return value;
  }
- function manager(input,work,finish=()=>{}){return writer(()=>{
-  const now=time(),found=authenticated(input,now);need(!found.denied,'management_denied');const grant=authority.current(found.session.principal_id);
-  need(db.prepare("SELECT 1 FROM subject WHERE principal_id=? AND kind='human'").pluck().get(found.session.principal_id)&&grant.state==='active'&&
+ function manager(input,work,finish=()=>{},finalScope=()=>null){return writer(()=>{
+  const now=time(),found=authenticated(input,now);need(!found.denied,'management_denied');const grant=JSON.parse(canonical(authority.current(found.session.principal_id)));
+  need(humanPrincipal(found.session.principal_id)===true&&grant.state==='active'&&
    grant.issuer_id===found.session.issuer_id&&grant.issuer_epoch===found.session.issuer_epoch&&grant.permissions.includes('auth.manage')&&now.upper<BigInt(found.session.recent_before_ns),'management_denied');
-  const result=work(found,now),last=time(),current=authenticated(input,last);need(!current.denied&&same(authority.current(found.session.principal_id),grant)&&last.upper<BigInt(found.session.recent_before_ns),'management_changed');finish(result,last);return result;
+  const result=work(found,now),last=time(),current=authenticated(input,last,finalScope());need(!current.denied&&
+   ['principal_id','issuer_id','issuer_epoch','session_id'].every(key=>current.session[key]===found.session[key])&&humanPrincipal(current.session.principal_id)===true&&
+   same(authority.current(found.session.principal_id),grant)&&last.upper<BigInt(found.session.recent_before_ns)&&last.upper<BigInt(current.session.recent_before_ns),'management_changed');finish(result,last);return result;
  });}
  function prior(input,actor){uuid(input.request_id);const row=db.prepare('SELECT principal_id,request_digest,binding_id,revision FROM peer_pairing_operation WHERE request_id=?').raw().get(input.request_id);
   if(!row)return null;need(row[0]===actor.session.principal_id&&row[1]===digest(input),'conflict');return read(row[2],row[3]);}
  function commit(input,actor,now,value){write(db.prepare('INSERT INTO peer_pairing_operation VALUES(?,?,?,?,?,?)').run(input.request_id,actor.session.principal_id,digest(input),value.binding_id,Number(value.revision),now.acquisition.id));return value;}
  function configured(transcript){
   need(configuration,'configuration_missing');const local=transcript.parties.find(p=>p.service_id===service.service_id),peer=transcript.parties.find(p=>p.service_id!==service.service_id);
-  need(local&&peer&&local.database_instance_id===service.database_instance_id&&local.service_kind==='controller','local_identity');
-  const issuer=db.prepare('SELECT issuer_id,issuer_epoch FROM identity_issuer').raw().get();need(issuer&&local.issuer_id===issuer[0]&&local.issuer_epoch===issuer[1],'local_identity');
+  need(local&&peer&&local.database_instance_id===service.database_instance_id&&local.service_kind===service.authority,'local_identity');
+  const issuer=issuerIdentity();need(issuer&&local.issuer_id===issuer[0]&&local.issuer_epoch===issuer[1],'local_identity');
   const match=(party,config)=>config&&['service_id','database_instance_id','service_kind','issuer_id','issuer_epoch','credential_id','certificate_der_sha256','spki_sha256','trust_bundle_digest','endpoint_config_digest'].every(k=>party[k]===config[k]);
   need(match(local,configuration.local)&&match(peer,configuration.peers.find(p=>p.service_id===peer.service_id)),'configuration_changed');return {local,peer};
  }
@@ -84,6 +88,29 @@ export function peerPairingStore({db,service,bootId,writer,time,authenticated,au
    need(['staged','proving','proved'].includes(current.state),'terminal');const value=save({...current,revision:String(BigInt(current.revision)+1n),state:'rejected'},current);return commit(request,actor,now,value);
   });},
   currentPending(id){return writer(()=>currentPeer(id).value);},
+  requireActivatedInTransaction(reference){
+   need(db.open&&db.inTransaction,'transaction');fields(reference,'id,revision,digest');
+   const {value}=currentPeer(reference.id);need(value.state==='activated'&&value.revision===reference.revision&&value.digest===reference.digest,'activation');return value;
+  },
+  identityForRevocationInTransaction(reference,scope){
+   need(db.open&&db.inTransaction,'transaction');fields(reference,'id,revision,digest');const transition=revocationChecks.get(scope);need(transition,'revocation_scope');
+   if(reference.id!==transition.before.binding_id){const {value}=currentPeer(reference.id);need(value.state==='activated'&&value.revision===reference.revision&&value.digest===reference.digest,'activation');return value;}
+   // 仅当前revoke的提交末尾可沿原身份完成自身撤销；不是新的active配对或可缓存资格。
+   const before=transition.before,after=read(reference.id);need(before.revision===reference.revision&&before.digest===reference.digest&&same(after,transition.after),'revocation_scope');
+   configured(before.transcript);timing(before,time());return before;
+  },
+  authorizeIntrospectionInTransaction(id,socket){
+   need(db.open&&db.inTransaction,'transaction');const {value}=currentPeer(id),peer=channel(value,socket);
+   need(value.state==='activated'&&peer.permissions.includes('auth.introspect'),'purpose');return {record:value,peer};
+  },
+  authorizeSubscriptionInTransaction(id,socket){
+   need(db.open&&db.inTransaction,'transaction');const {value}=currentPeer(id),peer=channel(value,socket);
+   need(value.state==='activated'&&peer.permissions.includes('event.internal.subscribe'),'purpose');return {record:value,peer};
+  },
+  authorizeRevocationInTransaction(id,socket){
+   need(db.open&&db.inTransaction,'transaction');const {value}=currentPeer(id),peer=channel(value,socket);
+   need(value.state==='activated'&&peer.permissions.includes('auth.revoke'),'purpose');return {record:value,peer};
+  },
   peerProofs(id,socket){return writer(()=>{const {value}=currentPeer(id);channel(value,socket);return proofs(id);});},
   challenge(id,socket,request){fields(request,'pair_attempt_id,transcript_digest');return writer(()=>{
    const {value,now}=currentPeer(id);channel(value,socket);need(value.state!=='activated'&&value.transcript.pair_attempt_id===request.pair_attempt_id&&value.transcript_digest===request.transcript_digest,'binding');
@@ -123,9 +150,12 @@ export function peerPairingStore({db,service,bootId,writer,time,authenticated,au
    // 幂等查回原件不重新激活；新激活必须在事务末尾仍处于原attempt窗口。
    if(fresh){timing({...result,state:'proved'},last);need(last.upper<BigInt(result.attempt_expires_ns),'expired');}
   });},
-  revoke(input,request){fields(request,'request_id,binding_id,expected_revision');return manager(input,(actor,now)=>{
-   const old=prior(request,actor);if(old)return old;const value=read(request.binding_id);need(value.state==='activated'&&value.revision===request.expected_revision,'stale');
-   return commit(request,actor,now,save({...value,revision:String(BigInt(value.revision)+1n),state:'revoked'},value));
-  });},
+  revoke(input,request){fields(request,'request_id,binding_id,expected_revision');let scope=null;
+   try{return manager(input,(actor,now)=>{
+    const old=prior(request,actor);if(old)return old;const value=read(request.binding_id);need(value.state==='activated'&&value.revision===request.expected_revision,'stale');
+    const result=commit(request,actor,now,save({...value,revision:String(BigInt(value.revision)+1n),state:'revoked'},value));
+    scope=Object.freeze({});revocationChecks.set(scope,{before:value,after:result});return result;
+   },()=>{},()=>scope);}finally{if(scope)revocationChecks.delete(scope);}
+  },
  });
 }

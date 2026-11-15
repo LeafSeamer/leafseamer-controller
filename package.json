@@ -28,7 +28,8 @@
     "ajv-formats": "3.0.1",
     "argon2": "0.45.1",
     "better-sqlite3": "13.0.3",
-    "canonicalize": "5.1.0"
+    "canonicalize": "5.1.0",
+    "ws": "8.22.0"
   },
   "devDependencies": {
     "@leafseamer/sdk": "file:../leafseamer-sdk"

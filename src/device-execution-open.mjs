@@ -6,6 +6,7 @@ import {preparedFrame,insertFrame,executionTick} from './device-execution-handsh
 import {currentDeviceExecutionBinding} from './device-execution-binding.mjs';
 import {deviceExecutionVersion,assertDeviceExecutionFeatures} from './sdk/device-execution.mjs';
 import {memoExecutionRead,withExecutionReadView} from './execution-read-view.mjs';
+import {deviceModuleProtocol,deviceModuleEventProtocol} from './sdk/device-module.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError('execution_open_'+code);};
 const hash=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
 const digest=value=>hash(canonicalize(value)),same=(a,b)=>canonicalize(a)===canonicalize(b);
@@ -50,7 +51,7 @@ function configured(db,bound){
  AND q.message_type='BIND_EXECUTION' AND q.direction='c2w' AND json_extract(a.frame_jcs,'$.body.execution_ref.id')=?
  ORDER BY length(a.sequence),a.sequence LIMIT 1`).raw().get(bound.catalog.channel_id,bound.ref.id);
  need(selected,'worker_binding');const ack=document(selected[1],selected[2]),request=document(selected[3],selected[4]);
- need(ack.version==='device-module/3'&&request.version===ack.version&&ack.sequence===request.sequence&&ack.reply_to===request.request_id&&
+ need([deviceModuleProtocol,deviceModuleEventProtocol].includes(ack.version)&&request.version===ack.version&&ack.sequence===request.sequence&&ack.reply_to===request.request_id&&
   same(ack.binding,request.binding)&&ack.body.device_id===bound.value.binding.device_id&&ack.body.device_session_id===bound.value.binding.device_session_id&&
   request.body.device_id===ack.body.device_id&&request.body.device_session_id===ack.body.device_session_id&&
   same(ack.body.execution_ref,bound.ref)&&same(request.body.execution,{ref:bound.ref,value:bound.value}),'worker_binding');

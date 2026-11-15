@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {IdentityError,createOpaqueSecret,verifyOpaqueSecret} from './identity-crypto.mjs';
 import {seal,ref,checked,same,digest} from './auth-clock-value.mjs';
+import {normalizeConsumerSlots} from './service-consumer-scope.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('service_token_'+code);};
 const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v);
 const fields=(v,names)=>need(v&&typeof v==='object'&&Object.keys(v).sort().join(',')===names.split(',').sort().join(','),'input');
@@ -14,8 +15,8 @@ const scope=request=>{
   Array.isArray(request.device_ids)&&request.device_ids.length<=128&&request.device_ids.every(uuid)&&new Set(request.device_ids).size===request.device_ids.length,'scope');
  return {...request,device_ids:[...request.device_ids].sort()};
 };
-// 本机接收方授权与签发批准分别保存。当前唯一消费路径是服务读取自身身份。
-export function serviceAccessTokenStore({db,service,writer,time,management,principal,approval,credential,allowed,expired,authenticateCredential}){
+// 本机接收方授权与组织批准分别保存；服务令牌仅用于自身身份读取，订阅单独核对本地政策。
+export function serviceAccessTokenStore({db,service,writer,time,management,principal,approval,credential,allowed,expired,authenticateCredential,consumerCurrent=null}){
  const invalid=crypto.randomBytes(32),buckets=new Map();let globalStart=0n,globalCount=0;
  function throttle(id){const tick=process.hrtime.bigint(),minute=60000000000n;
   if(tick-globalStart>=minute){globalStart=tick;globalCount=0;}for(const [k,v] of buckets)if(tick-v.start>=minute)buckets.delete(k);
@@ -62,19 +63,35 @@ export function serviceAccessTokenStore({db,service,writer,time,management,princ
   try{ok=verifyOpaqueSecret('access_token',input.secret,row?.[0]??invalid);}catch{}need(row&&row[1]==='opaque-verifier/1'&&ok,'invalid');
   const v=read(input.token_id);need(v.audience===service.service_id,'audience');const found=current(v,time());if(found.denied)return found;return current(v,time());
  }
- return Object.freeze({
-  approveLocalServicePolicy(input,request){fields(request,'request_id,principal_id,subject_ref,approval_ref,audience,permissions,device_ids,not_before_ns,expires_ns');
-   request=scope(request);need(uuid(request.request_id)&&uuid(request.principal_id)&&request.audience===service.service_id,'input');const start=integer(request.not_before_ns),end=integer(request.expires_ns);need(end>start,'input');
+ function approvePolicy(input,request,subscription=false){fields(request,'request_id,principal_id,subject_ref,approval_ref,audience,permissions,device_ids,not_before_ns,expires_ns'+(subscription?',consumer_slots':''));
+   if(subscription){need(Number(service.schema_revision)>=65&&consumerCurrent&&Array.isArray(request.permissions)&&same([...request.permissions].sort(),['event.internal.subscribe','status.read'])&&
+    Array.isArray(request.device_ids)&&request.device_ids.length<=128&&request.device_ids.every(uuid)&&new Set(request.device_ids).size===request.device_ids.length,'scope');
+    request={...request,permissions:[...request.permissions].sort(),device_ids:[...request.device_ids].sort(),consumer_slots:normalizeConsumerSlots(request.consumer_slots,service)};
+   }else request=scope(request);
+   need(uuid(request.request_id)&&uuid(request.principal_id)&&request.audience===service.service_id,'input');const start=integer(request.not_before_ns),end=integer(request.expires_ns);need(end>start,'input');
    return management(input,'auth.manage',(actor,now)=>{const key='human:'+actor.principal_id,old=prior(key,request,'policy');if(old)return old;
     const s=principal(request.principal_id),a=approval(s);need(same(request.subject_ref,ref(s))&&same(request.approval_ref,ref(a)),'revision');
     need(a.audiences.includes(request.audience)&&request.permissions.every(p=>a.permissions.includes(p))&&request.device_ids.every(d=>a.device_ids.includes(d)),'scope');
     need(start>=BigInt(a.not_before_ns)&&end<=BigInt(a.expires_ns)&&now.upper<end,'validity');
+    if(subscription)for(const slot of request.consumer_slots){const current=consumerCurrent({pairing_ref:slot.pairing_ref,consumer_id:slot.consumer_id,purpose:slot.purpose,allowed_scope_ref:slot.allowed_scope_ref});
+     need(current.owner.principal_id===s.id&&same(current.slot,slot)&&same(current.approval_ref,ref(a)),'subscription_scope');
+    }
     need(!db.prepare('SELECT 1 FROM service_receiver_policy WHERE principal_id=?').pluck().get(s.id),'policy_change_unavailable');
-    const op=crypto.randomUUID(),v=seal({format:'local-service-receiver-policy/1',id:crypto.randomUUID(),revision:'1',principal_id:s.id,subject_ref:ref(s),approval_ref:ref(a),
-     audience:request.audience,permissions:request.permissions,device_ids:request.device_ids,not_before_ns:request.not_before_ns,expires_ns:request.expires_ns,approved_by:actor,acquisition_ref:now.acquisition});
+    const op=crypto.randomUUID(),v=seal({format:subscription?'local-service-receiver-policy/2':'local-service-receiver-policy/1',id:crypto.randomUUID(),revision:'1',principal_id:s.id,subject_ref:ref(s),approval_ref:ref(a),
+     audience:request.audience,permissions:request.permissions,device_ids:request.device_ids,...(subscription?{consumer_slots:request.consumer_slots}:{}),not_before_ns:request.not_before_ns,expires_ns:request.expires_ns,approved_by:actor,acquisition_ref:now.acquisition});
     written(db.prepare('INSERT INTO service_receiver_policy VALUES(?,?,?,?,?,?,?)').run(v.id,s.id,service.service_id,a.id,canonicalize(v),v.digest,op));need(same(policy(v.id),v),'integrity');
     return commit(op,key,request,'policy',v,now,actor);
    });
+ }
+ return Object.freeze({
+  approveLocalServicePolicy:(input,request)=>approvePolicy(input,request),
+  approveLocalSubscriptionPolicy:(input,request)=>approvePolicy(input,request,true),
+  subscriptionPolicyInTransaction(consumer){
+   need(db.open&&db.inTransaction&&Number(service.schema_revision)>=65,'subscription_writer');const s=principal(consumer.owner.principal_id),a=approval(s),p=currentPolicy(s,a,time());
+   if(!p)return {denied:'service_token_policy_invalid'};
+   need(same(ref(s),consumer.subject_ref)&&same(ref(a),consumer.approval_ref)&&p.format==='local-service-receiver-policy/2'&&p.permissions.includes('event.internal.subscribe')&&p.permissions.includes('status.read')&&
+    p.consumer_slots.some(slot=>same(slot,consumer.slot)),'subscription_policy');
+   return {policy:p,policy_ref:ref(p)};
   },
   revokeLocalServicePolicy(input,request){fields(request,'request_id,policy_ref');need(uuid(request.request_id),'input');return management(input,'auth.manage',(actor,now)=>{
    const key='human:'+actor.principal_id,old=prior(key,request,'policy_revoke');if(old)return old;const p=policy(request.policy_ref.id);need(same(ref(p),request.policy_ref),'revision');

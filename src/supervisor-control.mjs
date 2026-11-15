@@ -9,6 +9,8 @@ export class SupervisorError extends Error { constructor(code) { super(code); th
 const check = (ok, code) => { if (!ok) throw new SupervisorError(code); };
 const same = (a, b) => canonicalize(a) === canonicalize(b);
 const maxSequence = 99999999999999999999n;
+// 已绑定原生监督连接的完整回复使用微任务校验，避免业务回调插入确认更新；预算与期限仍逐项检查。
+const replyDecodeOptions=Object.freeze({yieldNow:()=>Promise.resolve()});
 
 // 端点由原生父进程创建并通过固定启动参数交付。一次连接失败后不重连或恢复旧资格。
 export async function connectCoreSupervisor({pipe, channelId, binding, policy}) {
@@ -71,8 +73,8 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy}) 
       socket.write(canonicalize(frame) + '\n', error => { if (error) fail('supervisor_channel_closed'); });
       const bytes = await response;
       let result;
-      try { result = await decodeSupervisorControl(bytes, expected); }
-      catch { result = await decodeSupervisorControl(bytes, 'ERROR'); }
+      try { result = await decodeSupervisorControl(bytes, expected,replyDecodeOptions); }
+      catch { result = await decodeSupervisorControl(bytes, 'ERROR',replyDecodeOptions); }
       const received=now();check(!failed && !stopped && received < deadline, 'supervisor_confirmation_expired');
       check(result.channel_id === channelId && result.sequence === String(incoming) && result.reply_to === message && same(result.scope, scope), 'supervisor_response_binding');
       incoming++; return {result, deadline,request:frame,issued,received};

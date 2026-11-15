@@ -3,6 +3,7 @@ import canonicalize from 'canonicalize';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import Database from 'better-sqlite3';
+import {acquireDatabaseOwner} from './database-owner.mjs';
 import {identityStore} from './identity-store.mjs';
 import {authenticationClockStore} from './auth-clock-store.mjs';
 import {registerDevice} from './device-registry-store.mjs';
@@ -130,6 +131,28 @@ const commandEncodingDigest='sha256:'+crypto.createHash('sha256').update(command
 const commandRecordDigest='sha256:'+crypto.createHash('sha256').update(commandRecordSql).digest('hex');
 const peerPairingSql=fs.readFileSync(new URL('./peer-pairing.sql',import.meta.url),'utf8');
 const peerPairingDigest='sha256:'+crypto.createHash('sha256').update(peerPairingSql).digest('hex');
+const remotePermissionSql=fs.readFileSync(new URL('./remote-permission.sql',import.meta.url),'utf8');
+const remotePermissionDigest='sha256:'+crypto.createHash('sha256').update(remotePermissionSql).digest('hex');
+const issuerWatermarkSql=fs.readFileSync(new URL('./issuer-authorization-watermark.sql',import.meta.url),'utf8');
+const issuerWatermarkDigest='sha256:'+crypto.createHash('sha256').update(issuerWatermarkSql).digest('hex');
+const sessionDenialSql=fs.readFileSync(new URL('./session-denial.sql',import.meta.url),'utf8');
+const sessionDenialDigest='sha256:'+crypto.createHash('sha256').update(sessionDenialSql).digest('hex');
+const moduleEventsSql=fs.readFileSync(new URL('./device-module-events.sql',import.meta.url),'utf8');
+const moduleEventsDigest='sha256:'+crypto.createHash('sha256').update(moduleEventsSql).digest('hex');
+const eventSourceSql=fs.readFileSync(new URL('./device-event-source.sql',import.meta.url),'utf8');
+const eventSourceDigest='sha256:'+crypto.createHash('sha256').update(eventSourceSql).digest('hex');
+const eventScopeSql=fs.readFileSync(new URL('./device-event-scope.sql',import.meta.url),'utf8');
+const eventScopeDigest='sha256:'+crypto.createHash('sha256').update(eventScopeSql).digest('hex');
+const subscriptionSql=fs.readFileSync(new URL('./service-subscription.sql',import.meta.url),'utf8');
+const subscriptionDigest='sha256:'+crypto.createHash('sha256').update(subscriptionSql).digest('hex');
+const sourceProjectionSql=fs.readFileSync(new URL('./device-source-projection.sql',import.meta.url),'utf8');
+const snapshotSql=fs.readFileSync(new URL('./service-snapshot.sql',import.meta.url),'utf8');
+const channelSql=fs.readFileSync(new URL('./service-subscription-channel.sql',import.meta.url),'utf8');
+const baselineSql=fs.readFileSync(new URL('./service-snapshot-baseline.sql',import.meta.url),'utf8');
+const baselineDigest='sha256:'+crypto.createHash('sha256').update(baselineSql).digest('hex');
+const channelDigest='sha256:'+crypto.createHash('sha256').update(channelSql).digest('hex');
+const snapshotDigest='sha256:'+crypto.createHash('sha256').update(snapshotSql).digest('hex');
+const sourceProjectionDigest='sha256:'+crypto.createHash('sha256').update(sourceProjectionSql).digest('hex');
 const applicationId = 0x4c53434c;
 const engine = Object.freeze({version: '3.53.4', source: '2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc'});
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -151,17 +174,20 @@ function filename(dataDir) {
   return path.join(path.resolve(dataDir), 'controller.sqlite');
 }
 function open(file) {
-  const db = new Database(file, {fileMustExist: true, timeout: 0});
+  const owner=acquireDatabaseOwner(file);let db;
+  try{db=new Database(file, {fileMustExist: true, timeout: 0});}catch(error){owner.close();throw error;}
+  const close=db.close.bind(db);db.close=()=>{try{return close();}finally{owner.close();}};
   try {
     const actual = rows(db, 'SELECT sqlite_version() AS version, sqlite_source_id() AS source')[0];
     require(actual.version === engine.version && actual.source === engine.source, 'sqlite_engine_mismatch');
     pragma(db, 'foreign_keys = ON'); pragma(db, 'trusted_schema = OFF');
     pragma(db, 'recursive_triggers = ON');
-    pragma(db, 'locking_mode = EXCLUSIVE');
+    const sharedReaders=pragma(db,'user_version')>=67;
+    pragma(db, 'locking_mode = '+(sharedReaders?'NORMAL':'EXCLUSIVE'));
     pragma(db, 'wal_autocheckpoint = 0');
     require(pragma(db, 'foreign_keys') === 1, 'foreign_keys_unavailable');
     require(pragma(db, 'recursive_triggers') === 1, 'recursive_triggers_unavailable');
-    require(pragma(db, 'locking_mode') === 'exclusive', 'exclusive_mode_unavailable');
+    require(pragma(db, 'locking_mode') === (sharedReaders?'normal':'exclusive'), 'exclusive_mode_unavailable');
     require(pragma(db, 'wal_autocheckpoint') === 0, 'checkpoint_mode_unavailable');
     return db;
   } catch (error) { db.close(); throw error; }
@@ -199,18 +225,18 @@ export function initializeStorage(dataDir) {
 }
 function validateStorage(db) {
   const revision = pragma(db, 'user_version');
-  require(pragma(db, 'application_id') === applicationId && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59].includes(revision), 'database_version_mismatch');
+  require(pragma(db, 'application_id') === applicationId && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70].includes(revision), 'database_version_mismatch');
   require(pragma(db, 'journal_mode') === 'wal', 'journal_mode_mismatch');
   pragma(db, 'synchronous = FULL');
   require(pragma(db, 'synchronous') === 2, 'synchronous_mismatch');
   require(pragma(db, 'quick_check') === 'ok' && rows(db, 'PRAGMA foreign_key_check').length === 0, 'database_integrity');
   const migrations = rows(db, 'SELECT * FROM schema_migration ORDER BY CAST(to_revision AS INTEGER)');
   require(migrations.length === revision && migrations[0].from_revision === '0' && migrations[0].to_revision === '1' && migrations[0].state === 'committed' && migrations[0].script_digest === scriptDigest, 'migration_mismatch');
-  for (let i = 1; i < revision; i++) require(migrations[i].from_revision === String(i) && migrations[i].to_revision === String(i + 1) && migrations[i].state === 'committed' && migrations[i].script_digest === [scriptDigest, identityDigest, clockDigest, authClockDigest, sessionDigest, tokenDigest, permissionDigest, contextDigest, admissionDigest, deviceDigest, runtimeDigest, workerDigest, extensionDigest, configurationDigest, roleDigest, reviewDigest, approvalDigest, capabilityDigest, workerRuntimeDigest, dependencyDigest, planDigest, activationDigest, authorizationDigest, moduleDigest, catalogDigest, controlDigest, executionDigest, executionFramesDigest, executionBindingDigest, executionHandshakeDigest, executionControlDigest, controlSourceDigest, manualAuthorityDigest, deviceAuthorizationDigest, coreSourceDigest, serviceIdentityDigest, serviceAccessTokenDigest, evaluatorSourceDigest, principalRevocationDigest, deviceRecoveryDigest, deviceConsumptionDigest, manualChallengeDigest, deviceEvidenceDigest, initialResourceDigest, initialOpenDigest, workerBindingDigest, executionOpenDigest, initialReadyDigest, commandRecordDigest, commandLifecycleDigest, commandEncodingDigest, commandFinalAdmissionDigest, commandGuardDigest, commandDispatchDigest, commandSettlementDigest, commandPreparationCleanupDigest, resourceSuccessorDigest, controlCommandCutDigest, peerPairingDigest][i] && /^sha256:[0-9a-f]{64}$/.test(migrations[i].backup_ref), 'migration_mismatch');
+  for (let i = 1; i < revision; i++) require(migrations[i].from_revision === String(i) && migrations[i].to_revision === String(i + 1) && migrations[i].state === 'committed' && migrations[i].script_digest === [scriptDigest, identityDigest, clockDigest, authClockDigest, sessionDigest, tokenDigest, permissionDigest, contextDigest, admissionDigest, deviceDigest, runtimeDigest, workerDigest, extensionDigest, configurationDigest, roleDigest, reviewDigest, approvalDigest, capabilityDigest, workerRuntimeDigest, dependencyDigest, planDigest, activationDigest, authorizationDigest, moduleDigest, catalogDigest, controlDigest, executionDigest, executionFramesDigest, executionBindingDigest, executionHandshakeDigest, executionControlDigest, controlSourceDigest, manualAuthorityDigest, deviceAuthorizationDigest, coreSourceDigest, serviceIdentityDigest, serviceAccessTokenDigest, evaluatorSourceDigest, principalRevocationDigest, deviceRecoveryDigest, deviceConsumptionDigest, manualChallengeDigest, deviceEvidenceDigest, initialResourceDigest, initialOpenDigest, workerBindingDigest, executionOpenDigest, initialReadyDigest, commandRecordDigest, commandLifecycleDigest, commandEncodingDigest, commandFinalAdmissionDigest, commandGuardDigest, commandDispatchDigest, commandSettlementDigest, commandPreparationCleanupDigest, resourceSuccessorDigest, controlCommandCutDigest, peerPairingDigest, remotePermissionDigest, issuerWatermarkDigest, sessionDenialDigest, moduleEventsDigest, eventSourceDigest, eventScopeDigest, subscriptionDigest, sourceProjectionDigest, snapshotDigest, channelDigest, baselineDigest][i] && /^sha256:[0-9a-f]{64}$/.test(migrations[i].backup_ref), 'migration_mismatch');
   return identity(db, String(revision));
 }
-export async function migrateStorage(dataDir, targetRevision = 59) {
-  require([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59].includes(targetRevision), 'migration_target');
+export async function migrateStorage(dataDir, targetRevision = 70) {
+  require([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70].includes(targetRevision), 'migration_target');
   const file = filename(dataDir);
   let db;
   try {
@@ -229,10 +255,10 @@ export async function migrateStorage(dataDir, targetRevision = 59) {
       pragma(db, 'foreign_keys = OFF');
       require(pragma(db, 'foreign_keys') === 0, 'migration_setup_failed');
       db.transaction(() => {
-        db.exec([identitySql, clockSql, authClockSql, sessionSql, tokenSql, permissionSql, contextSql, admissionSql, deviceSql, runtimeSql, workerSql, extensionSql, configurationSql, roleSql, reviewSql, approvalSql, capabilitySql, workerRuntimeSql, dependencySql, planSql, activationSql, authorizationSql, moduleSql, catalogSql, controlSql, executionSql, executionFramesSql, executionBindingSql, executionHandshakeSql, executionControlSql, controlSourceSql, manualAuthoritySql, deviceAuthorizationSql, coreSourceSql, serviceIdentitySql, serviceAccessTokenSql, evaluatorSourceSql, principalRevocationSql, deviceRecoverySql, deviceConsumptionSql, manualChallengeSql, deviceEvidenceSql, initialResourceSql, initialOpenSql, workerBindingSql, executionOpenSql, initialReadySql, commandRecordSql, commandLifecycleSql, commandEncodingSql, commandFinalAdmissionSql, commandGuardSql, commandDispatchSql, commandSettlementSql, commandPreparationCleanupSql, resourceSuccessorSql, controlCommandCutSql, peerPairingSql][next - 2]);
+        db.exec([identitySql, clockSql, authClockSql, sessionSql, tokenSql, permissionSql, contextSql, admissionSql, deviceSql, runtimeSql, workerSql, extensionSql, configurationSql, roleSql, reviewSql, approvalSql, capabilitySql, workerRuntimeSql, dependencySql, planSql, activationSql, authorizationSql, moduleSql, catalogSql, controlSql, executionSql, executionFramesSql, executionBindingSql, executionHandshakeSql, executionControlSql, controlSourceSql, manualAuthoritySql, deviceAuthorizationSql, coreSourceSql, serviceIdentitySql, serviceAccessTokenSql, evaluatorSourceSql, principalRevocationSql, deviceRecoverySql, deviceConsumptionSql, manualChallengeSql, deviceEvidenceSql, initialResourceSql, initialOpenSql, workerBindingSql, executionOpenSql, initialReadySql, commandRecordSql, commandLifecycleSql, commandEncodingSql, commandFinalAdmissionSql, commandGuardSql, commandDispatchSql, commandSettlementSql, commandPreparationCleanupSql, resourceSuccessorSql, controlCommandCutSql, peerPairingSql, remotePermissionSql, issuerWatermarkSql, sessionDenialSql, moduleEventsSql, eventSourceSql, eventScopeSql, subscriptionSql, sourceProjectionSql, snapshotSql, channelSql, baselineSql][next - 2]);
         if (next === 7) initializeLocalPermissions(db, state);
         db.prepare("INSERT INTO schema_migration VALUES (?, ?, ?, ?, ?, 'committed', ?)")
-          .run(crypto.randomUUID(), String(next - 1), String(next), [identityDigest, clockDigest, authClockDigest, sessionDigest, tokenDigest, permissionDigest, contextDigest, admissionDigest, deviceDigest, runtimeDigest, workerDigest, extensionDigest, configurationDigest, roleDigest, reviewDigest, approvalDigest, capabilityDigest, workerRuntimeDigest, dependencyDigest, planDigest, activationDigest, authorizationDigest, moduleDigest, catalogDigest, controlDigest, executionDigest, executionFramesDigest, executionBindingDigest, executionHandshakeDigest, executionControlDigest, controlSourceDigest, manualAuthorityDigest, deviceAuthorizationDigest, coreSourceDigest, serviceIdentityDigest, serviceAccessTokenDigest, evaluatorSourceDigest, principalRevocationDigest, deviceRecoveryDigest, deviceConsumptionDigest, manualChallengeDigest, deviceEvidenceDigest, initialResourceDigest, initialOpenDigest, workerBindingDigest, executionOpenDigest, initialReadyDigest, commandRecordDigest, commandLifecycleDigest, commandEncodingDigest, commandFinalAdmissionDigest, commandGuardDigest, commandDispatchDigest, commandSettlementDigest, commandPreparationCleanupDigest, resourceSuccessorDigest, controlCommandCutDigest, peerPairingDigest][next - 2], backupRef, crypto.randomUUID());
+          .run(crypto.randomUUID(), String(next - 1), String(next), [identityDigest, clockDigest, authClockDigest, sessionDigest, tokenDigest, permissionDigest, contextDigest, admissionDigest, deviceDigest, runtimeDigest, workerDigest, extensionDigest, configurationDigest, roleDigest, reviewDigest, approvalDigest, capabilityDigest, workerRuntimeDigest, dependencyDigest, planDigest, activationDigest, authorizationDigest, moduleDigest, catalogDigest, controlDigest, executionDigest, executionFramesDigest, executionBindingDigest, executionHandshakeDigest, executionControlDigest, controlSourceDigest, manualAuthorityDigest, deviceAuthorizationDigest, coreSourceDigest, serviceIdentityDigest, serviceAccessTokenDigest, evaluatorSourceDigest, principalRevocationDigest, deviceRecoveryDigest, deviceConsumptionDigest, manualChallengeDigest, deviceEvidenceDigest, initialResourceDigest, initialOpenDigest, workerBindingDigest, executionOpenDigest, initialReadyDigest, commandRecordDigest, commandLifecycleDigest, commandEncodingDigest, commandFinalAdmissionDigest, commandGuardDigest, commandDispatchDigest, commandSettlementDigest, commandPreparationCleanupDigest, resourceSuccessorDigest, controlCommandCutDigest, peerPairingDigest, remotePermissionDigest, issuerWatermarkDigest, sessionDenialDigest, moduleEventsDigest, eventSourceDigest, eventScopeDigest, subscriptionDigest, sourceProjectionDigest, snapshotDigest, channelDigest, baselineDigest][next - 2], backupRef, crypto.randomUUID());
         pragma(db, 'user_version = ' + next);
         require(rows(db, 'PRAGMA foreign_key_check').length === 0, 'migration_integrity');
       }).immediate();
@@ -324,11 +350,13 @@ export function openStorage(dataDir) {
         sessions ??= sessionStore(db, state.service_id, clock, authority, Number(state.schema_revision) >= 6,
           Number(state.schema_revision) >= 8 ? {service: state, bootId} : null,authority===localAuthority?createExtensionManagement:null,authority===localAuthority?workerLaunches?.controlBarrier:null,
           authority===localAuthority?workerLaunches?.commandExecutionCurrent:null,authority===localAuthority?value=>{initialOpeningSource=value;}:null,
-          authority===localAuthority?value=>{commandEncodingProvider=value;}:null,authority===localAuthority?workerLaunches?.queueCommandEncoding:null); return sessions;
+          authority===localAuthority?value=>{commandEncodingProvider=value;}:null,authority===localAuthority?workerLaunches?.queueCommandEncoding:null,
+          authority===localAuthority?workerLaunches?.deviceCapabilitiesCurrent:null,authority===localAuthority?workerLaunches?.eventScopes:null); return sessions;
       },
       close() {
-        if (closed) return; closed = true; stopWorkerContent?.(); sessions?.stop();
+        if (closed) return; closed = true;
         try {
+          stopWorkerContent?.(); sessions?.stop();
           db.transaction(() => {
             if (state.schema_revision !== '1') db.prepare("UPDATE first_admin_challenge SET state = 'invalidated' WHERE service_boot_id = ? AND state = 'pending'").run(bootId);
             db.prepare("UPDATE service_boot SET state = 'stopped', stopped_utc = ? WHERE service_boot_id = ? AND state = 'started'")

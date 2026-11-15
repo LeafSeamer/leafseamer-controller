@@ -8,7 +8,7 @@
 
 ## 开发运行
 
-使用 Node 24.22.0、npm 11.19.1。先在相邻 `leafseamer-sdk` 仓库构建与 [sdk-runtime.json](sdk-runtime.json) 摘要一致的 SDK，再安装本仓锁定依赖。构建将固定 SDK 运行文件纳入 Controller 包，独立运行无需邻仓。其余运行依赖固定为 better-sqlite3 13.0.3、argon2 0.45.1、canonicalize 5.1.0、ajv 8.20.0 和 ajv-formats 3.0.1；安装使用锁内完整依赖。
+使用 Node 24.22.0、npm 11.19.1。先在相邻 `leafseamer-sdk` 仓库构建与 [sdk-runtime.json](sdk-runtime.json) 摘要一致的 SDK，再安装本仓锁定依赖。构建将固定 SDK 运行文件纳入 Controller 包，独立运行无需邻仓。其余运行依赖固定为 better-sqlite3 13.0.3、argon2 0.45.1、canonicalize 5.1.0、ajv 8.20.0 和 ajv-formats 3.0.1、ws 8.22.0；安装使用锁内完整依赖。
 
 ```sh
 npm ci --ignore-scripts
@@ -44,7 +44,7 @@ Windows x64 开发包须先显式执行 `node --disallow-code-generation-from-st
 
 库中固定 service_id、database_instance_id、control_epoch 和 request_epoch。普通重启保留它们，为每次启动生成新的 service_boot_id；它不充当 DF02 的已批准运行域。启动记录与迁移记录持久保存，正常关闭只结束本次启动记录；强停留下的旧记录不改写成成功关闭。记录中的 UTC 只供诊断，不是认证时钟、业务 NTP 或排序权威。备份恢复换 scope、完整身份生命周期和持久请求账本尚待实现。
 
-SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 同步及单连接排他模式，关闭连接自动checkpoint并读回检查。第二个进程不能接管仍被占用的业务库；操作系统释放旧连接后，新进程仍以保护状态启动。排他数据库连接不证明外部 worker 已退役，也不授予设备发送权限。驱动使用原始数组行和显式字段映射，可在禁止动态代码生成时运行。完整业务写入前仍须接入DF04有界checkpoint与WAL容量协调，不能将当前保护态启动用于持续生产写入。（SQLite 行为依据：[locking_mode](https://www.sqlite.org/pragma.html#pragma_locking_mode)、[WAL](https://www.sqlite.org/wal.html)。）
+SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 同步，关闭连接自动checkpoint并读回检查。Schema 66及以前使用业务库单连接排他模式；Schema 67—70采用NORMAL业务连接以支持独立短只读事务，并持续独占同目录的 `controller.sqlite.owner` SQLite占用文件。所有启动和迁移入口先取得占用互斥，第二个服务进程和运行中迁移均拒绝；占用文件不承载领域事实，进程退出后锁由系统释放，新进程仍以保护状态启动。该占用机制不证明外部worker已退役，也不授予设备发送权限。驱动使用原始数组行和显式字段映射，可在禁止动态代码生成时运行。完整业务写入前仍须接入DF04有界checkpoint与WAL容量协调，不能将当前保护态启动用于持续生产写入。（SQLite锁模式依据：[locking_mode](https://www.sqlite.org/pragma.html#pragma_locking_mode)、[WAL](https://www.sqlite.org/wal.html)；本机占用与只读并行行为由 `test/database-owner.test.mjs` 验证。）
 
 | 本机入口 | 当前结果 |
 | --- | --- |
@@ -64,7 +64,7 @@ SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 
 
 宿主核证明、实际Job归属和截止后，先在DELETE／EXTRA监督库提交closed的AdmissionReceipt，再发送ADMISSION。核心用SDK解析帧，核服务／数据库、制品／profile、描述摘要与完整启动意图，再用本机原生tick重核窗口。业务schema 11将完整意图、描述、回执和政策与当前service_boot同库不可变绑定，receipt／bootstrap／member_boot禁止跨启动重用。此事务成功后才监听；写入失败关闭业务库，监督已提交的准入历史保留。`bootstrap_authenticated=true`仅描述已完成的握手，客户端仍需观察核心实际监听；`runtime_admitted=false`与ready503保持，不授worker、设备或发送权。
 
-业务库运行 `migrate-storage` 显式升级至当前schema 54，每步保留备份；worker启动准备至少要求schema 12。已有监督日志v1至v4使用 `upgrade-process-host --data-dir <绝对目录>` 显式升级至5。监督日志升级在核DDL、完整性、目录及所有者和无未决尝试后创建唯一备份并同事务新增缺少的bootstrap／admission、启动快照、worker登记、组保留／退役及一次创建／实际观察原件表，既有记录不变；重复升级返回changed=false。host_meta的format继续标识未改变的身份布局，PRAGMA user_version标识schema 5。普通监督启动拒绝v1至v4，不自动修复；未决尝试不能借升级、PID消失或新的挑战绕过旧域恢复。迁移不为旧登记伪造创建原件、Job句柄或退役证据。
+业务库运行 `migrate-storage` 显式升级至当前schema 70，每步保留备份；worker启动准备至少要求schema 12。已有监督日志v1至v4使用 `upgrade-process-host --data-dir <绝对目录>` 显式升级至5。监督日志升级在核DDL、完整性、目录及所有者和无未决尝试后创建唯一备份并同事务新增缺少的bootstrap／admission、启动快照、worker登记、组保留／退役及一次创建／实际观察原件表，既有记录不变；重复升级返回changed=false。host_meta的format继续标识未改变的身份布局，PRAGMA user_version标识schema 5。普通监督启动拒绝v1至v4，不自动修复；未决尝试不能借升级、PID消失或新的挑战绕过旧域恢复。迁移不为旧登记伪造创建原件、Job句柄或退役证据。
 
 当前真实Windows集成覆盖双库绑定后监听、正常退出、错误制品／服务、旧业务库、HMAC／角色／重复帧／EOF／超时拒绝、写入故障、历史迁移和重放拒绝。完整RuntimeBinding、worker子域、保护配置来源、旧域退役恢复、Linux、生产profile及设备验收继续实施。
 
@@ -200,7 +200,7 @@ schema41的核心内部`consumeDeviceAuthorizationRecovery`将实际恢复授权
 
 schema32在每次新的控制变更事务内保存完整物理控制原件，包含独立变更ID、公开修订来源、控制身份、受监督单调域、实际观察时刻和自摘要；同一提交缺少原件即回滚。初始屏障绑定该物理Ref，公开逻辑记录ID不替代内部权威引用。旧控制历史原样保留，不能在已封存提交后补造观察时刻；缺少原件或当前域不符时拒绝后续执行来源。该来源本身不授予OPEN或设备发送许可。
 
-当前SDK选择为`leafseamer.api.v1.product4`，执行通道为`ipc/0.16.0-reference-optional-draft.1`，由`sdk-runtime.json`锁定。显式协商`reference_time_absent`且未选择任何参考时间能力时，OPEN及ACK保留时间字段并允许`null`；字段缺失、未协商使用和时间依赖业务均拒绝。它不授予UTC、定时执行或时间恢复资格。固定内存Worker已装配普通人工执行组件；schema47核心按该固定资格选择能力并接入首次持久OPEN，schema48接入设备Ready，schema50接入无attempt排队命令的持久关闭；发送后的命令终态仍待实现。
+当前SDK选择为`leafseamer.api.v1.product5`，执行通道为`ipc/0.16.0-reference-optional-draft.1`，由`sdk-runtime.json`锁定。显式协商`reference_time_absent`且未选择任何参考时间能力时，OPEN及ACK保留时间字段并允许`null`；字段缺失、未协商使用和时间依赖业务均拒绝。它不授予UTC、定时执行或时间恢复资格。固定内存Worker已装配普通人工执行组件；schema47核心按该固定资格选择能力并接入首次持久OPEN，schema48接入设备Ready，schema50接入无attempt排队命令的持久关闭；发送后的命令终态仍待实现。
 
 schema 30保存真实Execution握手、双向原始帧、领域提交及写尝试；schema 31进一步将初始FENCE与FENCE_ACK接入同一序号日志。Core只从当前人员控制记录、已采用Worker、已批准目录及活设备连接选择关闭屏障，不接收外部提供的控制原件或成功确认。请求和确认各有双向外键绑定的专属写集，领域缺写或写预约失败不交付成功结果。出站字节来自已持久原件，写尝试先提交后入流；结果未知关闭会话并退休Worker，不自动重发。
 
@@ -563,7 +563,7 @@ schema57支持同一受监督会话内的后继固定内存人员即时命令。
 
 当前闭环仍限固定内存人员即时命令；真实设备、面板／自动化、定时命令和完整恢复尚未验收。历史原件不授予新Ready，提交结果未知及跨运行域的完整恢复查询仍待完成。业务就绪继续503。
 
-SDK命令方法使用当前product4类型；命令成功响应是具名裁决、LookupResult或CommandRead正文，不能套用身份接口的data信封。客户端不自动重试，拒收不等于已受理动作停止。实际受监督模拟器与HTTPS验证首次202、重查200、accepted_at为null、当前记录读取、资格到期后查原、冲突及缺读取权限；受理来源或通知漏写时整笔命令及扣费回滚。历史拒收另有文件库、七写点故障、跨context和重启查原回归。真实浏览器、生产资格、跨服务和设备未验收。
+SDK命令方法使用当前product5继承的命令类型；命令成功响应是具名裁决、LookupResult或CommandRead正文，不能套用身份接口的data信封。客户端不自动重试，拒收不等于已受理动作停止。实际受监督模拟器与HTTPS验证首次202、重查200、accepted_at为null、当前记录读取、资格到期后查原、冲突及缺读取权限；受理来源或通知漏写时整笔命令及扣费回滚。历史拒收另有文件库、七写点故障、跨context和重启查原回归。真实浏览器、生产资格、跨服务和设备未验收。
 
 ## 持久设备目录与初始控制状态
 
@@ -574,6 +574,10 @@ schema 10提供本机安装管理使用的 `register-device --data-dir /absolute
 新设备的初始控制状态固定 `automatic`、holder=null、effective_version=reserved_version=0、gate_state=protected。它表示没有人员持有且不允许发送，不表示自动化已经布防。普通重启保留device_id、control_epoch及控制原件；当前没有导入或修改holder、effective或ready的旁路。后续控制变更须在同一设备权威下追加版本化历史，完成完整切点／屏障与当前授权后才生效。
 
 `GET /api/v1/devices` 使用真实目录并核当前device.read；`GET /api/v1/devices/{device_id}/control` 核当前control.read。权限须显式授予；前者返回标准data信封，后者按已有控制契约返回具名ControlRecord正文。SDK分别调用 `listDevices(cursor?)` 和 `getControl(deviceId)`。读取失败不创建观测或控制记录，发响应前重新核权限及原结果。
+
+`GET /api/v1/devices/{device_id}/capabilities` 使用既有SDK能力契约及当前 `device.read`。当前运行装配选取唯一活跃worker和实际模块通道，从最近CONNECTED设备会话、目录批准、扩展安装／审批、静态能力原件和设备／资源绑定读取内容，返回真实provider／boot、模块版本以及状态、参数、结果和前置条件Schema。原件及Schema摘要须一致；HTTP按选定SDK完整验证响应并在发送前重新核对授权与内容。未知设备返回404；缺少运行来源、断开或重新连接尚无目录批准返回503，不回退到旧目录，也不使其他正常会话读取失效。扩展版本必须满足公共能力契约，不能由适配器替换为虚构版本。
+
+只有当前固定内存控制模拟器具备内置完整作用范围审阅；其余静态模板和未保存资格的旧目录仍返回 `footprint.complete=false`，空读写集合不表示没有副作用。完整作用范围不授发布、自动化或设备发送资格。`connection_state=ready`只表示当前设备模块连接，不改变执行闸状态。独立原生模拟器联调覆盖实际HTTPS能力与Schema读取、断开拒绝和新会话重连；首次环境资格仍由测试提供者装配，完整InputBinding／ActionBinding解析、定义发布及实际型号支持继续实施。
 
 分页每页至多64项、描述正文合计不超过48 KiB；游标绑定服务／数据库、目录修订及位置。目录变化返回409，调用方须重新列举；伪造或错格式游标拒绝，不能拼接不同修订当作一个快照。当前只保存待配置描述：connection_state=disconnected、actions／triggers为空，state_schema为false。device_kind是配置分类，不是已验证型号支持；没有虚构provider_boot、设备session、能力或新鲜观测。
 
@@ -595,8 +599,136 @@ Schema 58 在人员控制变更受理时封存设备的完整命令切点和传�
 
 Schema 59 为配对增加不可变修订、当前指针、人员操作回执、一次性挑战和双向证明。`sessions.peerPairings` 仅供可信本机装配使用；stage、activate、reject、revoke 均核当前人员、auth.manage 和近期认证。配置预先固定双方服务／数据库／issuer、证书 DER 与 SPKI、专用 CA 和端点摘要；请求不能指定连接地址或导入 CA。双方按同一显式 transcript 投影确认范围及期限，未完成 attempt 绑定本次 boot 和单调域，重启或到期不能续用。
 
-`startPeerPairingTransport` 提供独立回环 TLS 1.3 端点，只开放配对 challenges、proofs、status。连接要求双向证书认证及已登记的精确证书，每个请求和响应释放前核当前配对、证书与认证区间；会话恢复被拒绝。挑战只存 verifier，新挑战废止旧 pending，消费和证明／配对修订同事务。发起端必须通过实际认证连接取得对端证明；重复 prove 可查回原证明，不重新签发。双方各有 inbound 与 outbound 证明后，仍分别需要本地人员批准；一端 activated 不改变另一端状态，也不授予任何设备或普通内部业务权限。撤销保留历史，旧激活请求查回原件不复活配对。
+`startPeerPairingTransport` 提供独立回环 TLS 1.3 端点，pending阶段只开放配对 challenges、proofs、status；activated阶段的具名核验用途见下节。连接要求双向证书认证及已登记的精确证书，每个请求和响应释放前核当前配对、证书与认证区间；会话恢复被拒绝。挑战只存 verifier，新挑战废止旧 pending，消费和证明／配对修订同事务。发起端必须通过实际认证连接取得对端证明；重复 prove 可查回原证明，不重新签发。双方各有 inbound 与 outbound 证明后，仍分别需要本地人员批准；一端 activated 不改变另一端状态，也不授予任何设备或普通内部业务权限。撤销保留历史，旧激活请求查回原件不复活配对。
 
 可信装配顺序为：完成显式存储迁移和身份初始化，提供合格认证时钟与本机证书材料，分别启动内部 transport 并固定 bindPeers，随后两端 stage 同一 transcript、分别 prove、由两端人员各自 activate。不要把测试生成的证书、环境资格或临时端口当作部署配置。停止 transport 不替代撤销；未完成 attempt 重启失效，已激活记录仍须在新运行中重新核当前配置与对端状态。
 
 文件库检查覆盖 stage 幂等、权限与配置拒绝、重启失效、写入遗漏回滚和58→59保留身份／会话的迁移。两个实际 Controller 实例的 TLS 链覆盖挑战替换、错误秘密、证明重放／查回、证明与批准写入失败、批准事务末尾到期、分别激活、未知客户端和撤销拒绝。认证时钟原有10项回归通过。完整 Seamer 进程、公共管理 HTTP／GUI、业务用途交集、RunGrant、证书轮换、跨主机部署和完整 PKI／故障验收仍待完成，当前不能声明套件配对或自动化功能已完整交付。
+
+### 远端人员令牌的显式签发权限
+
+Schema 60 增加签发方远端人员权限的不可变修订、CAS当前指针、操作原结果与通知outbox。升级保留已有身份和会话，不自动授予任何远端权限。可信本机装配通过 `sessions.remotePermissions.get/replace` 管理指定人员、单目标服务、已激活配对原件、权限集合和认证有效区间；管理操作要求当前人员的auth.manage及近期认证，提交末尾再核。该内部接口尚未提供公共HTTP或GUI管理入口。
+
+既有 `issueToken` 路径对本服务继续使用本地权限，对远端服务读取显式定向记录，并核当前配对修订、配置、期限、主体和会话。token与session_audience在同一writer提交，注销捕获目标时包含已签发远端audience。目标不在批准内、权限超出、配对失效均拒绝；HTTP不把普通未授权误报为存储故障。
+
+修改定向批准会终止该人员在该目标的既有令牌。减少权限、收紧期限或更换配对时，新记录保持pending，阻止新签发；原操作和目标通知原子保存。当前没有远端通知交付与确认接收实现，propagation始终为pending，不宣称远端已完成撤销，也不提供绕过确认的重新激活入口。
+
+此记录只是签发方的权限上限，scope_digest绑定批准原件及目标配对，不证明接收方对象授权。目标服务必须另行验证自己的批准交集、对象范围、可信introspection及管理所需近期认证；本地管理员名称不自动成为远端管理员。已激活配对的人员introspection见下节；Seamer已有本地授权交集及真实人员管理适配器；撤销通知交付确认和首次可信引导仍待接通。
+
+### Controller 启动器的配对装配
+
+可信本机入口 `startController({dataDir, authenticationProvider, pairing, ...})` 现统一启动公共HTTP／HTTPS、独立配对TLS、人员身份核验和会话拒绝自动调度。`pairing` 指定本地 `credential_id`、`cert`、`key`、`ca`，可选 `host`、`port`、`serverName` 和已固定的 `peers` 配置；issuer／epoch从当前数据库的身份初始化结果取得，不接受调用方另报签发者。要求已初始化身份、schema62相关业务和当前合格认证时钟；不满足时拒绝显式配对启动，不保留部分监听。未提供pairing时保持现有保护态启动行为，普通CLI不从环境变量生成信任或首次批准。
+
+返回的 `application.pairing` 仅是进程内可信管理入口，含既有 `api`、`transport`、`remotePermissions` 和 `sessionDenials`，没有新增公共HTTP管理路径或绕过人员权限。可在启动时提供固定peers，或使用transport.bindPeers完成一次绑定后自动启动调度；配置并不激活配对，双方证明与人员批准仍分别执行。内部通道的认证时间和响应释放继续检查当前监督资格。
+
+`close()` 等待公共监听和内部通道／在途调度结束，再停止两个采样器、关闭数据库与监督器，重复调用返回同一关闭结果。身份未初始化、内部端口占用或配置失败时执行同一清理。实际进程测试覆盖正式启动器的HTTPS令牌签发、内部核验、注销自动交付，以及子进程仍存活时两端口关闭、采样与调度停止；首次Seamer管理和环境资格仍是测试提供者，不能据此声明首次部署或生产批准。
+
+### 人员会话的拒绝通知与回执
+
+Schema 62显式新增不可变 `session_denial_receipt`，迁移保留原会话、注销／过期撤销原件、固定目标及outbox，不补造已交付状态。可信任务可调用 `sessions.sessionDenials.deliver(operation_id, pairing_ref, transport)`，消费已有会话撤销通知；调用者不能提交任意session或目标正文来创建撤销。发送前核对原操作、会话终态、永久floor、固定目标及当前配对，消息严格从这些原件生成。
+
+交付复用独立双向TLS配对通道，但要求明确的 `auth.revoke` 用途及当前已激活的Controller—Seamer绑定。`leafseamer.session-denial/1` 仅支持人员会话终态，消息固定签发服务／库、issuer／epoch、原operation引用、session与floor、目标服务／库。完整消息摘要绑定 `leafseamer.session-denial-receipt/1`；单消息16KiB、规范JCS和固定版本，发出正文之前核对TLS证书与当前绑定，响应结束后再次核对。
+
+接收端可靠提交后返回 `identity_state=denied, protection_state=pending`。本端在当前配对仍有效时保存该原回执；同操作、同目标库只接受相同回执，发送或确认失败保留原outbox。断线恢复只投递同一通知，不创建第二次人员撤销。已收到身份拒绝回执仍不将 `session_revocation_target` 或整体propagation标为applied，运行／设备保护和完整固定目标确认尚未完成。
+
+可信本机装配在 `startPeerPairingTransport` 中传入 `sessionDenials: sessions.sessionDenials` 后，`bindPeers` 完成时自动启动调度；普通CLI仍不自行创建配对、来源或批准。调度按持久outbox与当前activated配对分页，每页16项、单并发，页间等待1秒；每次发送沿原路径重核权限、时间与绑定，失败保留原件并继续其他候选，下一遍重试。缺少auth.revoke是该候选的拒绝，不使全部人员会话服务失效。重启从持久记录重新扫描，只有完整摘要与原通知一致的已存回执才跳过网络；内存游标和计数不代表全部目标完成。`sessionDenialStatus()` 仅报告本进程调度计数，关闭通道会停止新任务并等待当前有界发送结束。
+
+自动交付测试覆盖在线注销，以及发送端在收到回执但未保存时关闭，由另一个Node进程重开同一Controller库、恢复原配对材料并查回原回执；再次启动读回已保存回执而不重新发送。定向批准缩权、主体／服务凭据／grant／信任撤销、运行保护及全部目标核销继续独立实现。真实双进程测试覆盖人员注销、错issuer／目标库拒绝、Seamer业务writer拒绝旧句柄、接收后发送端未记回执时的重复查回、持久回执及新进程读取拒绝记录；首次配对和环境资格仍使用测试预置。
+
+### 已激活配对的人员身份核验
+
+Schema 61为指定签发者持久保存整体授权水位；授权、会话、令牌、配对及撤销状态的实际写入与水位推进处于同一事务，失败一并回滚。旧库迁移建立当前基线1，不重建历史计数；读取使用精确十进制字符串，拒绝倒退和溢出。
+
+可信装配可将 `createIntrospectionEndpoint({sessions,serviceId,serviceBootId})` 传入 `startPeerPairingTransport` 的 `introspection` 参数。仅Controller端开放 `POST /internal/auth/introspect`，对端须为当前双向TLS精确证书、已激活配对且获auth.introspect用途；选择器只定位本地记录，请求audience必须等于认证对端。pending、错证书和未批准用途不开放核验。发送令牌前完成TLS认证和当前配置检查；响应发送前再核配对及授权。
+
+当前实现核验真实人员token、会话、定向批准和期限，返回product5快照、签发方整体水位及原会话近期认证区间。未来水位返回409，错误audience返回403；短时快照不延长令牌、会话或近期认证。服务主体token核验和撤销事件接收仍须单独实施；目标端权限由Seamer自己的批准库裁决。文件库迁移与回滚、真实双向TLS、错身份和当前会话撤销均有定向回归；这些结果不替代跨主机、平台资格或首次可信引导验收。
+
+共享配对组件允许当前revoke事务向内部身份适配器传递一次事务范围的末尾核验依据，以完成身份核验配对自身的撤销。该依据由组件私有保存，精确绑定撤销前后原件，提交或回滚后销毁；伪造、错引用、跨事务复用均拒绝。普通activated检查和外部TLS准入不采用这条路径，Controller原人员认证行为保持不变。
+
+GUI站点配置显式增加 `leafseamer.gui.site/2`，固定一个Seamer的HTTPS地址、服务／数据库标识及显示名称；旧site/1继续只接受原字段。可信装配启动时核对完整GUI清单和站点字节，CSP只为该固定origin增加connect-src，脚本、样式、表单及frame规则保持原约束。地址拒绝通配、凭据、查询、fragment及非规范路径，站点配置不授予Seamer访问或配对权限。
+
+
+固定内存控制模拟器的 `simulator-control-footprint.json` 固定模块字节、I/O策略字节和完整能力模板的摘要，覆盖动作所有允许参数。目录接纳在同一不可变原件中保存 `leafseamer-device-footprint-qualification/1`，包括当前安装／批准、运行绑定、通道、设备会话、Schema、审阅和作用范围；具备作用范围的既有目录采用 `leafseamer-catalog-approval/2`；新目录还保存下述绑定注册，使用 `leafseamer-catalog-approval/3`。读取重新核对当前原件与固定审阅，模块、策略或模板变更不能自动沿用旧语义；旧目录不在读取时补造资格，无需改写既有SQL迁移。
+
+该动作的读、写和失败写均按整个虚拟设备计算，并保留共享worker资源占用，避免把同一进程中的不同设备误认为故障独立。物理路径从核心资源原件与服务／数据库身份确定，不接受模块自报别名；未批准任何安全失败类别。此项只核定固定内存模块的作用范围，不批准真实设备、平台环境、完成证据、自动化运行或发送资格。SourceRegistration及本地InputBinding／ActionBinding解析见下文；跨服务发布来源与RunGrant仍须继续接入。
+
+
+固定模拟器的新目录在同一SQLite写入中保存 `leafseamer-device-automation-registration/1`。独立的 `simulator-control-bindings.json` 固定作用范围审阅摘要、参数槽、状态与结果投影；字段类型和读取范围来自这份固定策略，不由调用方自报，也不对任意Schema猜测投影。注册绑定服务／数据库、provider启动身份、设备会话、运行、安装批准、完整目录、Schema和作用范围，原件不可改写；旧目录没有注册时拒绝解析，不在读取时补写。
+
+可信核心装配通过 `workerLaunches.deviceAutomation(deviceId, expectedRegistrationRef?)` 取得观察InputBinding、ActionBinding、Schema原件及规范物理路径的空别名表；已有业务writer中采用 `deviceAutomationCurrent`。两者均重核当前运行来源、审批、完整依赖、连接及已保存注册。指定原注册引用后，换会话或换原件只会拒绝，不自动改用新绑定。返回内容使用SDK当前product5程序模型校验，引用摘要覆盖所指完整正文；只用于当前同步读操作，不是可缓存的执行许可。
+
+该固定模块没有事件触发器，故不生成event绑定；结果投影仅是已审阅字段，不冒充已经产生的步骤结果。注册不是Seamer本地订阅批准、人员发布许可或RunGrant。内部TLS只读传输见下文；跨服务持续当前性证明、Seamer本地批准及完整发布来源仍待接通，当前公共HTTP选择不增加自报绑定入口。
+
+
+已激活配对可显式授予 Seamer `automation.bindings.read` 用途。Seamer 侧配对条目的 `object_scope_digest` 必须是以下完整对象的 JCS SHA-256：`{format:"leafseamer.device-binding-scope/1",authority_service_id,database_instance_id,device_ids}`；设备 UUID 列表排序、去重，包含 1—64 项。该范围随双方配对原件及分别批准固定，旧用途或旧范围不会自动取得新权限。
+
+独立内部协议采用 `POST /internal/pairings/{Controller本地binding_id}/device-bindings`。请求 `leafseamer.device-bindings-request/1` 包含 `challenge_id`、完整 `scope`、`device_id` 与 `expected_registration_ref`（首次读取为 null）；规范 JSON 正文上限 16 KiB。响应 `leafseamer.device-bindings-response/1` 回显挑战、双方服务身份及配对摘要，并附 `bundle_digest` 和完整 `bundle`，总正文上限 256 KiB。范围摘要、指定注册、绑定内容、Schema及别名摘要均需匹配。
+
+正式启动器将该处理器接到当前 `workerLaunches.deviceAutomation`。服务器在读取前核对实际 TLS 对端、已激活配对、用途及设备范围，发送前重读同一注册并重核配对；客户端在发送前及接收完成时重核原配对和证书，固定五秒传输截止，不自动重试。读取失败仅返回拒绝，不返回旧缓存。此协议交付批准原件的读取结果，没有授予持续有效期、Seamer 本地用途批准、发布或执行许可；它不改变公共 product5 HTTP 选择。
+
+
+`supervisor_create_module_writable_peer_capabilities` 联调用例把实际原生监督器、独立内存控制模块和当前 Controller SQLite 注册接到独立 Seamer 安装包。Seamer 经双向TLS及真实定向人员身份取得完整绑定并完成本地编译用途批准；断线后新读取拒绝，重连新会话不接受旧注册／旧批准，显式新批准后再撤回运行，新读取仍拒绝。接收正文逐项匹配核心持久原件，未用预置绑定正文替换模块输出。首次配对、管理员及环境资格仍由测试装配；没有设备写操作、真实设备或生产部署验收，也不证明持续当前性、发布或RunGrant完成。
+
+### 固定模拟器的有界事件采集接口
+
+固定内存控制模块提供 `leafseamer-device-event-capture/1` 内部接口。可信装配以当前设备会话和全模块不复用的 `capture_id` 显式启动；返回采集起点及原写入序号。仅启动后的实际写入生成 `leafseamer.simulator.value.written`，同值重复写入仍分别编号，编码与基线采样不生成事件。事件保存独立序号、唯一标识、实际值、写入序号及原单调时钟前后区间；重读不会刷新时间，也不重放启动前的写入。
+
+每设备最多缓存128条、全模块512条、每批32条、单条1024字节；模块生命周期最多4096个采集身份。读取游标必须等于已确认序号，同一未确认批次反复读取返回原正文和JCS摘要；确认必须精确匹配批次摘要与尾序号，才能释放对应前缀。重复确认幂等，错设备、错会话、错采集身份、错摘要及越界游标拒绝。确认只释放模块内存，不是持久摄取、执行成功、保护完成或解锁回执。
+
+容量耗尽或写前时钟失效时，模块在副作用前拒绝并锁存失败。写后时钟失效时保留实际设备值变化，报告对应已知缺失序号，禁止继续写入，不伪造完整事件。确认不会清除故障。显式停止返回最后序号、已确认序号、丢弃数量和失败状态；断线结束当前采集，新采集使用新身份。上层仍须实现持久缺口与恢复裁决，不能凭新采集自动恢复运行。
+
+当前作用范围及绑定审阅采用修订3，修订1及2原字节分别保存在对应的 `simulator-control-footprint-v1/v2.json` 和 `simulator-control-bindings-v1/v2.json` 文件中。模块基线保存于 `baseline`，事件正文保存于 `payload`，其中包括实际值和写入序号。旧目录、注册及审阅引用不会自动续批。作用范围仍覆盖整个虚拟设备与共享worker，未批准安全失败类别。
+
+Schema 63显式迁移扩展模块帧存储并保留原请求、响应、提交、目录与基线；失败回滚，运行中的库不能迁移。可信核心以 `workerLaunches.openModule(key,{events:true})` 选择 `device-module/4`，归档清单须同时声明该协议和采集API。默认仍使用v3。客户端提供 `startEvents`、`readEvents`、`acknowledgeEvents`、`stopEvents`；调用前后重核当前运行，帧绑定原设备会话，响应原件先写入现有模块日志后才能取得可确认批次。错摘要、错描述符、版本变化、时钟倒退或失败状态回退均关闭通道；不自动重连或重发。宿主在读取到采集失败或显式停止时保护设备闸，但该动作不冒充完整运行保护回执。
+
+同一手动执行语义已显式采用Schema 59—69，仍核人员来源、当前授权、原截止、准备记录与全部出站历史；不据数据库版本推断未来能力。目录仍不广告触发器。模块日志属于原始候选记录，跨服务去重inbox、持久摄取、完整订阅交付、年龄核验与自动化触发仍待接通。
+
+核心接收事件启动和批次时另按 `simulator-event-review.json` 固定的制品、策略及模板核验语义：仅接受具名写入事件、原写入序号基线、32位有符号整数值，以及等于原基线加采集序号的实际写入序号。重算批次摘要不能绕过此校验，错误响应不能返回可确认批次。`qualifiedEventCapture(deviceId)` 仅供可信核心读取当前采集的资格原件，回绑持久启动消息、目录批准、运行与时钟域；停止、断线、采集故障或当前资格失效均拒绝。此读取不重新生成采集时间，不授规范触发资格，也不把候选帧日志升级为规范事件账本。
+
+Schema 64在显式启用事件的通道上装配来源账本。启动注册绑定实际运行、目录及原采集；每批规范Origin、待交付outbox和提交回执在同一SQLite writer中保存，重复事件复用原件，冲突身份与序号间隙拒绝。只有存在已提交批次才允许模块ACK；写入失败或被忽略会回滚并关闭通道。来源最多1024个，事件最多16384条且Origin正文总计32MiB，达到容量即保护。停止、断线与采集故障保留首个故障记录，不自动恢复或重发。
+
+可信核心可调用 `publishedEvents(deviceId,afterSequence,limit)` 读取当前来源的有序原件及故障状态；每页最多32条，新设备会话使用新来源身份。当前没有合格的来源时间提供者，`source_time_ref` 明确为null，原采集区间保留在模块原件中。该读取不证明事件年龄，不授时间敏感触发资格；outbox尚未连接Seamer持久摄取或网络订阅。
+
+配对内部监听器提供 `POST /internal/pairings/{binding_id}/device-events`，采用独立的 `leafseamer.device-events-request/1`／response/1。实际Seamer对端须拥有 `events.internal.read`，配对对象范围固定完整设备集合；`automation.bindings.read`不能代替事件读取权限。请求按 `after_sequence` 返回最多32条且正文最多256KiB，非零游标必须带原来源精确引用，来源变化即拒绝。服务发送前重核当前运行、原来源正文及配对授权；停止采集或撤回运行后不能再读取为当前来源。此只读通道不确认来源outbox、不建立规范订阅，也不返回durable_ingest。
+
+Schema 64的可信人员管理入口提供 `approveSubscriptionServicePrincipal`，显式保存 `local-service-approval/2`；旧 `approveServicePrincipal` 及其批准原件保持原语义。每个批准包含1—8个消费者槽，固定发布服务、接收服务及库、consumer_id、用途、完整Scope引用和当前配对引用，每槽最多一个订阅。批准须由近期认证的人员持有 `auth.manage`，配对对端须已获 `event.internal.subscribe`，`canonical_trigger`仅允许Seamer；事件读取权限不能替代订阅用途。批准有效期不得超出配对，两个人员批准不能把同一消费者槽分配给两个活动主体。
+
+可信核心的 `currentServiceConsumer`／`currentServiceConsumerInTransaction` 在同一writer内核对活动主体、批准原件、固定范围和当前配对，返回由持久身份生成的owner；到期或撤销后拒绝。旧批准请求重投只查历史结果，不恢复当前资格。该投影只代表组织批准；完整订阅入口还须执行下述实际mTLS和本地政策交集。消费者槽批准入口目前未暴露公共HTTP或GUI。
+
+Schema 65显式增加固定设备来源范围登记。可信核心调用 `workerLaunches.eventScopes.register({request_id,device_ids})`，从同一writer中的当前来源账本固定1—32个设备的完整SourceKey、SourceBinding、注册引用与登记水位，同时保存SDK投影Profile、无事件过滤／无历史窗口的具名Selector及ScopeSpec。范围引用覆盖完整登记正文，ScopeSpec另保存自身摘要；登记水位只记录该一致点已经连续提交的事件，不是接收端快照采用或事件年龄证明。主记录、全部成员及封存记录缺一即回滚。全库最多1024个登记，满额拒绝，不静默截断。
+
+65版消费者批准须解析实际登记范围，包含 `status.read`，覆盖全部来源设备，且批准设备集合精确匹配配对的设备范围摘要。`eventScopes.current`／`currentInTransaction`重核来源原件、运行、当前资格和已提交前沿；新增事件不改原范围，来源身份变化、故障、停止、撤销或服务重启均拒绝继续使用。`eventScopes.revoke`保留不可逆墓碑；重投登记只返回原件，不撤销墓碑。旧64版批准原件保留，迁移后必须通过新的实际范围核验才可取得当前消费者投影。此登记仅覆盖设备规范来源；其它投影集合、连接代际／ACK和Seamer持久摄取仍未接通；固定来源的持久快照由下述Schema 68提供，普通CLI不自动批准范围或消费者。
+
+Schema 66提供规范服务订阅的初始持久生命周期。人员管理入口 `approveLocalSubscriptionPolicy` 独立保存 `local-service-receiver-policy/2`，固定组织主体与批准引用、接收服务、消费者槽、设备及 `event.internal.subscribe`／`status.read` 交集。实际订阅仅接受已激活配对的TLS 1.3服务证书，owner由持久主体生成，session为null；不接收Bearer或人员Cookie，普通服务令牌轮换不参与这条mTLS授权链。组织批准和本地政策均须当前有效，任一缺失、撤销、范围不符或到期均拒绝。
+
+配对内部监听器提供 `POST /internal/subscriptions`、`GET /internal/subscriptions/{subscription_id}` 和 `DELETE /internal/subscriptions/{subscription_id}?expected_revision=...`，使用固定product8 SDK及选择头，响应为无缓存的订阅视图。当前仅接收已登记范围的 `canonical_trigger`。新建返回202／building，同owner、用途及request_id重投返回原件，异正文或已占用槽返回409／conflict。关闭采用修订CAS；终态保留墓碑，新请求可使用释放的槽。每槽最多一个活动订阅，全库最多64个活动订阅和1024条历史记录；68版将snapshot_ready纳入活动计数。
+
+订阅、原授权引用、来源登记水位pin、当前修订、审计及outbox同事务保存，缺写整笔回滚。后台定期核验当前资格，不依赖失权客户端DELETE；原到期界限转expired，授权撤销转revoked，来源失效或重启转resync_required，恢复条件不能复活原订阅。66版不生成快照；68版增加下述持久发布。69版提供attach，70版提供快照基线确认；增量ACK、live与完整durable_ingest仍未接通，返回building或snapshot_ready均不能作为自动化运行资格；首次可信引导和完整接收端摄取仍待完成。
+
+Schema 67将固定设备来源的SDK投影及有序通知接入来源writer。新来源、已提交事件、停止和失联同时保存投影修订与通知；事件通知保留原Origin，投影通知保留完整具名Record。重复批次不生成第二份通知，不推进投影修订。任一投影、head或通知缺写都会回滚对应来源写集；通知最多65536条且正文总计64MiB，满额拒绝。该通知序号仅供核心维护快照与增量的内部切点，不作为公共订阅游标。
+
+可信核心可调用 `workerLaunches.eventScopes.snapshotCut(scopeRef)`：先核当前固定范围，在独立只读SQLite事务内取得通知水位、完整来源投影及对应watermark，结束读事务后再次核验当前范围。读取不跨HTTP分页持有数据库锁。投影保留连续前沿、最高已见序号和真实缺口；启动后为baseline_required，尚未生成baseline采用证明。明确丢弃区间保留known缺口，失联保留unknown缺口；快照读取和重投不会消除它们。迁移保留旧来源及订阅原件，不补造过去的投影历史，未具备投影原件的旧来源拒绝进入新快照切点。持久manifest／页面由下述68版实现；当前连接代际释放由下述69版实现；接收端原子采用由Seamer Schema 4提供。
+
+Schema 68显式增加固定来源范围的持久快照。后台从building订阅预留8MiB、原运行时钟域及5秒构建截止和内部日志pin；独立只读事务取得全部来源投影后，释放读连接，在有界内存完成页面封存，再由writer重核授权、原期限、时钟域及预留并原子保存manifest、所有页面原字节、基线摘要、内部日志映射和snapshot_ready修订。任一缺写整笔回滚；进程中断留下的预留失效，不从新状态补页。读取及封存是本进程内阶段，只有完整发布结果持久可见。
+
+页面内容至多240KiB、完整响应至多256KiB，最多128页且manifest与全部完整响应总计不超过8MiB；全库已保存快照与未完成预留合计上限64MiB，容量不足等待或原资格到期，不截断集合。当前构建串行调度，并限制全局未完成预留4个、同owner一个。封存时固定同一受监督时钟域内30秒采用截止，阶段等待与发布耗时不重置，等号失效；原授权到期、撤权、切域、重启或页损坏可更早结束资格。UTC字段只作展示，不代替单调期限。
+
+快照调度每次只推进预留、独立读取、封存或原子发布中的一个阶段，阶段之间释放事务和读连接，使监督回复能够被处理；仍使用同一个5秒构建截止。构建期间的合法附着保留最新连接代际和订阅修订；撤权、到期或中断留下的预留不补建，已取得的读取切点不替换。
+
+已绑定原生监督连接的完整回复显式使用SDK微任务校验调度，使确认更新先于新的业务回调；完整报文校验、1秒解析预算和2秒监督确认原期限保持不变。认证样本策略、授权来源原件及已受理命令截止不受此调度选择影响。
+
+GET订阅返回固定snapshot_ref，重复读取和请求重投不更新快照或延期。公开manifest不包含内部日志序号，页面内容不包含连接代际；manifest摘要、页面摘要和基线marker摘要分别计算，ACK仍为零且来源保持baseline_required。68版未提供页面下载与attach；下述69版补齐这两项。snapshot.applied由70版提供，完整增量durable_ingest仍待实现，generation=0不能作为下载授权。实际原生模拟器、Controller SQLite与独立Seamer mTLS链已验证snapshot_ready和持久页；非空67到68迁移保持222张原表及身份／历史，不补造快照。
+
+Schema 69接通配对mTLS的 GET /internal/events WebSocket升级与固定product8子协议。首个合法client.attach解析持久owner，提交原连接身份、完整尝试摘要、代际CAS、订阅修订与通知后，依次发送contract.ready和server.attached。同attempt只允许原连接重发原响应；换连接复用、同连接另开attempt、错owner／scope／预期代际均拒绝。活动连接替换须显式replace_existing并命中当前代际；提交后原连接立即失去释放资格，后台关闭旧socket。69版不接受resume或业务ACK，不能以附着宣称同步或运行恢复。
+
+新增 GET /internal/subscriptions/{subscription_id}/connections/{attempt_id} 查原，以及原契约的manifest和页面读取。下载必须提供非零expected_connection_generation并匹配仍活跃的WS连接；HTTP与WS分别核当前真实服务身份、完整范围及授权。页面内容固定，响应外层附当前代际；每次释放前重新核对，旧代、撤权、断线或原截止到期均拒绝。重复下载不推进ACK或延期。manifest读取上限8MiB、页面完整响应上限256KiB，固定SDK在相同有界扫描预算下核验完整正文，不截断大范围水位。
+
+每订阅最多1024个连接尝试、全库16384个；服务端最多16个WS，单消息64KiB、队列4条，尚未附着5秒即关闭。Seamer最多8个已建立或正在建立的连接，关闭服务取消等待中的握手。使用锁定的[ws 8.22.0](https://github.com/websockets/ws/releases/tag/8.22.0)，禁用压缩与重定向；帧与解析通过固定SDK。巡检仅在全量授权扫描后回收无效连接，实际发送继续独立完整复核。来源暂不可用是受控失步，不当成未知SQLite故障停止整个身份服务；未知存储异常仍关闭服务。
+
+实际原生模拟器链已覆盖TLS升级、附着、固定分页、原attempt跨socket拒绝、代际替换及旧代下载拒绝；68版实际运行的快照、事件与订阅停机迁移69后，226张原表数据、身份与迁移历史保持。接收端采用和基线确认见Seamer Schema 4及下述70版；上述结果不替代增量durable_ingest、增量交付或运行触发。
+
+product8增加 `POST /internal/subscriptions/{subscription_id}/snapshot-context`，返回当前连接下固定Profile／Selector与原快照租期证据。请求绑定challenge、预期代际和快照引用；范围来自当前持久登记，时钟策略和采集引用来自实际认证时钟。期限取原快照、授权保守上界、采集、运行与健康截止的更早值，量化与漂移仍扣除；查询和释放复核不修改订阅修订、快照期限或ACK。响应前重新核验连接、权限、范围及截止，不能用旧已生成正文跳过撤权。
+
+Schema 70显式增加快照基线确认，保留旧身份、迁移、订阅、快照和连接原件。当前连接收到固定SDK的 `client.snapshot.applied` 后，核对完整DeliveryBinding、固定snapshot_ref、用途、原采用截止及当前授权；同一writer保存基线到内部日志的映射、独立marker摘要、ACK水位、catching_up修订、审计和outbox，缺写全部回滚。确认帧不带客户端自证持久化字段，其承诺由已批准canonical_trigger用途决定。
+
+重复同绑定确认只返回既有状态；客户端通过GET订阅查原，必须核对snapshot_ref、ack_cursor和独立baseline marker的ack_payload_digest。已确认基线不再受下载截止清除，但撤权、原订阅授权到期、运行域变化、重启和内容损坏仍关闭资格。确认不会进入live、释放来源资格或恢复运行；断线resume、reconcile、sync.ready和增量ACK仍待接通，catching_up不能以空resume重新附着。

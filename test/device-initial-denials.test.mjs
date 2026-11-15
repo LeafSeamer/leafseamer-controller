@@ -34,15 +34,22 @@ function fixture(t){
  add('a');
  return {db,service,add,run:fn=>db.transaction(fn).immediate(),capture:()=>db.transaction(()=>captureInitialDenials(db,service,'device')).immediate()};
 }
-test('首次快照必须处于writer，零水位绑定真实scope和设备；后续版本不能沿用首次捕获',t=>{
+test('首次快照必须处于writer，零水位绑定真实scope和设备；未采用版本不能捕获',t=>{
  const f=fixture(t);assert.throws(()=>captureInitialDenials(f.db,f.service,'device'),/initial_denials_writer/);
  const source=f.capture();assert.equal(source.run_deny_snapshot.snapshot_revision,'0');assert.equal(source.command_deny_snapshot.device_id,'device');
  assert.equal(source.outgoing_frame_refs.length,1);
  f.add('b');assert.notDeepEqual(f.capture(),source);
  assert.deepEqual(f.run(()=>readInitialDenials(f.db,f.service,'device',source)),source);
- f.db.exec("UPDATE service_state SET schema_revision='58'");f.service.schema_revision='58';
+ f.db.exec("UPDATE service_state SET schema_revision='71'");f.service.schema_revision='71';
  assert.throws(f.capture,/initial_denials_schema/);
  assert.deepEqual(f.run(()=>readInitialDenials(f.db,f.service,'device',source)),source);
+});
+test('59到70显式采用原手动快照语义，仍拒绝声明自动化能力',t=>{
+ for(const revision of ['59','60','61','62','63','64','65','66','67','68','69','70']){
+  const f=fixture(t);f.db.prepare('UPDATE service_state SET schema_revision=?').run(revision);f.service.schema_revision=revision;
+  const source=f.capture();assert.equal(source.schema_revision,revision);assert.equal(source.format,'initial-manual-deny-snapshots/2');assert.deepEqual(source.pending_admission_refs,[]);
+  f.add('b','HELLO_ACK',{selected_features:[...deviceExecutionCapabilities.base,...deviceExecutionCapabilities.automation]});assert.throws(f.capture,/initial_denials_features/);
+ }
 });
 test('任意设备的已受理命令或不再属于首次关闭的执行历史阻止空快照',t=>{
  const f=fixture(t);f.db.exec("INSERT INTO ca_command_initial VALUES('other_device_command')");

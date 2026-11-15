@@ -69,6 +69,14 @@ test('实际Controller原生采样加HTTPS：SDK登录、刷新、定向token和
   await assert.rejects(new Promise((resolve, reject) => https.get(a.origin + '/health/live', {agent: false}, resolve).on('error', reject)), /certificate/i);
 });
 
+test('schema60未批准远端audience经HTTPS返回拒绝，本地人员令牌仍可用', {timeout:30000},async t=>{
+ const a=await setup(t,true,false,false,false,60);assert.equal((await a.client.login(login)).status,'201');
+ const denied=await a.client.issueToken({audience:crypto.randomUUID(),requested_scopes:['auth.read']});
+ assert.equal(denied.status,'403');assert.equal(denied.body.error.code,'PERMISSION_DENIED');
+ const local=await a.client.issueToken({audience:a.app.identity.service_id,requested_scopes:['session.read']});assert.equal(local.status,'201');
+ assert.equal((await a.client.current()).status,'200');
+});
+
 test('精确Origin与Host、CSRF和Cookie唯一性均在身份操作前验证', {timeout: 15000}, async t => {
   const a = await setup(t);
   for (const origin of ['https://other.invalid', a.origin + '/']) assert.equal((await a.send('POST', '/auth/sessions', login, {Origin: origin})).status, 403);
@@ -249,4 +257,23 @@ for(const schema of [31,50])test('HTTPS人员接管绑定CSRF：schema'+schema+(
  const operation=await (await a.send('GET','/api/v1/control-operations/'+receipt.initial_result_ref.id,undefined,headers)).json();assert.equal(operation.state,'indeterminate');
  const current=await (await a.send('GET','/api/v1/devices/'+device+'/control',undefined,headers)).json();assert.equal(current.holder,null);assert.equal(current.effective_version,'0');assert.equal(current.reserved_version,'1');
  const lookup=await a.send('POST','/api/v1/control-requests/lookup',receipt.identity,headers);assert.equal(lookup.status,200);assert.equal((await lookup.json()).status,'found');
+});
+
+
+test('HTTPS能力读取校验device.read，缺失返回404，未装配返回503且会话仍可用', {timeout:15000}, async t=>{
+ const a=await setup(t,true,false,true,false,62);await a.client.login(login);
+ const denied=await a.client.issueToken({audience:a.app.identity.service_id,requested_scopes:['session.read']});
+ const route='/api/v1/devices/'+a.devices[0].device_id+'/capabilities';
+ const deniedResponse=await a.send('GET',route,undefined,{Authorization:'Bearer '+denied.body.data.access_token});
+ assert.equal(deniedResponse.status,403);assert.equal((await deniedResponse.json()).error.code,'PERMISSION_DENIED');
+ const issued=await a.client.issueToken({audience:a.app.identity.service_id,requested_scopes:['device.read','session.read']});
+ const headers={Authorization:'Bearer '+issued.body.data.access_token};
+ const missing=await a.send('GET','/api/v1/devices/missing/capabilities',undefined,headers);
+ assert.equal(missing.status,404);assert.equal((await missing.json()).error.code,'NOT_FOUND');
+ for(let i=0;i<2;i++){
+  const unavailable=await a.send('GET',route,undefined,headers);
+  assert.equal(unavailable.status,503);assert.equal((await unavailable.json()).error.code,'WORKER_NOT_READY');
+  assert.equal((await a.send('GET','/api/v1/devices',undefined,headers)).status,200);
+  assert.equal((await a.client.current()).status,'200');
+ }
 });

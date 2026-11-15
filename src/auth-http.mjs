@@ -17,7 +17,7 @@ const commandReads=['getCommand','getCommandEvidence','getCommandEvidenceRevisio
 const commandOperations = ['submitCommand', 'lookupCommandAdmission', 'rejectCommandAdmission',...commandReads];
 const controlWrites=['acquireControl','releaseControl','offerTransfer','acceptTransfer','cancelTransfer'];
 const controlOperations=['getControl','getControlOperation','getTransfer','lookupControlRequest',...controlWrites];
-const readOperations = ['getSession', 'listDevices', 'getControl','getControlOperation','getTransfer',...commandReads];
+const readOperations = ['getSession', 'listDevices', 'getCapabilities', 'getControl','getControlOperation','getTransfer',...commandReads];
 const rawPairs = flat => Array.from({length: flat.length / 2}, (_, i) => [flat[2 * i], flat[2 * i + 1]]);
 const credentialPattern = /^v1\.([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([A-Za-z0-9_-]{43})$/;
 const cookieFlags = '; Path=/auth; Secure; HttpOnly; SameSite=Strict';
@@ -48,6 +48,8 @@ function failure(error) {
   if (error?.name === 'ClockError') return [503, 'CLOCK_UNTRUSTED'];
   if (['login_invalid', 'session_invalid', 'session_expired', 'token_invalid', 'token_expired', 'password_invalid'].includes(error?.code)) return [401, 'AUTH_REQUIRED'];
   if (['local_authorization_denied', 'local_authorization_audience', 'http_origin', 'http_tls', 'http_permission', 'http_extension'].includes(error?.code)) return [403, 'PERMISSION_DENIED'];
+  if (['remote_authorization_missing','remote_authorization_denied','remote_authorization_expired','remote_authorization_parent',
+    'peer_pairing_state','peer_pairing_expired','peer_pairing_activation','peer_pairing_configuration_missing','peer_pairing_configuration_changed'].includes(error?.code)) return [403,'PERMISSION_DENIED'];
   if (['login_throttled', 'password_busy', 'token_capacity'].includes(error?.code)) return [429, 'CAPACITY_EXCEEDED'];
   if (error?.code === 'token_request_invalid') return [422, 'INVALID_REQUEST'];
   if (error?.code === 'command_request_invalid') return [422, 'INVALID_REQUEST'];
@@ -65,6 +67,7 @@ function failure(error) {
   if (error?.code==='control_capacity') return [429,'CAPACITY_EXCEEDED'];
   if (error?.code?.startsWith('control_')) return [503,'WORKER_NOT_READY'];
   if (error?.code === 'device_read_denied') return [403, 'PERMISSION_DENIED'];
+  if (['device_capabilities_unavailable','device_capabilities_changed'].includes(error?.code)) return [503, 'WORKER_NOT_READY'];
   if (error?.code === 'device_not_found') return [404, 'NOT_FOUND'];
   if (error?.code === 'device_cursor_invalid') return [422, 'INVALID_REQUEST'];
   if (error?.code === 'device_cursor_stale') return [409, 'REVISION_CONFLICT'];
@@ -134,12 +137,12 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
         const issued = sessions.issueToken(current, {request_id: crypto.randomUUID(), audience: body.audience, requested_scopes: body.requested_scopes});
         if (issued.replay || !issued.secret) reject('token_invalid');
         const proof = {token_id: issued.token.token_id, secret: issued.secret};
-        sessions.verifyToken(proof, serviceId);
+        sessions.verifyToken(proof, issued.token.audience);
         // expires_in为签发期限的秒数提示，服务器始终重新判断原绝对截止；响应不续期。
         const seconds = Number((BigInt(issued.token.expires_ns) - BigInt(issued.token.not_before_ns)) / 1000000000n);
         if (seconds < 1) reject('token_expired');
         await reply(res, request, 201, null, {data: {access_token: wireCredential(issued.token.token_id, issued.secret), token_type: 'Bearer', expires_in: seconds, audience: issued.token.audience},
-          beforeSend() { sessions.verifyToken(proof, serviceId); }});
+          beforeSend() { sessions.verifyToken(proof, issued.token.audience); }});
       } else if (operation === 'logoutSession') {
         const result = sessions.logout(cookieInput(req)), record = result.propagation;
         const data = {operation_ref: {authority_service_id: serviceId, database_instance_id: databaseInstanceId,
@@ -148,11 +151,12 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
             target_id: record.session_id, revision_floor: record.revision_floor}, issuer_commit_revision: record.revision_floor,
           target_service_ids: record.target_service_ids, state: 'accepted', receipts: [], reason: 'logout', audit_id: record.tx_id}};
         await reply(res, request, 202, null, {data, extraHeaders: [clearCookie], beforeSend() { sessions.confirmLogout(result.operation_ref); }});
-      } else if (operation === 'listDevices' || operation === 'getControl') {
+      } else if (operation === 'listDevices' || operation === 'getControl' || operation === 'getCapabilities') {
         const proof = tokenInput(req);
-        const view = () => operation === 'listDevices' ? sessions.listDevices(proof, request.parameters.query.cursor) : sessions.getControl(proof, request.parameters.path.device_id);
+        const view = () => operation === 'listDevices' ? sessions.listDevices(proof, request.parameters.query.cursor) :
+          operation === 'getCapabilities' ? sessions.getCapabilities(proof, request.parameters.path.device_id) : sessions.getControl(proof, request.parameters.path.device_id);
         const data = view();
-        await reply(res, request, 200, null, {data, beforeSend() { if (canonical(view()) !== canonical(data)) reject('device_registry_integrity'); }});
+        await reply(res, request, 200, null, {data, beforeSend() { if (canonical(view()) !== canonical(data)) reject(operation === 'getCapabilities' ? 'device_capabilities_changed' : 'device_registry_integrity'); }});
       } else if(controlOperations.includes(operation)){
         const proof=tokenInput(req),parameters=request.parameters.path;
         if(!readOperations.includes(operation)){
@@ -231,7 +235,7 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
   }
   return Object.freeze({handle(req, res) {
     const pathname = req.url?.split('?')[0];
-    const method = routes.get(pathname) ?? (/^\/api\/v1\/commands\/[^/]+(?:\/evidence(?:\/[^/]+\/revisions\/[^/]+)?)?$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control$/.test(pathname)||/^\/api\/v1\/control-operations\/[^/]+$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+$/.test(pathname)?'GET':
+    const method = routes.get(pathname) ?? (/^\/api\/v1\/commands\/[^/]+(?:\/evidence(?:\/[^/]+\/revisions\/[^/]+)?)?$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/(?:control|capabilities)$/.test(pathname)||/^\/api\/v1\/control-operations\/[^/]+$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+$/.test(pathname)?'GET':
       /^\/api\/v1\/devices\/[^/]+\/control\/(acquire|release|transfers)$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+\/(accept|cancel)$/.test(pathname)||pathname==='/api/v1/control-requests/lookup'?'POST':null);
     if (!method) return false;
     if (req.method !== method) { empty(res, 405, {Allow: method}); return true; }

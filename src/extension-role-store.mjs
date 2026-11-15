@@ -1,3 +1,4 @@
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import {memoExecutionRead} from './execution-read-view.mjs';
 import {sqliteRows} from './sqlite-rows.mjs';
 import crypto from 'node:crypto';
@@ -10,7 +11,7 @@ const exact=(v,keys)=>v&&Object.keys(v).sort().join(',')===keys.split(',').sort(
 const id=v=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\s\S])/.test(v);
 const rows=sqliteRows;
 const frozen=value=>{if(value&&typeof value==='object'){Object.values(value).forEach(frozen);Object.freeze(value);}return value;};
-function readDocument(body,digest){const value=JSON.parse(body);need(canonicalize(value)===body&&'sha256:'+crypto.createHash('sha256').update(body).digest('hex')===digest,'integrity');return value;}
+const readDocument=cacheVerifiedDocument((body,digest)=>{const value=JSON.parse(body);need(canonicalize(value)===body&&'sha256:'+crypto.createHash('sha256').update(body).digest('hex')===digest,'integrity');return value;});
 export function extensionRoleStore({db,service,available,reference,source,attachCurrent}){
  const read=(body,digest)=>memoExecutionRead(db,'extension-document',[body,digest],()=>readDocument(body,digest));
  let active=0;const scope={authority:'controller',authority_service_id:service.service_id,database_instance_id:service.database_instance_id};

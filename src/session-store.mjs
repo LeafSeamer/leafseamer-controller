@@ -17,6 +17,9 @@ import {deviceAuthorizationEvidence} from './device-authorization-evidence.mjs';
 import {deviceInitialResource} from './device-initial-resource.mjs';
 import {deviceInitialOpen} from './device-initial-open.mjs';
 import {peerPairingStore} from './peer-pairing-store.mjs';
+import {remotePermissionStore} from './remote-permission-store.mjs';
+import {tokenIntrospection} from './token-introspection.mjs';
+import {sessionDenialStore} from './session-denial-store.mjs';
 
 const HOUR = 3600000000000n, MINUTE = 60000000000n, MAX = (1n << 64n) - 1n;
 const fail = code => { throw new IdentityError(code); };
@@ -31,7 +34,7 @@ function rows(db, sql, ...args) {
 }
 
 // 内部人员会话服务；clock由同服务认证时钟装配，HTTP Cookie与Origin边界另由传输层落实。
-export function sessionStore(db, serviceId, clock, authority = null, tokensEnabled = false, contextBinding = null, createExtensionManagement = null,controlBarrier=null,executionCurrent=null,attachOpeningSource=null,attachEncodingSource=null,queueCommand=null) {
+export function sessionStore(db, serviceId, clock, authority = null, tokensEnabled = false, contextBinding = null, createExtensionManagement = null,controlBarrier=null,executionCurrent=null,attachOpeningSource=null,attachEncodingSource=null,queueCommand=null,capabilityCurrent=null,eventScopes=null) {
   let stopped = false, dummy = null;
   const buckets = new Map(), global = {start: process.hrtime.bigint(), failed: 0, pending: 0};
   const salt = crypto.randomBytes(32);
@@ -117,7 +120,10 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
     if (value.state !== 'active' || value.issuer_id !== session.issuer_id || value.issuer_epoch !== session.issuer_epoch) fail('local_authorization_denied');
     return value;
   }
-  const {authorizeToken,currentRecordedToken, ...tokens} = accessTokenService({db, serviceId, authority, enabled: tokensEnabled, writer, time, authenticated, terminal, rows, pad});
+  const remote=Number(contextBinding?.service.schema_revision)>=60&&authority?.current?remotePermissionStore({db,service:contextBinding.service,writer,time,authenticated,authority,
+    pairing:reference=>peerPairings.requireActivatedInTransaction(reference)}):null;
+  const tokenAuthority=remote?{resolve:binding=>binding.audience===serviceId?authority.resolve(binding):remote.resolve(binding)}:authority;
+  const {authorizeToken,currentRecordedToken, ...tokens} = accessTokenService({db, serviceId, authority:tokenAuthority, enabled: tokensEnabled, writer, time, authenticated, terminal, rows, pad});
   let contextCurrent;
   const contexts = requestContextService({db, binding: contextBinding, writer, time, authorizeToken, rows, pad,attachCurrent:current=>{contextCurrent=current;}});
   const devices = deviceRegistryReader(db, contextBinding?.service);
@@ -125,7 +131,7 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
     attachEncodingSource(commandEncodingSource({db,service:contextBinding.service,currentRecordedToken,devices,executionCurrent,coreSource:controlBarrier}));
   let manualCurrent,evaluatorCurrent,evidenceCurrent;
   const serviceIdentities=Number(contextBinding?.service.schema_revision)>=36&&authority?.current?
-    serviceIdentityStore({db,service:contextBinding.service,writer,time,authenticated,authority,coreSource:controlBarrier,attachEvaluatorCurrent:current=>{evaluatorCurrent=current;}}):{};
+    serviceIdentityStore({db,service:contextBinding.service,bootId:contextBinding.bootId,writer,time,authenticated,authority,coreSource:controlBarrier,attachEvaluatorCurrent:current=>{evaluatorCurrent=current;},pairings:()=>peerPairings,eventScopes,durationSample:()=>{if(typeof clock.durationSample!=='function')fail('session_clock_duration_unavailable');return clock.durationSample();}}):{};
   const commandStates=commandLifecycle({db,service:contextBinding?.service,bootId:contextBinding?.bootId,writer,domain:()=>controlBarrier?.domain()??null});
   const commands = commandAdmissionStore({db, binding: contextBinding, writer, time, authorizeToken, rows,contextCurrent,devices,executionCurrent,
     domain:()=>controlBarrier.domain(),assertCurrentProjection:()=>commandStates.assertAvailable(),queueCommand});
@@ -150,13 +156,13 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
       if(!session||time().upper>=BigInt(session.recent_before_ns))fail('extension_management_recent_required');}
     return proof;
   });
-  function readDevice(input, permission, read) {
+  function readDevice(input, permission, read, revalidate = () => {}) {
     return deliver(writer(() => {
       const proof = authorizeToken(input, serviceId); if (proof.denied) return proof;
       if (!proof.permissions.includes(permission)) fail('device_read_denied');
       const result = read();
       const last = authorizeToken(input, serviceId); if (last.denied) return last;
-      if (!last.permissions.includes(permission)) fail('device_read_denied'); return result;
+      if (!last.permissions.includes(permission)) fail('device_read_denied'); revalidate(); return result;
     }));
   }
   const peerPairings=Number(contextBinding?.service.schema_revision)>=59?peerPairingStore({db,service:contextBinding.service,bootId:contextBinding.bootId,writer,authenticated,authority,
@@ -169,7 +175,9 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
       return {lower,upper,tick,acquisition:sample.acquisition_ref,runtime_domain_ref:sample.runtime_domain_ref};
     }}):null;
   return Object.freeze({
-    peerPairings,
+    peerPairings, remotePermissions:remote?.api??null,
+    sessionDenials:Number(contextBinding?.service.schema_revision)>=62?sessionDenialStore({db,service:contextBinding.service,writer,pairings:()=>peerPairings}):null,
+    introspectToken:Number(contextBinding?.service.schema_revision)>=61?tokenIntrospection({db,service:contextBinding.service,writer,time,authorizeToken,pairings:()=>peerPairings}):()=>fail('introspection_migration_required'),
     ...tokens, ...contexts, ...commands, ...serviceIdentities,
     selectManualExecutionSource(input,device){if(!manualAuthority)fail('manual_authority_unavailable');return manualAuthority.select(input,device);},
     beginManualExecutionChallenge(input,device,requestId){if(!manualAuthority)fail('manual_authority_unavailable');return manualAuthority.begin(input,device,requestId);},
@@ -210,6 +218,17 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
     enableExtension(input,request){if(!extensionManagement?.lifecycle)fail('extension_activation_unavailable');return extensionManagement.lifecycle.accept(input,'enable',request);},
     lookupExtensionActivation(input,requestId){if(!extensionManagement?.lifecycle)fail('extension_activation_unavailable');return extensionManagement.lifecycle.query(input,requestId);},
     listDevices(input, cursor) { return readDevice(input, 'device.read', () => devices.list(cursor)); },
+    getCapabilities(input, deviceId) {
+      let value;
+      const current=()=>{
+        devices.descriptor(deviceId); if(!capabilityCurrent)fail('device_capabilities_unavailable');
+        try{return capabilityCurrent(deviceId);}catch(error){
+          if(error?.code==='device_capabilities_unavailable'||error?.name==='WorkerRuntimeError'&&!String(error.code).includes('integrity'))fail('device_capabilities_unavailable');
+          throw error;
+        }
+      };
+      return readDevice(input,'device.read',()=>value=current(),()=>{if(canonical(current())!==canonical(value))fail('device_capabilities_changed');});
+    },
     getControl(input, deviceId) { return readDevice(input, 'control.read', () => devices.control(deviceId)); },
     localPermissions(input) {
       if (!authority?.current) fail('local_authorization_unavailable');

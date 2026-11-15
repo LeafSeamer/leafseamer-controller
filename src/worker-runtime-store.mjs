@@ -1,4 +1,5 @@
 import {sqliteRows} from './sqlite-rows.mjs';
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import {withExecutionReadView} from './execution-read-view.mjs';
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
@@ -9,6 +10,7 @@ const same=(a,b)=>canonicalize(a)===canonicalize(b);
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 const freeze=value=>{if(value&&typeof value==='object'){for(const child of Object.values(value))freeze(child);Object.freeze(value);}return value;};
 const rows=sqliteRows;
+const readRuntimeDocument=cacheVerifiedDocument((text,digest)=>{const value=JSON.parse(text);need(canonicalize(value)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===digest,'worker_runtime_integrity');return value;});
 
 // 核心内部采用点。调用方只给启动键，回执必须从本次绑定的监督连接取得。
 export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,extension,verifyDependencies}){
@@ -20,8 +22,7 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
  function observe(intent){const result=inspecting.then(async()=>{live();const selected=await extension.observe(intent),observed=await source.observeWorker(intent);return {selected,observed};});inspecting=result.catch(()=>{});return result;}
  const find=launch=>rows(db,'SELECT * FROM worker_runtime_binding WHERE launch_id=?',launch)[0];
  function view(row){
-  if(!row)return null;const body=JSON.parse(row.body_jcs);
-  need(canonicalize(body)===row.body_jcs&&hash(body)===row.body_digest,'worker_runtime_integrity');
+  if(!row)return null;const body=readRuntimeDocument(row.body_jcs,row.body_digest);
   const withdrawn=rows(db,'SELECT body_jcs FROM worker_runtime_withdrawal WHERE runtime_id=?',row.runtime_id)[0];
   return freeze({binding:body,ref:{kind:'runtime_binding',authority_service_id:service.service_id,database_instance_id:service.database_instance_id,
    object_id:row.runtime_id,revision:'1',digest:row.body_digest},current_boot:row.service_boot_id===bootId,withdrawal:withdrawn?JSON.parse(withdrawn.body_jcs):null});
@@ -34,8 +35,8 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
  }
  function stopEntry(entry){entry.stopped=true;clearTimeout(entry.timer);active.delete(entry.prepared.intent.launch_id);}
  function retire(intent){if(source&&!lost&&!closed)void Promise.resolve().then(()=>source.retireWorker(intent,'revoked')).catch(()=>{});}
- function withdraw(entry,reason){
-  if(entry.stopped)return;stopEntry(entry); // 本地资格先关闭，持久写入失败也不能恢复。
+ function withdraw(entry,reason,error=null){
+  if(entry.stopped)return;entry.failure=error;stopEntry(entry); // 本地资格先关闭，持久写入失败也不能恢复。
   try{if(db.open)db.transaction(()=>saveWithdrawal(entry.row,reason)).immediate();}
   catch{storageFailed=true;for(const other of [...active.values()]){stopEntry(other);retire(other.prepared.intent);}}
   retire(entry.prepared.intent);
@@ -44,7 +45,7 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
   return withExecutionReadView(db,()=>checkCurrentInWriter(entry));
  }
  function checkCurrentInWriter(entry){
-  need(db.inTransaction,'worker_runtime_writer');connected();need(!entry.stopped&&active.get(entry.prepared.intent.launch_id)===entry,'worker_runtime_withdrawn');
+  need(db.inTransaction,'worker_runtime_writer');connected();if(entry.stopped||active.get(entry.prepared.intent.launch_id)!==entry)throw Object.assign(new WorkerRuntimeError('worker_runtime_withdrawn'),{cause:entry.failure});
   source.assertWorkerObservation(entry.observation);
   core();const selected=extension.current(entry.prepared.intent);verifyDependencies?.(entry.prepared.intent,selected);
   need(!db.prepare('SELECT 1 FROM worker_runtime_withdrawal WHERE runtime_id=?').pluck().get(entry.row.runtime_id),'worker_runtime_withdrawn');
@@ -53,7 +54,7 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
  function check(entry){live();return db.transaction(()=>checkInWriter(entry)).immediate();}
  function withdrawFromWriter(entry,error){
   // 外层受理事务可能回滚，不能让回滚恢复进程资格或吞掉必须落盘的撤回。
-  stopEntry(entry);retire(entry.prepared.intent);
+  entry.failure=error;stopEntry(entry);retire(entry.prepared.intent);
   queueMicrotask(()=>{
    try{if(db.open)db.transaction(()=>saveWithdrawal(entry.row,error?.code?.startsWith('extension_')?'approval_changed':'source_changed')).immediate();}
    catch{storageFailed=true;for(const other of [...active.values()]){stopEntry(other);retire(other.prepared.intent);}}
@@ -71,7 +72,7 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
    // 当前检查和下面比较之间不await；使用刚核验的同一份扩展资格。
    need(same(current,selected),'worker_runtime_approval_changed');
    entry.observation=observed;
-  }catch(error){withdraw(entry,error?.code?.startsWith('extension_')?'approval_changed':'source_changed');}
+  }catch(error){withdraw(entry,error?.code?.startsWith('extension_')?'approval_changed':'source_changed',error);}
   finally{entry.refreshing=null;if(!entry.stopped){entry.timer=setTimeout(()=>{void refresh(entry);},500);entry.timer.unref();}}})();
   return entry.refreshing;
  }
@@ -128,7 +129,7 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
   },
   current(key){
    available();const value=prepared(key),entry=value&&active.get(value.intent.launch_id);need(entry,'worker_runtime_unavailable');
-   try{check(entry);return view(entry.row);}catch(error){withdraw(entry,error?.code?.startsWith('extension_')?'approval_changed':'source_changed');throw error;}
+   try{check(entry);return view(entry.row);}catch(error){withdraw(entry,error?.code?.startsWith('extension_')?'approval_changed':'source_changed',error);throw error;}
   },
   currentInTransaction(key){
    need(db.inTransaction&&db.open,'worker_runtime_writer');const value=prepared(key),entry=value&&active.get(value.intent.launch_id);

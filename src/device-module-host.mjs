@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import canonicalize from './runtime/canonicalize.mjs';
 import {openNativeClock} from './native-clock.mjs';
-import {moduleNeed as need,moduleExact as exact,deviceModuleProtocol} from './sdk/device-module.mjs';
+import {moduleNeed as need,moduleExact as exact,deviceModuleProtocol,deviceModuleEventProtocol} from './sdk/device-module.mjs';
 import {moduleSocket,moduleTransport,moduleDigestEqual as same} from './device-module-channel.mjs';
 import {executionSessionIdentity,executionSocket} from './device-execution-channel.mjs';
 import {deviceWorkerSession} from './device-worker-session.mjs';
@@ -16,7 +16,7 @@ const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(valu
 // 仅由固定worker入口装配。root及完整库存来自监督器持续持有的加载材料。
 export function hostDeviceModule({admitted,materials,executionIdentity,failed}){
  const clock=openNativeClock(),abort=new AbortController(),sessions=new Map(),usedSessions=new Set(),usedCaptures=new Set();
- let transport,implementation=null,binding=null,sequence=1n,stopped=false,execution=null,executionSession=null;
+ let transport,implementation=null,binding=null,protocol=null,sequence=1n,stopped=false,execution=null,executionSession=null;
  const gates=new Map(),executions=new Map(),executionBindings=new Map();
  const stop=()=>{if(stopped)return;stopped=true;abort.abort();executionSession?.close();transport?.close();failed();};
  const current=frame=>{need(!stopped,'module_closed');const now=clock.tick();need(now>=BigInt(frame.issued_tick_ns)&&now<BigInt(frame.deadline_tick_ns),'module_expired');};
@@ -58,7 +58,7 @@ export function hostDeviceModule({admitted,materials,executionIdentity,failed}){
   const timer=timerFor(frame);let type,body;
   try{
    if(!implementation){
-    need(frame.type==='LOAD'&&!binding,'module_state');const runtime=frame.body.runtime;
+    need(frame.type==='LOAD'&&!binding,'module_state');protocol=frame.version;const runtime=frame.body.runtime;
     exact(runtime,['format','runtime_binding_id','service_id','database_instance_id','service_boot_id','launch_intent','clock_domain_descriptor','admission_receipt','gate_state']);
     need(runtime.format==='leafseamer-worker-runtime-binding/1'&&runtime.gate_state==='closed'&&same(runtime.launch_intent,admitted.intent)&&
      same(runtime.admission_receipt,admitted.receipt)&&same(runtime.clock_domain_descriptor,admitted.descriptor)&&hash(runtime)===frame.binding.runtime_binding_ref.digest&&
@@ -70,7 +70,7 @@ export function hostDeviceModule({admitted,materials,executionIdentity,failed}){
     need(same(expectedExecution,executionIdentity),'module_execution_binding');execution=expectedExecution;
     need(same(frame.body.configuration.reference,admitted.intent.extension_binding.configuration_ref),'module_configuration');
     binding=frame.binding;
-    need(materials.manifest.api_versions.includes('leafseamer-device-module/2')&&materials.manifest.ipc_versions.includes(deviceModuleProtocol),'module_version');
+    need(materials.manifest.api_versions.includes('leafseamer-device-module/2')&&materials.manifest.ipc_versions.includes(protocol),'module_version');
     // 文件政策和模块都是批准归档的固定字节；策略对象不自赋联网或设备写许可。
     file(entry.io_policy_file_id,'policy');const selected=await import(pathToFileURL(file(entry.file_id,'module')).href);current(frame);
     need(typeof selected.createDeviceModule==='function','module_interface');
@@ -79,9 +79,11 @@ export function hostDeviceModule({admitted,materials,executionIdentity,failed}){
     need(implementation?.api_version==='leafseamer-device-module/2'&&['connectReadOnly','proposeCatalog','captureBaseline','stopReadOnly'].every(k=>typeof implementation[k]==='function'),'module_interface');
     if(materials.manifest.api_versions.includes('leafseamer-device-primitives/1'))need(implementation.execution?.api_version==='leafseamer-device-primitives/1'&&
      ['encodePrimitive','writePrimitive'].every(key=>typeof implementation.execution[key]==='function'),'module_execution_interface');
+    if(protocol===deviceModuleEventProtocol)need(materials.manifest.api_versions.includes('leafseamer-device-event-capture/1')&&
+     implementation.events?.api_version==='leafseamer-device-event-capture/1'&&['start','read','acknowledge','stop'].every(key=>typeof implementation.events[key]==='function'),'module_event_interface');
     type='LOADED';body={entry_id:entry.entry_id};
    }else{
-    need(same(frame.binding,binding),'module_binding');const input=frame.body,device=input.device_id,session=input.device_session_id;
+    need(frame.version===protocol&&same(frame.binding,binding),'module_binding');const input=frame.body,device=input.device_id,session=input.device_session_id;
     need(admitted.intent.object_scope.device_ids.includes(device),'module_device');
     if(frame.type==='CONNECT'){
      need(!sessions.has(device)&&!usedSessions.has(session)&&usedSessions.size<4096,'module_session');usedSessions.add(session);
@@ -90,7 +92,15 @@ export function hostDeviceModule({admitted,materials,executionIdentity,failed}){
      sessions.set(device,session);attachExecutionDevice(device,session);type='CONNECTED';body={...input,identity,catalog};
     }else{
      need(sessions.get(device)===session,'module_session');
-     if(frame.type==='BIND_EXECUTION'){
+     if(frame.type.startsWith('EVENT_')){
+      need(protocol===deviceModuleEventProtocol&&implementation.events,'module_event_interface');
+      const identity={device_id:device,device_session_id:session,capture_id:input.capture_id},request={...input,signal:abort.signal};
+      if(frame.type==='EVENT_START'){type='EVENT_STARTED';body={...identity,capture:await implementation.events.start(request)};}
+      else if(frame.type==='EVENT_READ'){const result=await implementation.events.read(request);if(result.state==='failed')gates.get(device)?.protect();type='EVENT_BATCH';body={...identity,result};}
+      else if(frame.type==='EVENT_ACK'){const receipt=await implementation.events.acknowledge(request);exact(receipt,['capture_id','through_sequence','batch_digest']);need(receipt.capture_id===input.capture_id&&receipt.through_sequence===input.through_sequence&&receipt.batch_digest===input.batch_digest,'module_event_ack');type='EVENT_ACKED';body={...identity,through_sequence:receipt.through_sequence,batch_digest:receipt.batch_digest};}
+      else{need(frame.type==='EVENT_STOP','module_direction');gates.get(device)?.protect();type='EVENT_STOPPED';body={...identity,closed:await implementation.events.stop(request)};}
+      current(frame);
+     }else if(frame.type==='BIND_EXECUTION'){
       need(implementation.execution&&gates.has(device),'module_execution_unavailable');const previous=executions.get(device);
       if(previous)need(same(previous.ref,input.execution.ref)&&hash(input.execution.value)===previous.ref.digest,'module_execution_rebind');
       else executions.set(device,deviceWorkerExecution({execution:input.execution,binding:executionBindings.get(device),runtimeRef:binding.runtime_binding_ref,
@@ -108,7 +118,7 @@ export function hostDeviceModule({admitted,materials,executionIdentity,failed}){
      }
     }
    }
-   current(frame);await transport.send({...frame,version:deviceModuleProtocol,type,request_id:crypto.randomUUID(),reply_to:frame.request_id,body});
+   current(frame);await transport.send({...frame,version:protocol,type,request_id:crypto.randomUUID(),reply_to:frame.request_id,body});
   }finally{clearTimeout(timer);}
  }});
  // 只向固定worker装配层提供当前身份；不传给第三方模块，也不代表HELLO已协商或闸已开放。

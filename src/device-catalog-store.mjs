@@ -6,6 +6,9 @@ import {simulatorCatalog} from './simulator-module.mjs';
 import {simulatorControlCatalog} from './simulator-control-module.mjs';
 import {openNativeClock} from './native-clock.mjs';
 import {bindDeviceExecution} from './device-execution-binding.mjs';
+import {qualifyDeviceFootprint,readDeviceFootprint} from './device-footprint-qualification.mjs';
+import {registerDeviceAutomation,readDeviceAutomationRegistration} from './device-automation-binding.mjs';
+import {qualifyDeviceEventFrame} from './device-event-qualification.mjs';
 
 const digest=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
 const hash=value=>digest(canonicalize(value));
@@ -65,25 +68,33 @@ export function deviceCatalogStore({db,current,select}){
   const runtime=current();return db.transaction(()=>{
    checkSession(channel,device,session);const approved=catalog(channel,device,session);
    need(same(approved.body.runtime_binding_ref,runtime.ref)&&same(approved.body.qualification,profile(runtime,device)),'module_catalog_stale');
+   readDeviceFootprint(approved.body,runtime);
+   if(approved.body.automation_registration)readDeviceAutomationRegistration(approved.body,runtime);
    const row=db.prepare('SELECT body_jcs,body_digest FROM device_baseline_sample WHERE approval_id=? ORDER BY length(sample_sequence) DESC,sample_sequence DESC LIMIT 1').raw().get(approved.id);
    return frozen({catalog_approval_ref:ref(runtime,'catalog_approval',approved.id,approved.body),approval:approved.body,sample:row?read(...row):null});
   }).immediate();
  }
  return Object.freeze({
   receive(frame){
-   if(!['CONNECTED','CAPTURED'].includes(frame.type))return;
+   if(!['CONNECTED','CAPTURED','EVENT_STARTED','EVENT_BATCH'].includes(frame.type))return;
    const runtime=current();active(frame,runtime);
    db.transaction(()=>{
     need(db.prepare("SELECT frame_digest FROM device_module_frame WHERE message_id=? AND direction='w2c'").pluck().get(frame.request_id)===hash(frame),'module_catalog_frame');
     const body=frame.body,channel=frame.binding.ipc_session_id,qualification=profile(runtime,body.device_id),definition=definitions.find(value=>value.qualification===qualification.qualification);
     checkSession(channel,body.device_id,body.device_session_id);
-    if(frame.type==='CONNECTED'){
+    if(frame.type==='EVENT_STARTED'||frame.type==='EVENT_BATCH'){
+     const approved=catalog(channel,body.device_id,body.device_session_id);need(same(approved.body.qualification,qualification),'module_catalog_stale');
+     const row=frame.type==='EVENT_BATCH'?db.prepare("SELECT frame_jcs,frame_digest FROM device_module_frame WHERE channel_id=? AND message_type='EVENT_STARTED' AND direction='w2c' AND json_extract(frame_jcs,'$.body.capture_id')=?").raw().get(channel,body.capture_id):null;
+     qualifyDeviceEventFrame({approved:approved.body,runtime,frame,started:row?read(...row):null});
+    }else if(frame.type==='CONNECTED'){
      need(same(body.identity,definition.identity)&&same(body.catalog,definition.catalog),'module_catalog_proposal');
      need(db.prepare('SELECT count(*) FROM device_catalog_approval').pluck().get()<4096,'module_catalog_capacity');
-     const id=crypto.randomUUID(),record={format:'leafseamer-readonly-catalog-approval/1',approval_id:id,
+     const id=crypto.randomUUID(),record={format:'leafseamer-catalog-approval/3',approval_id:id,
       runtime_binding_ref:runtime.ref,channel_id:channel,device_id:body.device_id,device_session_id:body.device_session_id,
       connected_message_id:frame.request_id,identity:body.identity,catalog:body.catalog,qualification,
-      evidence_policy:{kind:'correlated_baseline/1',completion:'read_only_snapshot',automation_eligible:false,write_eligible:false}};
+      evidence_policy:{kind:'correlated_baseline/1',completion:'read_only_snapshot',automation_eligible:false,write_eligible:false},
+      footprint_qualification:qualifyDeviceFootprint({runtime,qualification,channel_id:channel,device_session_id:body.device_session_id,catalog:body.catalog})};
+     record.automation_registration=registerDeviceAutomation(record,runtime);
      need(db.prepare('INSERT INTO device_catalog_approval VALUES(?,?,?,?,?,?,?,?)').run(id,channel,body.device_id,body.device_session_id,frame.request_id,canonicalize(record),hash(record),
       canonicalize({kind:'readonly_catalog_approved',approval_id:id,record_digest:hash(record)})).changes===1,'module_catalog_storage');
     }else{
@@ -111,6 +122,17 @@ export function deviceCatalogStore({db,current,select}){
    }).immediate();
   },
   current:currentCatalog,
+  currentEventCapture(channel,device,session){
+   const approved=currentCatalog(channel,device,session),runtime=current();
+   return db.transaction(()=>{
+    checkSession(channel,device,session);
+    const row=db.prepare("SELECT frame_jcs,frame_digest,message_type FROM device_module_frame WHERE channel_id=? AND direction='w2c' AND message_type IN ('EVENT_STARTED','EVENT_STOPPED') AND json_extract(frame_jcs,'$.body.device_id')=? AND json_extract(frame_jcs,'$.body.device_session_id')=? ORDER BY length(sequence) DESC,sequence DESC LIMIT 1").raw().get(channel,device,session);
+    need(row&&row[2]==='EVENT_STARTED','module_event_source_inactive');
+    const started=read(row[0],row[1]);
+    need(!db.prepare("SELECT 1 FROM device_module_frame WHERE channel_id=? AND direction='w2c' AND message_type='EVENT_BATCH' AND json_extract(frame_jcs,'$.body.capture_id')=? AND json_extract(frame_jcs,'$.body.result.state')='failed' LIMIT 1").pluck().get(channel,started.body.capture_id),'module_event_source_failed');
+    return frozen(qualifyDeviceEventFrame({approved:approved.approval,runtime,frame:started}));
+   }).immediate();
+  },
   bindExecution(channel,device,session){
    const approved=currentCatalog(channel,device,session);
    return bindDeviceExecution(db,current(),approved);

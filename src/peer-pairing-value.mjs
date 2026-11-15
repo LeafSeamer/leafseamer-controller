@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import {canonical, digest, same} from './auth-clock-value.mjs';
-import {IdentityError} from './identity-crypto.mjs';
+import {IdentityError} from './identity-error.mjs';
 export const pairingNeed=(ok,code)=>{if(!ok)throw new IdentityError('peer_pairing_'+code);};
 const need=pairingNeed;
 export const pairingFields=(value,names)=>need(value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join(',')===names.split(',').sort().join(','),'input');

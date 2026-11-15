@@ -22,6 +22,17 @@ function inspect(dir, fn) {
 }
 const counts = dir => inspect(dir, db => ['evidence', 'acquisition', 'head', 'fault'].map(name => db.prepare('SELECT count(*) FROM authentication_clock_' + name).pluck().get()));
 
+test('耗时边界来自当前持久采集策略，旧读取形状不变且不延长采集截止',async t=>{
+ const dir=await directory(t),storage=openStorage(dir),f=fixture(storage.authenticationClock.scope,null,{sampleWindowPolicy:'authentication-clock-sample/2'}),clock=startAuthenticationClock(f.source,storage.authenticationClock,f.provider,{schedule:false});
+ try{const first=clock.durationSample(),original=storage.authenticationClock.current(first.runtime_domain_ref.clock_domain_id);
+  assert.deepEqual(first.duration_bounds,{policy_ref:original.policy_ref,drift_ppb:original.drift_ppb,monotonic_quantization_ns:original.monotonic_quantization_ns});
+  assert.equal(Object.hasOwn(clock.pairingSample(),'duration_bounds'),false);assert.equal(Object.hasOwn(clock.current(),'duration_bounds'),false);
+  assert.ok(Object.isFrozen(first.duration_bounds)&&Object.isFrozen(first.duration_bounds.policy_ref));f.source.advance(3000000000n);
+  const next=clock.durationSample();assert.deepEqual(next.acquisition_ref,first.acquisition_ref);assert.deepEqual(next.duration_bounds,first.duration_bounds);assert.equal(next.valid_before_tick_ns,first.valid_before_tick_ns);
+  f.source.advance(2000000000n);assert.throws(()=>clock.durationSample(),e=>e.code==='auth_clock_expired');assert.equal(clock.status().qualified,false);
+ }finally{clock.stop();storage.close();}
+});
+
 test('显式五秒认证策略从原采样计算，旧原件不延长，误差继续外推且到期拒绝',()=>{
  const scope={service_id:crypto.randomUUID(),service_boot_id:crypto.randomUUID()},legacy=fixture(scope),fresh=fixture(scope,null,{sampleWindowPolicy:'authentication-clock-sample/2'});
  const capture=legacy.source.capture(),old=acquisition(capture,legacy.evidence),next=acquisition(fresh.source.capture(),fresh.evidence);

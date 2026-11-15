@@ -54,6 +54,12 @@ export function deviceRegistryReader(db, service) {
   const transaction = () => { available(db, service); if (!db.inTransaction) fail('device_transaction_required'); };
   const cursorFor = (revision, sequence) => `v1.${revision}.${sequence}.` + digest({scope: scope(service), kind: 'device_page', revision, sequence}).slice(7);
   return Object.freeze({
+    descriptor(deviceId) {
+      transaction(); if (!id(deviceId)) fail('device_registration_invalid');
+      const row = rows(db, 'SELECT descriptor_body,descriptor_digest FROM device_record WHERE device_id=?', deviceId)[0];
+      if (!row) fail('device_not_found'); const value = decode(row.descriptor_body, row.descriptor_digest);
+      if (value.device_id !== deviceId) fail('device_registry_integrity'); return value;
+    },
     list(cursor) {
       transaction(); const revision = db.prepare('SELECT revision FROM device_catalog WHERE singleton=1').pluck().get(); let after = 0;
       if (cursor !== undefined) {
