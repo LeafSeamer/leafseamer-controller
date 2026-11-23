@@ -48,11 +48,11 @@ function scenes(response,program){
  return Object.freeze(values);
 }
 
-async function inspectObs(input,cut,signal,onInvalidated){
+async function inspectObs(input,cut,signal,onInvalidated,writable=false){
  requireValue(record(input)&&Object.keys(input).sort().join(',')==='password,port'&&Number.isInteger(input.port)&&
   input.port>0&&input.port<=65535&&name(input.password),'input');
  requireValue(signal===undefined||signal instanceof AbortSignal&&!signal.aborted,'disconnected');
- let password=input.password,pending=null,failure=null,retained=false,sampling=false;
+ let password=input.password,pending=null,failure=null,retained=false,sampling=false,cutTarget=null;
  const port=input.port;
  let deadline=performance.now()+budgetMs;
  const socket=new WebSocket('ws://127.0.0.1:'+port,protocol,{
@@ -85,7 +85,8 @@ async function inspectObs(input,cut,signal,onInvalidated){
    requireValue(record(frame)&&record(frame.d),'frame');
    if(frame.op===5){
     requireValue(typeof frame.d.eventType==='string','frame');
-    if(frame.d.eventType==='CurrentProgramSceneChanged'&&retained&&!sampling)return;
+    if(frame.d.eventType==='CurrentProgramSceneChanged'&&retained&&
+     (!sampling||(cutTarget!==null&&frame.d.eventData?.sceneUuid===cutTarget)))return;
     requireValue(!invalidate.has(frame.d.eventType)&&!(cut&&cutInvalidate.has(frame.d.eventType)),'observation_changed');
     return;
    }
@@ -94,18 +95,23 @@ async function inspectObs(input,cut,signal,onInvalidated){
    waiting.resolve(frame.d);
   }catch(error){fail(error instanceof ObsDiscoveryError?error:new ObsDiscoveryError('frame'));}
  });
- function receive(op,outgoing){
+ function receive(op,outgoing,beforeSend){
   assertCurrent();
   requireValue(pending===null,'response');
+  const wire=outgoing===undefined?undefined:JSON.stringify(outgoing);
+  if(beforeSend){beforeSend();assertCurrent();}
   return new Promise((resolve,reject)=>{
    pending={op,resolve,reject};
-   if(outgoing!==undefined)socket.send(JSON.stringify(outgoing),error=>{if(error)fail(new ObsDiscoveryError('transport'));});
+   if(wire!==undefined)socket.send(wire,error=>{if(error)fail(new ObsDiscoveryError('transport'));});
   });
+ }
+ function verifyReply(response,type,id){
+  requireValue(response.requestId===id&&response.requestType===type&&response.requestStatus?.result===true&&response.requestStatus.code===100,'request');
  }
  async function read(requestType,requestData){
   const requestId=randomUUID(),response=await receive(7,{op:6,d:{requestType,requestId,...(requestData&&{requestData})}});
-  requireValue(response.requestId===requestId&&response.requestType===requestType&&response.requestStatus?.result===true&&
-   response.requestStatus.code===100&&record(response.responseData),'request');
+  verifyReply(response,requestType,requestId);
+  requireValue(record(response.responseData),'request');
   return response.responseData;
  }
  async function observe(){
@@ -160,7 +166,7 @@ async function inspectObs(input,cut,signal,onInvalidated){
   retained=true;
   clearTimeout(timer);
   deadline=Infinity;
-  return Object.freeze({initial,assertCurrent,close,async sample(){
+  async function sample(){
    assertCurrent();
    requireValue(!sampling,'session_busy');
    sampling=true;
@@ -169,7 +175,69 @@ async function inspectObs(input,cut,signal,onInvalidated){
    try{return Object.freeze({...profile,...await observe()});}
    catch(error){fail(error);throw error;}
    finally{sampling=false;clearTimeout(timer);deadline=Infinity;}
-  }});
+  }
+  if(!writable)return Object.freeze({initial,assertCurrent,close,sample});
+  const initialIds=initial.scenes.map(scene=>scene.obs_scene_uuid).sort();
+  function sameCut(value){
+   requireValue(value.collection_name===initial.collection_name&&
+    JSON.stringify(value.scenes.map(scene=>scene.obs_scene_uuid).sort())===JSON.stringify(initialIds),'resource_catalog_changed');
+  }
+  async function cutScene({sceneUuid,enterTransmission,tick,nextIoSequence,evidenceDeadline,signal:executionSignal}){
+   assertCurrent();
+   requireValue(!sampling,'session_busy');
+   requireValue(uuid(sceneUuid)&&initialIds.includes(sceneUuid),'cut_target');
+   requireValue(typeof enterTransmission==='function'&&typeof tick==='function'&&typeof nextIoSequence==='function'&&
+    typeof evidenceDeadline==='bigint'&&executionSignal instanceof AbortSignal&&!executionSignal.aborted,'cut_dispatch');
+   const frames=[];
+   const abortExecution=()=>fail(new ObsDiscoveryError('disconnected'));
+   let entered=false,permitRejected=false;
+   function frame(kind,requestId,scene_uuid=null){
+    requireValue(!executionSignal.aborted,'disconnected');assertCurrent();
+    const now=tick(),previous=frames.at(-1);
+    requireValue(typeof now==='bigint'&&now>=0n&&now<evidenceDeadline&&(!previous||now>=BigInt(previous.tick_ns)),'cut_evidence_time');
+    const order=nextIoSequence();
+    requireValue(typeof order==='bigint'&&order>0n&&(!previous||order>BigInt(previous.io_seq)),'cut_evidence_order');
+    frames.push(Object.freeze({kind,protocol_request_id:requestId,io_seq:String(order),tick_ns:String(now),success:true,scene_uuid}));
+   }
+   sampling=true;
+   deadline=performance.now()+budgetMs;
+   timer=setTimeout(()=>fail(new ObsDiscoveryError('timeout')),budgetMs);
+   executionSignal.addEventListener('abort',abortExecution,{once:true});
+   try{
+    sameCut(await observe());
+    const setType='SetCurrentProgramScene',setId=randomUUID();
+    const setReply=await receive(7,{op:6,d:{requestType:setType,requestId:setId,requestData:{sceneUuid}}},()=>{
+     frame('set_send',setId,sceneUuid);
+     try{requireValue(enterTransmission()===undefined,'cut_dispatch');}
+     catch(error){permitRejected=error instanceof ObsCutEntryRejected;throw error;}
+     entered=true;
+     cutTarget=sceneUuid;
+    });
+    verifyReply(setReply,setType,setId);
+    frame('set_ack',setId);
+    const queryType='GetCurrentProgramScene',queryId=randomUUID();
+    requireValue(queryId!==setId,'cut_evidence_request');
+    const queryReply=await receive(7,{op:6,d:{requestType:queryType,requestId:queryId}},()=>frame('query_send',queryId));
+    verifyReply(queryReply,queryType,queryId);
+    const observed=queryReply.responseData?.sceneUuid;
+    requireValue(uuid(observed)&&initialIds.includes(observed),'cut_evidence_scene');
+    frame('query_result',queryId,observed);
+    const verified=await observe();
+    sameCut(verified);
+    const evaluated=tick();
+    requireValue(verified.program_scene_uuid===observed&&typeof evaluated==='bigint'&&
+     evaluated>=BigInt(frames.at(-1).tick_ns)&&evaluated<evidenceDeadline,'cut_evidence_changed');
+    return Object.freeze({format:'leafseamer-obs-cut-wire/1',target_scene_uuid:sceneUuid,frames:Object.freeze(frames)});
+   }catch(error){
+    // 许可拒绝只发生在发送前。进入出口后，任何异常都关闭会话，交由调用方保留未决尝试。
+    if(entered||!permitRejected)fail(error);
+    throw error;
+   }finally{
+    executionSignal.removeEventListener('abort',abortExecution);
+    sampling=false;cutTarget=null;clearTimeout(timer);deadline=Infinity;
+   }
+  }
+  return Object.freeze({initial,assertCurrent,close,sample,cutScene});
  }finally{password=null;if(!retained)close();}
 }
 
@@ -179,4 +247,11 @@ export const inspectObsCut=input=>inspectObs(input,true);
 export function openObsCutSession(input,signal,onInvalidated){
  requireValue(signal instanceof AbortSignal&&(onInvalidated===undefined||typeof onInvalidated==='function'),'session');
  return inspectObs(input,true,signal,onInvalidated);
+}
+
+// 仅由固定执行装配使用。调用方持有写门，须在传输回调中同步复核并消费原许可。
+export class ObsCutEntryRejected extends Error{}
+export function openObsCutWriterSession(input,signal,onInvalidated){
+ requireValue(signal instanceof AbortSignal&&(onInvalidated===undefined||typeof onInvalidated==='function'),'session');
+ return inspectObs(input,true,signal,onInvalidated,true);
 }
