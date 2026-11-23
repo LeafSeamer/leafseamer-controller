@@ -289,9 +289,17 @@ schema 22的新worker准备必须匹配本次服务启动的人员受理、当�
 
 密钥由部署配置以只读方式交付，`CREDENTIALS_DIRECTORY` 仅设置目录路径。使用私有管道运行 `seal-obs-resource-credential --data-dir ABSOLUTE_PATH --secret-dir SECRET_PATH`，输入 `device_id`、`password` 和字符串 `version`。Controller 先验证已登记资源和 OBS 凭据，再以 AES-256-GCM 封存并返回 `secret_ref`。相同版本和内容可重试，内容变更须使用新的版本。密文与 nonce 账本独立于业务库。
 
-随后用 `observe-obs-resource --data-dir ABSOLUTE_PATH --secret-dir SECRET_PATH`，私有管道传入 `device_id`、`samples` 和 `secret_ref`。资源、所属 Controller、版本或用途不匹配时拒绝。nonce 账本遗失或恢复了旧备份后，先在维护状态生成新的主密钥和账本，再重新封存凭据。该入口当前用于 Linux 本机观察。
+随后用 `observe-obs-resource --data-dir ABSOLUTE_PATH --secret-dir SECRET_PATH`，私有管道传入 `device_id`、`samples` 和 `secret_ref`。资源、所属 Controller、版本或用途不匹配时拒绝。nonce 账本遗失或恢复了旧备份后，先在维护状态生成新的主密钥和账本，再重新封存凭据。
 
-Controller 的 OBS 只读目录资格绑定安装包内的 `obs-device-module.mjs`、`obs-module-policy.json` 和 `obs-module-capability.json`。批准的扩展配置只含当前 `resource_ref` 与该资源的 `secret_ref`。Worker 依赖与目录核验拒绝其他模块或策略、跨资源引用及任何动作或触发范围。通过只读目录核验的样本也必须使用登记的场景 UUID，且序号在同一设备会话内连续。原生 Worker 的秘密装载仍需接入。
+### Windows 本机 OBS 凭据
+
+以运行 Controller 和 Worker 的 Windows 账户，在受保护的数据根目录中准备一个空的 `<data-dir>.obs-secrets` 同级目录。例如数据目录为 `C:\LeafSeamer\controller` 时，凭据目录为 `C:\LeafSeamer\controller.obs-secrets`。运行 `init-obs-secret-store --data-dir ABSOLUTE_PATH`。初始化限制凭据目录的访问主体为当前账户和 SYSTEM，由 Windows DPAPI 的 `CurrentUser` 范围保护主密钥，密钥同时绑定 Controller 身份。
+
+使用私有管道运行 `seal-obs-resource-credential --data-dir ABSOLUTE_PATH`，输入与 Linux 相同。按引用进行本机观察时，运行 `observe-obs-resource --data-dir ABSOLUTE_PATH --secret-dir SECRET_PATH`，其中 `SECRET_PATH` 必须是同一个固定同级目录。凭据目录只接受本地盘符路径。换用 Windows 账户时须在新账户下初始化并重新封存凭据。
+
+### OBS Worker 与目录
+
+Controller 的 OBS 只读目录资格绑定安装包内的 `obs-device-module.mjs`、`obs-module-policy.json` 和 `obs-module-capability.json`。批准的扩展配置只含当前 `resource_ref` 与该资源的 `secret_ref`。Windows Worker 核验装载帧中的资源原件和引用，从固定凭据目录解封后建立只读会话。Worker 依赖与目录核验拒绝其他模块或策略、跨资源引用及任何动作或触发范围。通过只读目录核验的样本须使用登记的场景 UUID，并在同一设备会话内保持序号连续。Windows 原生监督全链仍待验收。
 
 ### 执行会话与初始控制屏障
 

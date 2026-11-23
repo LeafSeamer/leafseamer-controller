@@ -18,7 +18,7 @@ export const obsDeviceCatalog = () => structuredClone(catalog);
 const need = (ok, code) => { if (!ok) throw new ObsDiscoveryError(code); };
 
 // 凭据由固定装配在内存中提供；只读模块接口不包含任意 RPC 或发送出口。
-export function createObsDeviceModule({resource, password, signal}) {
+export function createObsDeviceModule({resource, password, signal, onInvalidated}) {
   need(resource?.format === 'leafseamer-obs-local-resource/1' && resource.endpoint?.address === '127.0.0.1' &&
     resource.profile === 'obs_isolated_empty_cut/1' && signal instanceof AbortSignal && !signal.aborted, 'resource_binding');
   const selected = structuredClone(resource), device = selected.device_ref.object_id;
@@ -26,8 +26,10 @@ export function createObsDeviceModule({resource, password, signal}) {
   const retire = () => {
     retired = true;
     password = null;
+    signal.removeEventListener('abort', retire);
     connection?.close();
   };
+  signal.addEventListener('abort', retire, {once:true});
   function current(input) {
     need(!retired && !signal.aborted && input.signal === signal &&
       input.device_id === device && connection && input.device_session_id === session, 'device_session');
@@ -47,7 +49,7 @@ export function createObsDeviceModule({resource, password, signal}) {
         typeof input.device_session_id === 'string' && /^[A-Za-z0-9_-]{1,128}(?![\s\S])/.test(input.device_session_id), 'device_session');
       opening = true;
       try {
-        connection = await openObsCutSession({port: selected.endpoint.port, password}, signal);
+        connection = await openObsCutSession({port: selected.endpoint.port, password}, signal, onInvalidated);
         connection.assertCurrent();
         matches(connection.initial);
         session = input.device_session_id;

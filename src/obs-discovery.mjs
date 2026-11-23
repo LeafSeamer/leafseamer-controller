@@ -48,7 +48,7 @@ function scenes(response,program){
  return Object.freeze(values);
 }
 
-async function inspectObs(input,cut,signal){
+async function inspectObs(input,cut,signal,onInvalidated){
  requireValue(record(input)&&Object.keys(input).sort().join(',')==='password,port'&&Number.isInteger(input.port)&&
   input.port>0&&input.port<=65535&&name(input.password),'input');
  requireValue(signal===undefined||signal instanceof AbortSignal&&!signal.aborted,'disconnected');
@@ -58,7 +58,7 @@ async function inspectObs(input,cut,signal){
  const socket=new WebSocket('ws://127.0.0.1:'+port,protocol,{
   followRedirects:false,perMessageDeflate:false,maxPayload:262144,maxFragments:16,maxBufferedChunks:16,handshakeTimeout:budgetMs
  });
- const fail=error=>{
+ const fail=(error,notify=true)=>{
   if(failure)return;
   failure=error;
   const waiting=pending;pending=null;
@@ -66,9 +66,10 @@ async function inspectObs(input,cut,signal){
   clearTimeout(timer);
   signal?.removeEventListener('abort',close);
   socket.terminate();
+  if(notify&&retained)onInvalidated?.(error);
  };
  let timer=setTimeout(()=>fail(new ObsDiscoveryError('timeout')),budgetMs);
- const close=()=>fail(new ObsDiscoveryError('disconnected'));
+ const close=()=>fail(new ObsDiscoveryError('disconnected'),false);
  signal?.addEventListener('abort',close,{once:true});
  function assertCurrent(){
   if(failure)throw failure;
@@ -175,7 +176,7 @@ async function inspectObs(input,cut,signal){
 // 场景名称只供显示。两个入口读完即关闭，不签发 DeviceSession 或写权限。
 export const discoverObsScenes=input=>inspectObs(input,false);
 export const inspectObsCut=input=>inspectObs(input,true);
-export function openObsCutSession(input,signal){
- requireValue(signal instanceof AbortSignal,'session');
- return inspectObs(input,true,signal);
+export function openObsCutSession(input,signal,onInvalidated){
+ requireValue(signal instanceof AbortSignal&&(onInvalidated===undefined||typeof onInvalidated==='function'),'session');
+ return inspectObs(input,true,signal,onInvalidated);
 }

@@ -11,10 +11,13 @@ import {deviceWorkerSession} from './device-worker-session.mjs';
 import {deviceExecutionGate} from './device-execution-gate.mjs';
 import {deviceWorkerExecution,fixedWorkerExecutionAvailable} from './device-worker-execution.mjs';
 import {deviceExecutionVersion,deviceExecutionCapabilities} from './sdk/device-execution.mjs';
+import {isObsModuleEntry} from './obs-module-profile.mjs';
+import {createObsDeviceModule} from './obs-device-module.mjs';
+import {openWindowsSecretStore} from './secret-store.mjs';
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 
 // 仅由固定worker入口装配。root及完整库存来自监督器持续持有的加载材料。
-export function hostDeviceModule({admitted,materials,executionIdentity,failed}){
+export function hostDeviceModule({admitted,materials,executionIdentity,obsSecretsDirectory,failed}){
  const clock=openNativeClock(),abort=new AbortController(),sessions=new Map(),usedSessions=new Set(),usedCaptures=new Set();
  let transport,implementation=null,binding=null,protocol=null,sequence=1n,stopped=false,execution=null,executionSession=null;
  const gates=new Map(),executions=new Map(),executionBindings=new Map();
@@ -73,10 +76,30 @@ export function hostDeviceModule({admitted,materials,executionIdentity,failed}){
     binding=frame.binding;
     need(materials.manifest.api_versions.includes('leafseamer-device-module/2')&&materials.manifest.ipc_versions.includes(protocol),'module_version');
     // 文件政策和模块都是批准归档的固定字节；策略对象不自赋联网或设备写许可。
-    file(entry.io_policy_file_id,'policy');const selected=await import(pathToFileURL(file(entry.file_id,'module')).href);current(frame);
-    need(typeof selected.createDeviceModule==='function','module_interface');
-    implementation=await selected.createDeviceModule(Object.freeze({configuration:frame.body.configuration.value,
-     device_ids:admitted.intent.object_scope.device_ids,signal:abort.signal,tick:()=>clock.tick()}));current(frame);
+    file(entry.io_policy_file_id,'policy');const moduleFile=file(entry.file_id,'module'),configuration=frame.body.configuration.value;
+    const deviceIds=admitted.intent.object_scope.device_ids;
+    if(isObsModuleEntry(materials,entry)){
+     need(protocol===deviceModuleProtocol&&obsSecretsDirectory,'module_obs_profile');
+     exact(configuration,['resource_ref','resource_record','secret_ref']);
+     const {resource_ref:ref,resource_record:record,secret_ref:secret}=configuration;
+     need(deviceIds.length===1&&ref?.kind==='resource'&&ref.authority_service_id===runtime.service_id&&
+      ref.database_instance_id===runtime.database_instance_id&&ref.revision==='1'&&hash(record)===ref.digest&&
+      record?.resource_id===ref.object_id&&record.device_ref?.kind==='device'&&record.device_ref.object_id===deviceIds[0]&&
+      record.device_ref.authority_service_id===runtime.service_id&&record.device_ref.database_instance_id===runtime.database_instance_id&&
+      secret?.secret_id===ref.object_id,'module_obs_binding');
+     const secrets=openWindowsSecretStore({owner:runtime.service_id,directory:obsSecretsDirectory,readonly:true});
+     let cleartext;
+     try{
+      cleartext=secrets.read(secret);current(frame);
+      implementation=createObsDeviceModule({resource:record,password:new TextDecoder('utf-8',{fatal:true}).decode(cleartext),
+       signal:abort.signal,onInvalidated:stop});
+     }finally{cleartext?.fill(0);secrets.close();}
+    }else{
+     const selected=await import(pathToFileURL(moduleFile).href);current(frame);
+     need(typeof selected.createDeviceModule==='function','module_interface');
+     implementation=await selected.createDeviceModule(Object.freeze({configuration,device_ids:deviceIds,signal:abort.signal,tick:()=>clock.tick()}));
+    }
+    current(frame);
     need(implementation?.api_version==='leafseamer-device-module/2'&&['connectReadOnly','proposeCatalog','captureBaseline','stopReadOnly'].every(k=>typeof implementation[k]==='function'),'module_interface');
     if(materials.manifest.api_versions.includes('leafseamer-device-primitives/1'))need(implementation.execution?.api_version==='leafseamer-device-primitives/1'&&
      ['encodePrimitive','writePrimitive'].every(key=>typeof implementation.execution[key]==='function'),'module_execution_interface');

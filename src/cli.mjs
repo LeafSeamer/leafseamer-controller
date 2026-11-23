@@ -13,7 +13,8 @@ import {connectCoreSupervisor, SupervisorError} from './supervisor-control.mjs';
 import {openTrustedPairingClock, readTrustedPairingProfile} from './trusted-pairing-profile.mjs';
 import {LocalPairingError, runLocalPairingAdmin} from './local-pairing-admin.mjs';
 import {discoverObsScenes,inspectObsCut,ObsDiscoveryError} from './obs-discovery.mjs';
-import {initializeLinuxSecretStore,openLinuxSecretStore} from './secret-store.mjs';
+import {initializeLinuxSecretStore,initializeWindowsSecretStore,openLinuxSecretStore,openWindowsSecretStore} from './secret-store.mjs';
+import {windowsSecretDirectory} from './windows-secret-files.mjs';
 const authenticatedCore = process.argv[2] === 'contained-core-auth';
 const emit = value => (authenticatedCore ? process.stderr : process.stdout).write(JSON.stringify(value) + '\n');
 const pairingStartupError = code => /^pairing_(profile|clock)_[a-z_]+$/.test(code);
@@ -64,8 +65,11 @@ try {
   } else if (secretCommands.includes(command)) {
     requireLocalAdministrator();
     if (command !== 'init-obs-secret-store') requirePrivatePipes();
-    const directory=options['--secret-dir'];
+    const windows=process.platform==='win32', dataDir=options['--data-dir'];
+    const windowsDirectory=windows?windowsSecretDirectory(dataDir):null;
+    const directory=options['--secret-dir']??(windows&&command!=='observe-obs-resource'?windowsDirectory:undefined);
     if(!directory&&command!=='observe-obs-resource')throw new Error('arguments');
+    if(windows&&(options['--new-key-dir']||(directory&&path.resolve(directory)!==windowsDirectory)))throw new Error('arguments');
     for(const location of [directory,options['--new-key-dir']].filter(Boolean)){
       if(!path.isAbsolute(location))throw new Error('arguments');
       const relative=path.relative(options['--data-dir'],location);
@@ -76,11 +80,13 @@ try {
     try {
       const owner=storage.identity.service_id;
       if(command==='init-obs-secret-store'){
-        const result=initializeLinuxSecretStore({owner,directory,credentialDirectory:options['--new-key-dir']});
+        const initialize=windows?initializeWindowsSecretStore:initializeLinuxSecretStore;
+        const result=initialize({owner,directory,credentialDirectory:options['--new-key-dir']});
         emit({event:'obs_secret_store_initialized',...result,ready:false});
       }else{
         const input=await readEnrollmentInput();
-        if(directory)secrets=openLinuxSecretStore({owner,directory,credentialDirectory:process.env.CREDENTIALS_DIRECTORY,readonly:command==='observe-obs-resource'});
+        const open=windows?openWindowsSecretStore:openLinuxSecretStore;
+        if(directory)secrets=open({owner,directory,credentialDirectory:process.env.CREDENTIALS_DIRECTORY,readonly:command==='observe-obs-resource'});
         if(command==='seal-obs-resource-credential'){
           const result=await storage.sealObsResourceCredential(input,secrets);
           emit({event:'obs_resource_credential_sealed',...result,ready:false});

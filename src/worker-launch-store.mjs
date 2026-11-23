@@ -5,6 +5,8 @@ import {workerDependencies,currentWorkerDependencies} from './worker-dependencie
 import {workerRuntimeStore} from './worker-runtime-store.mjs';
 import {workerAuthorizationStore} from './worker-authorization-store.mjs';
 import {connectDeviceModule} from './device-module-client.mjs';
+import {isObsModuleEntry} from './obs-module-profile.mjs';
+import {readRegisteredObsResource} from './obs-resource.mjs';
 import {deviceModuleJournal} from './device-module-store.mjs';
 import {deviceCatalogStore} from './device-catalog-store.mjs';
 import {deviceEventSourceStore} from './device-event-source.mjs';
@@ -237,7 +239,17 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
       const catalog=deviceCatalogStore({db,current,select(intent){const selected=extensionSource.current(intent);return {selected,dependencies:currentWorkerDependencies(db,service,intent,selected)};}});
       const journal=deviceModuleJournal(db,current),eventSource=events&&Number(service.schema_revision)>=64?deviceEventSourceStore({db,current,catalog,projectReferenceCapture}):null;
       let module;
-      try{module=await connectDeviceModule({events,eventSource,current,invalidate:()=>runtime.invalidate(selected),configuration:{reference,value:body.configuration},
+      try{
+        const configuration=db.transaction(()=>{
+          const checked=current(),intent=checked.binding.launch_intent,chosen=extensionSource.current(intent);
+          if(!isObsModuleEntry(chosen.content,chosen.entry))return {reference,value:body.configuration};
+          const graph=currentWorkerDependencies(db,service,intent,chosen),link=graph.links[0],obs=link?.obs_binding;
+          need(!events&&graph.links.length===1&&obs,'worker_module_obs_scope');
+          const registered=readRegisteredObsResource(db,service,link.device_ref.object_id);
+          need(same(registered.resource_ref,obs.resource_ref)&&same(body.configuration,{resource_ref:obs.resource_ref,secret_ref:obs.secret_ref}),'worker_module_obs_binding');
+          return {reference,value:{...body.configuration,resource_record:registered.record}};
+        }).immediate();
+        module=await connectDeviceModule({events,eventSource,current,invalidate:()=>runtime.invalidate(selected),configuration,
         journal:{open:journal.open,record(direction,frame){journal.record(direction,frame);if(direction==='w2c')catalog.receive(frame);}},catalog,
         onClose:()=>{try{eventSource?.close();}finally{modules.delete(selected.launch_id);}}});
         available();current();modules.set(selected.launch_id,module);return module;

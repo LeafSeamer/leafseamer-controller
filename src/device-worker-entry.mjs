@@ -5,6 +5,7 @@ import canonicalize from './runtime/canonicalize.mjs';
 import {bootstrapDeviceWorker} from './worker-bootstrap.mjs';
 import {hostDeviceModule} from './device-module-host.mjs';
 import {executionSessionIdentity} from './device-execution-channel.mjs';
+import {windowsSecretDirectory} from './windows-secret-files.mjs';
 
 // 固定子进程入口；上下文只由原生父进程写入并持续保护，不接受模块路径或任意argv。
 try {
@@ -23,7 +24,8 @@ try {
   const executionIdentity=executionSessionIdentity({authority_service_id:value.identity.service_id,database_instance_id:value.identity.database_instance_id,
     controller_boot_id:value.execution.controller_boot_id,worker_boot_id:admitted.receipt.member_boot_id,
     clock_domain_id:admitted.descriptor.clock_domain_id,descriptor_digest:admitted.descriptor.descriptor_digest});
-  const host=hostDeviceModule({admitted,materials:value.module,executionIdentity,failed:()=>process.exit(1)});
+  const obsSecretsDirectory=process.platform==='win32'?windowsSecretDirectory(path.dirname(args[1])):undefined;
+  const host=hostDeviceModule({admitted,materials:value.module,executionIdentity,obsSecretsDirectory,failed:()=>process.exit(1)});
   let input='';process.stdin.setEncoding('utf8');
   process.stdin.on('data',part=>{input+=part;if(input==='stop\n'){host.close();return;}
     if(input.length>=5||!'stop\n'.startsWith(input))host.close();});

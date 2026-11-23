@@ -4,6 +4,7 @@ import {createCipheriv, createDecipheriv, createHmac, randomBytes, randomUUID, t
 import Database from 'better-sqlite3';
 import {canonical} from './auth-clock-value.mjs';
 import {IdentityError} from './identity-error.mjs';
+import {checkWindowsSecretFile, initializeWindowsSecretDirectory, loadWindowsSecretKey} from './windows-secret-files.mjs';
 
 const keyFile = 'leafseamer-master-key';
 const ledgerFile = 'nonce.sqlite';
@@ -57,20 +58,39 @@ function createFile(filename, contents, mode = 0o600) {
 
 function protectedLedger(directory, options) {
   const filename = path.join(directory.location, ledgerFile);
-  const handle = fs.openSync(filename, flags.O_RDONLY | flags.O_NOFOLLOW | flags.O_NONBLOCK);
-  try { verifyFile(handle, 1073741824); } finally { fs.closeSync(handle); }
+  if (directory.windows) checkWindowsSecretFile(filename, 1073741824);
+  else {
+    const handle = fs.openSync(filename, flags.O_RDONLY | flags.O_NOFOLLOW | flags.O_NONBLOCK);
+    try { verifyFile(handle, 1073741824); } finally { fs.closeSync(handle); }
+  }
   return new Database(filename, {fileMustExist: true, timeout: 1000, ...options});
 }
 
-export function initializeLinuxSecretStore({owner, directory, credentialDirectory}) {
+function syncPublished(store, filename) {
+  if (!store.windows) { fs.fsyncSync(store.fd); return; }
+  const fd = fs.openSync(filename, 'r+');
+  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+}
+
+function closeDirectory(directory) {
+  if (directory?.fd !== undefined) fs.closeSync(directory.fd);
+}
+
+function initializeStore({owner, directory, credentialDirectory}, windows) {
   need(atom(owner), 'owner');
   let store, credentials, db, key;
   try {
-    store = privateDirectory(directory);
-    credentials = privateDirectory(credentialDirectory);
-    need(store.identity !== credentials.identity && fs.readdirSync(store.location).length === 0 &&
-      fs.readdirSync(credentials.location).length === 0, 'initialize_existing');
     key = randomBytes(32);
+    let winKey;
+    if (windows) {
+      winKey = initializeWindowsSecretDirectory(directory, owner, key);
+      store = {location: directory, windows: true};
+    } else {
+      store = privateDirectory(directory);
+      credentials = privateDirectory(credentialDirectory);
+      need(store.identity !== credentials.identity && fs.readdirSync(store.location).length === 0 &&
+        fs.readdirSync(credentials.location).length === 0, 'initialize_existing');
+    }
     const keyId = keyIdentity(key);
     const filename = path.join(store.location, ledgerFile);
     createFile(filename, Buffer.alloc(0));
@@ -91,9 +111,14 @@ export function initializeLinuxSecretStore({owner, directory, credentialDirector
       db.prepare('INSERT INTO secret_store_identity VALUES (1, ?, ?)').run(owner, keyId);
     }).immediate();
     db.close(); db = null;
-    fs.fsyncSync(store.fd);
-    createFile(path.join(credentials.location, keyFile), key, 0o400);
-    fs.fsyncSync(credentials.fd);
+    syncPublished(store, filename);
+    if (windows) {
+      createFile(winKey.path, winKey.protectedKey);
+      syncPublished(store, winKey.path);
+    } else {
+      createFile(path.join(credentials.location, keyFile), key, 0o400);
+      fs.fsyncSync(credentials.fd);
+    }
     return {profile_id: profile, owner_service_id: owner, key_id: keyId};
   } catch (error) {
     if (error instanceof IdentityError) throw error;
@@ -101,19 +126,24 @@ export function initializeLinuxSecretStore({owner, directory, credentialDirector
   } finally {
     key?.fill(0);
     db?.close();
-    if (store) fs.closeSync(store.fd);
-    if (credentials) fs.closeSync(credentials.fd);
+    closeDirectory(store);
+    closeDirectory(credentials);
   }
 }
 
-export function openLinuxSecretStore({owner, directory, credentialDirectory, readonly = false}) {
+function openStore({owner, directory, credentialDirectory, readonly = false}, windows) {
   need(atom(owner), 'owner');
   let store, credentials, db, key, opened = false;
   try {
-    store = privateDirectory(directory);
-    credentials = privateDirectory(credentialDirectory);
-    need(store.identity !== credentials.identity, 'directory_binding');
-    key = readKey(credentials);
+    if (windows) {
+      key = loadWindowsSecretKey(directory, owner);
+      store = {location: directory, windows: true};
+    } else {
+      store = privateDirectory(directory);
+      credentials = privateDirectory(credentialDirectory);
+      need(store.identity !== credentials.identity, 'directory_binding');
+      key = readKey(credentials);
+    }
     const keyId = keyIdentity(key);
     db = protectedLedger(store, {readonly});
     if (!readonly) db.pragma('synchronous = FULL');
@@ -138,9 +168,11 @@ export function openLinuxSecretStore({owner, directory, credentialDirectory, rea
       const head = header(ref);
       let partial, last;
       try {
-        const fd = fs.openSync(targetFor(head), flags.O_RDONLY | flags.O_NOFOLLOW | flags.O_NONBLOCK);
+        const filename = targetFor(head);
+        if (windows) checkWindowsSecretFile(filename, 98304);
+        const fd = fs.openSync(filename, windows ? 'r' : flags.O_RDONLY | flags.O_NOFOLLOW | flags.O_NONBLOCK);
         let text;
-        try { verifyFile(fd, 98304); text = fs.readFileSync(fd, 'utf8'); }
+        try { if (!windows) verifyFile(fd, 98304); text = fs.readFileSync(fd, 'utf8'); }
         finally { fs.closeSync(fd); }
         const envelope = JSON.parse(text);
         need(canonical(envelope) === text && Object.keys(envelope).sort().join(',') === 'ciphertext,header,nonce,tag' &&
@@ -159,7 +191,8 @@ export function openLinuxSecretStore({owner, directory, credentialDirectory, rea
       } finally { partial?.fill(0); last?.fill(0); }
     }
     const reserve = db.transaction(() => {
-      need(db.prepare('SELECT coalesce(max(reservation),0) FROM secret_nonce').pluck().get() < ledgerBudget, 'nonce_budget');
+      need(db.prepare('SELECT coalesce(max(reservation),0) FROM secret_nonce').pluck().get() < ledgerBudget &&
+        (!windows || fs.readdirSync(store.location).length < 4090), 'nonce_budget');
       const insert = db.prepare('INSERT INTO secret_nonce(nonce) VALUES (?) ON CONFLICT(nonce) DO NOTHING');
       for (let attempts = 0; attempts < 8; attempts++) {
         const nonce = randomBytes(12);
@@ -184,7 +217,7 @@ export function openLinuxSecretStore({owner, directory, credentialDirectory, rea
       };
       let temporary;
       try {
-        if (matches()) { fs.fsyncSync(store.fd); return; }
+        if (matches()) { syncPublished(store, target); return; }
         const nonce = reserve.immediate();
         const cipher = createCipheriv('aes-256-gcm', key, nonce, {authTagLength: 16});
         cipher.setAAD(Buffer.from(canonical(head)));
@@ -194,7 +227,7 @@ export function openLinuxSecretStore({owner, directory, credentialDirectory, rea
           ciphertext: ciphertext.toString('base64url')}));
         try { fs.linkSync(temporary, target); }
         catch (error) { if (error.code !== 'EEXIST' || !matches()) throw error; }
-        fs.fsyncSync(store.fd);
+        syncPublished(store, target);
       } catch (error) {
         if (error instanceof IdentityError) throw error;
         throw new IdentityError('secret_store_publish');
@@ -209,16 +242,21 @@ export function openLinuxSecretStore({owner, directory, credentialDirectory, rea
     return Object.freeze({read, write, close() {
       if (closed) return;
       closed = true;
-      key.fill(0); db.close(); fs.closeSync(store.fd);
+      key.fill(0); db.close(); closeDirectory(store);
     }});
   } catch (error) {
     if (error instanceof IdentityError) throw error;
     throw new IdentityError('secret_store_unavailable');
   } finally {
-    if (credentials) fs.closeSync(credentials.fd);
+    closeDirectory(credentials);
     if (!opened) {
       key?.fill(0); db?.close();
-      if (store) fs.closeSync(store.fd);
+      closeDirectory(store);
     }
   }
 }
+
+export const initializeLinuxSecretStore = input => initializeStore(input, false);
+export const initializeWindowsSecretStore = input => initializeStore(input, true);
+export const openLinuxSecretStore = input => openStore(input, false);
+export const openWindowsSecretStore = input => openStore(input, true);
