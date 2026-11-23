@@ -20,6 +20,7 @@ import {peerPairingStore} from './peer-pairing-store.mjs';
 import {remotePermissionStore} from './remote-permission-store.mjs';
 import {tokenIntrospection} from './token-introspection.mjs';
 import {sessionDenialStore} from './session-denial-store.mjs';
+import {confirmObsSceneCatalog} from './obs-scene-confirmation.mjs';
 
 const HOUR = 3600000000000n, MINUTE = 60000000000n, MAX = (1n << 64n) - 1n;
 const fail = code => { throw new IdentityError(code); };
@@ -209,6 +210,25 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
     };
     return readDevice(input,'device.read',()=>value=current(),()=>{if(canonical(current())!==canonical(value))fail('device_capabilities_changed');});
   }
+  function tokenWithCsrf(input,csrf){
+    const proof=authorizeToken(input,serviceId);if(proof.denied)return proof;
+    const row=db.prepare('SELECT csrf_verifier FROM auth_session WHERE session_id=?').raw().get(proof.session_id);
+    if(!row||!crypto.timingSafeEqual(csrfHash(csrf),row[0]))fail('session_invalid');
+    return proof;
+  }
+  function confirmSceneCatalog(input,csrf,device,request){
+    return deliver(writer(()=>{
+      const proof=tokenWithCsrf(input,csrf);if(proof.denied)return proof;
+      if(proof.principal_kind!=='human'||!proof.permissions.includes('device.read')||!proof.permissions.includes('extension.manage'))
+        fail('device_read_denied');
+      devices.descriptor(device);
+      if(!sceneCatalogCurrent)fail('obs_scene_confirmation_unavailable');
+      const catalog=sceneCatalogCurrent(device,false);
+      const last=authorizeToken(input,serviceId);if(last.denied)return last;
+      if(last.authorization_digest!==proof.authorization_digest)fail('device_read_denied');
+      return confirmObsSceneCatalog(db,catalog,request,last);
+    }));
+  }
   const peerPairings=Number(contextBinding?.service.schema_revision)>=59?peerPairingStore({db,service:contextBinding.service,bootId:contextBinding.bootId,writer,authenticated,authority,
     time(){
       if(typeof clock.pairingSample!=='function')fail('peer_pairing_clock_unavailable');
@@ -245,9 +265,7 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
     prepareInitialDeviceOpen(request){if(!initialOpening)fail('initial_open_unavailable');return initialOpening.select(request);},
     currentInitialDeviceOpen(reference){if(!initialOpening)fail('initial_open_unavailable');return initialOpening.current(reference);},
     lookupInitialDeviceOpen(reference){if(!initialOpening)fail('initial_open_unavailable');return initialOpening.lookup(reference);},
-    verifyTokenCsrf(input,csrf){return deliver(writer(()=>{const proof=authorizeToken(input,serviceId);if(proof.denied)return proof;
-      const row=db.prepare('SELECT csrf_verifier FROM auth_session WHERE session_id=?').raw().get(proof.session_id);
-      if(!row||!crypto.timingSafeEqual(csrfHash(csrf),row[0]))fail('session_invalid');return proof;}));},
+    verifyTokenCsrf(input,csrf){return deliver(writer(()=>tokenWithCsrf(input,csrf)));},
     changeControl(input,method,parameters,request){if(!controls)fail('control_unavailable');return controls.invoke(input,method,parameters,request);},
     getControlOperation(input,id){if(!controls)fail('control_unavailable');return controls.getOperation(input,id);},
     getTransfer(input,device,id){if(!controls)fail('control_unavailable');return controls.getTransfer(input,device,id);},
@@ -269,6 +287,7 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
     getSceneCatalog(input, deviceId) {
       return readCurrentDeviceCatalog(input,deviceId,sceneCatalogCurrent);
     },
+    confirmSceneCatalog,
     getControl(input, deviceId) { return readDevice(input, 'control.read', () => devices.control(deviceId)); },
     localPermissions(input) {
       if (!authority?.current) fail('local_authorization_unavailable');

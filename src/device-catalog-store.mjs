@@ -10,6 +10,7 @@ import {qualifyDeviceFootprint,readDeviceFootprint} from './device-footprint-qua
 import {registerDeviceAutomation,readDeviceAutomationRegistration} from './device-automation-binding.mjs';
 import {qualifyDeviceEventFrame} from './device-event-qualification.mjs';
 import {obsModuleDefinition,projectObsSceneCatalog,validateObsSceneSample} from './obs-module-profile.mjs';
+import {readConfirmedObsSceneCatalog} from './obs-scene-confirmation.mjs';
 
 const digest=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
 const hash=value=>digest(canonicalize(value));
@@ -79,7 +80,7 @@ export function deviceCatalogStore({db,current,select}){
    const row=db.prepare('SELECT body_jcs,body_digest FROM device_baseline_sample WHERE approval_id=? ORDER BY length(sample_sequence) DESC,sample_sequence DESC LIMIT 1').raw().get(approved.id);
    const sample=row?read(...row):null;
    const obs=approved.body.qualification.qualification===obsModuleDefinition.qualification;
-   const scene_catalog=obs&&sample?projectObsSceneCatalog(approved.body,sample):null;
+   const scene_catalog=obs&&sample?readConfirmedObsSceneCatalog(db,projectObsSceneCatalog(approved.body,sample)):null;
    return frozen({catalog_approval_ref:ref(runtime,'catalog_approval',approved.id,approved.body),approval:approved.body,sample,
     ...(obs&&{scene_catalog})});
   }).immediate();

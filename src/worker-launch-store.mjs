@@ -184,7 +184,7 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     whenCommandCleaned(id){available();const task=cleanupTasks.get(id)??commandTasks.get(id)?.then(()=>cleanupTasks.get(id));need(task,'execution_cleanup_not_queued');return task;},
     whenCommandFinalized(id){available();const task=finalAdmissionTasks.get(id)??commandTasks.get(id)?.then(()=>finalAdmissionTasks.get(id));need(task,'execution_finalization_not_queued');return task;},
     deviceCapabilitiesCurrent(device){return readDeviceCapabilities(db,currentDeviceCatalogInput(device));},
-    deviceSceneCatalogCurrent(device){return readDeviceSceneCatalog(db,currentDeviceCatalogInput(device));},
+    deviceSceneCatalogCurrent(device,includeConfirmation){return readDeviceSceneCatalog(db,currentDeviceCatalogInput(device),includeConfirmation);},
     deviceAutomation(device,expectedRegistrationRef=null){available();return db.transaction(()=>readDeviceAutomationBindings(db,currentDeviceCatalogInput(device),expectedRegistrationRef)).immediate();},
     deviceAutomationCurrent(device,expectedRegistrationRef=null){return readDeviceAutomationBindings(db,currentDeviceCatalogInput(device),expectedRegistrationRef);},
     deviceEvents:readDeviceEvents,

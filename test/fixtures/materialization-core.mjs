@@ -481,6 +481,18 @@ try{
         report({event:'obs-scene-catalog-http',current:await commandHttp('GET',route),
           noPermission:await commandHttp('GET',route,undefined,manager.token()),
           noToken:await commandHttp('GET',route,undefined,null)});
+        const token=manager.token(['device.read','extension.manage']);
+        const request={request_id:'obs.confirm',expected_catalog_digest:hash(accepted.scene_catalog)};
+        const confirm=(fields=request,credential=token,csrf=manager.auth.csrf)=>manager.sessions.confirmSceneCatalog(credential,csrf,device,fields);
+        const rejected=(action)=>{
+          try{action();return 'unexpected_success';}catch(error){return error.code;}
+        };
+        const denied=rejected(()=>confirm(request,commandToken)),csrf=rejected(()=>confirm(request,token,'A'.repeat(43))),
+          stale=rejected(()=>confirm({...request,expected_catalog_digest:hash('old catalogue')}));
+        const ready=confirm(),replayed=confirm(),conflict=rejected(()=>confirm({...request,request_id:'obs.confirm.other'}));
+        report({event:'obs-scene-confirmed',ready,replayed,denied,csrf,stale,conflict,
+          actor:{principal_id:manager.logged.session.principal_id,session_id:manager.logged.session.session_id},
+          current:await commandHttp('GET',route)});
         report({event:'obs-module-samples',connected,first,second,accepted});
         const until=performance.now()+5000;
         while(!fs.existsSync(options['--fixture']+'.obs-stopped')){
@@ -490,7 +502,8 @@ try{
         try{await moduleClient.captureBaseline(device);}
         catch(error){
           manager.real.refresh();
-          report({event:'obs-scene-catalog-withdrawn',response:await commandHttp('GET',route)});
+          report({event:'obs-scene-catalog-withdrawn',response:await commandHttp('GET',route),
+            confirmation:rejected(confirm)});
           throw error;
         }
         throw new Error('fixture_obs_stale_sample');

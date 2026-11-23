@@ -305,6 +305,8 @@ Controller 的 OBS 只读目录资格绑定安装包内的 `obs-device-module.mj
 
 状态 schema `leafseamer.obs.program-scene.2` 的样本持久保存当前节目场景以及两条按 UUID 排序的场景名称。持 `device.read` 的令牌可经 `GET /api/v1/devices/{device_id}/scene-catalog` 取得当前会话的待确认目录。场景 ID 在同一批准内保持稳定，重连分配新的集合引用。失联后原目录停止对外提供。采用该 schema 时，重新安装并批准包含当前 OBS 模块和能力模板的扩展包。
 
+已迁移至 99 的库可在 Controller 停止后通过 `migrate-storage --data-dir ABSOLUTE_PATH --to-revision 100` 启用人员确认账本。Controller 内部的 `confirmSceneCatalog` 使用持 `device.read` 和 `extension.manage` 的人员令牌、该会话的 CSRF 值以及待确认目录的摘要。确认后 HTTPS 查询返回 `ready` 和绑定修订 `2`。同一会话按原请求重投返回原结果，重连须确认新目录。此版本的 HTTP 接口仅提供读取，OBS 扩展仍只声明读取能力。
+
 ### 执行会话与初始控制屏障
 
 schema42将人员执行来源改为实际挑战／响应：`beginManualExecutionChallenge`核验人员令牌、当前持有人、权限和运行装配，生成32字节随机nonce，将挑战与提交审计同事务保存；`completeManualExecutionChallenge`核验实际令牌秘密、完整挑战引用和nonce，响应关联与人员来源／审计同事务提交。挑战绑定实际token、会话、凭据、控制原件、完整执行Binding及原核心观察；截止不超过挑战开始后两秒和原观察期限。相同请求只返回仍有效的原件，不换nonce或续期；错误nonce、不同响应内容、过期及旧单步取证入口均拒绝。

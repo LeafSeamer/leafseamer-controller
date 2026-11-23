@@ -6,9 +6,10 @@ import Database from 'better-sqlite3';
 import {canonical, digest} from '../dist/auth-clock-value.mjs';
 import {openNativeClock} from '../dist/native-clock.mjs';
 import {deviceCatalogStore} from '../dist/device-catalog-store.mjs';
-import {readDeviceCapabilities} from '../dist/device-capability-view.mjs';
+import {readDeviceCapabilities,readDeviceSceneCatalog} from '../dist/device-capability-view.mjs';
 import {deviceModuleJournal} from '../dist/device-module-store.mjs';
 import {obsModuleDefinition as obs} from '../dist/obs-module-profile.mjs';
+import {confirmObsSceneCatalog} from '../dist/obs-scene-confirmation.mjs';
 import {resolveRolePermissions} from '../dist/extension-role-resolution.mjs';
 import {installationDependencies, workerDependencies} from '../dist/worker-dependencies.mjs';
 import {decodeCapabilityTemplate} from '../dist/sdk/capability-template.mjs';
@@ -30,7 +31,7 @@ function fixture(t) {
     CREATE TABLE device_module_channel(channel_id TEXT,runtime_id TEXT,binding_jcs TEXT,binding_digest TEXT,audit TEXT);
     CREATE TABLE device_module_frame(channel_id TEXT,direction TEXT,sequence TEXT,message_id TEXT,reply_to TEXT,message_type TEXT,frame_jcs TEXT,frame_digest TEXT,transaction_id TEXT);
     CREATE TABLE device_module_frame_commit(transaction_id TEXT,message_id TEXT,audit TEXT);
-    CREATE TABLE device_catalog_approval(approval_id TEXT,channel_id TEXT,device_id TEXT,device_session_id TEXT,connected_message_id TEXT,body_jcs TEXT,body_digest TEXT,audit TEXT);
+    CREATE TABLE device_catalog_approval(approval_id TEXT PRIMARY KEY,channel_id TEXT,device_id TEXT,device_session_id TEXT,connected_message_id TEXT,body_jcs TEXT,body_digest TEXT,audit TEXT);
     CREATE TABLE device_baseline_sample(sample_id TEXT,approval_id TEXT,captured_message_id TEXT,sample_sequence TEXT,body_jcs TEXT,body_digest TEXT,audit TEXT);`);
   const service = {service_id: 'core', database_instance_id: 'database', schema_revision: '99'};
   const scope = {authority_service_id: service.service_id, database_instance_id: service.database_instance_id};
@@ -65,6 +66,7 @@ function fixture(t) {
   const current = () => runtime;
   const dependencies = () => installationDependencies(db,service,selected);
   const catalog = deviceCatalogStore({db,current,select:()=>({selected,dependencies:dependencies()})});
+  const view = () => ({service,device:'obs',runtime,selected,dependencies:dependencies(),channel:'channel'});
   const journal = deviceModuleJournal(db,current);
   journal.open(binding);
   const clock = openNativeClock();
@@ -80,7 +82,8 @@ function fixture(t) {
   return {db,selected,catalog,receive,resourceRef,secretRef,
     dependencies:()=>db.transaction(dependencies).immediate(),
     prepared:()=>db.transaction(()=>workerDependencies(db,service,intent,selected)).immediate(),
-    read:()=>db.transaction(()=>readDeviceCapabilities(db,{service,device:'obs',runtime,selected,dependencies:dependencies(),channel:'channel'})).immediate()};
+    read:()=>db.transaction(()=>readDeviceCapabilities(db,view())).immediate(),
+    readScenes:(includeConfirmation)=>readDeviceSceneCatalog(db,view(),includeConfirmation)};
 }
 
 test('OBS 固定模板可由当前 SDK 解码且不声明动作或事件', async () => {
@@ -173,4 +176,33 @@ test('错配模块、资源、凭据引用和发布的目录均不获批准',t=>
   const incorrect={...obs.catalog,catalog_revision:'2'};
   assert.throws(()=>f.receive('CONNECTED',{identity:obs.identity,catalog:incorrect}),{code:'module_catalog_proposal'});
   assert.equal(f.db.prepare('SELECT count(*) FROM device_catalog_approval').pluck().get(),0);
+});
+
+test('OBS 重新连接同一组 UUID 后需要新的人员确认',t=>{
+  const f=fixture(t), sql=data('obs-scene-confirmation.sql').toString('utf8');
+  f.db.exec('PRAGMA user_version=100; CREATE TABLE auth_session(session_id TEXT PRIMARY KEY, state TEXT, issuer_id TEXT, issuer_epoch TEXT, principal_id TEXT);');
+  f.db.exec(sql.slice(sql.indexOf('CREATE TABLE obs_scene_confirmation')));
+  const actor={session_id:'actor-session',issuer_id:'core',issuer_epoch:'issuer',principal_id:'principal',authorization_revision:'1',acquisition_ref:{id:'clock'}};
+  f.db.prepare("INSERT INTO auth_session VALUES(?, 'active', ?, ?, ?)").run(actor.session_id,actor.issuer_id,actor.issuer_epoch,actor.principal_id);
+  const scenes=[{obs_scene_uuid:sceneB,display_name:'B'},{obs_scene_uuid:sceneA,display_name:'A'}];
+  const connect=session=>{
+    f.receive('CONNECTED',{device_session_id:session,identity:obs.identity,catalog:obs.catalog});
+    f.receive('CAPTURED',{device_session_id:session,capture_id:'capture-'+session,value:{sample_sequence:'1',program_scene_uuid:sceneA,scenes}});
+  };
+  const read=()=>f.db.transaction(()=>f.readScenes()).immediate();
+  const confirm=(request_id,expected_catalog_digest)=>f.db.transaction(()=>confirmObsSceneCatalog(f.db,f.readScenes(false),
+    {request_id,expected_catalog_digest},actor)).immediate();
+  connect('first');
+  const first=read(),initial=digest(first);
+  assert.equal(confirm('request',initial).status,'ready');
+  assert.throws(()=>f.db.exec("UPDATE obs_scene_confirmation SET request_id='other'"),/immutable_obs_scene_confirmation/);
+  f.receive('DISCONNECTED',{device_session_id:'first'});
+  assert.throws(read,{code:'device_capabilities_unavailable'});
+  connect('reconnected');
+  const second=read();
+  assert.equal(second.status,'unconfirmed');
+  assert.notEqual(second.collection_ref,first.collection_ref);
+  assert.throws(()=>confirm('request',initial),{code:'obs_scene_confirmation_stale'});
+  assert.throws(()=>confirm('request',digest(second)),{code:'obs_scene_confirmation_conflict'});
+  assert.equal(confirm('reconnect',digest(second)).status,'ready');
 });
