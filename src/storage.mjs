@@ -1,3 +1,4 @@
+import {supportsStorageRevision} from './storage-revision.mjs';
 import fs from 'node:fs';
 import canonicalize from 'canonicalize';
 import path from 'node:path';
@@ -293,7 +294,7 @@ export function initializeStorage(dataDir) {
 }
 function validateStorage(db) {
   const revision = pragma(db, 'user_version');
-  require(pragma(db, 'application_id') === applicationId && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100].includes(revision), 'database_version_mismatch');
+  require(pragma(db, 'application_id') === applicationId && supportsStorageRevision(revision,1), 'database_version_mismatch');
   require(pragma(db, 'journal_mode') === 'wal', 'journal_mode_mismatch');
   pragma(db, 'synchronous = FULL');
   require(pragma(db, 'synchronous') === 2, 'synchronous_mismatch');
@@ -304,7 +305,7 @@ function validateStorage(db) {
   return identity(db, String(revision));
 }
 export async function migrateStorage(dataDir, targetRevision = 70) {
-  require([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100].includes(targetRevision), 'migration_target');
+  require(supportsStorageRevision(targetRevision,2), 'migration_target');
   const file = filename(dataDir);
   let db;
   try {

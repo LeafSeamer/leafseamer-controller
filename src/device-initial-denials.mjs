@@ -1,3 +1,4 @@
+import {supportsStorageRevision} from './storage-revision.mjs';
 import {dispatchRiskFrame} from './command-dispatch.mjs';
 import {guardOnlyFrame} from './command-guard.mjs';
 import {encodingOnlyFrame} from './command-encoding-store.mjs';
@@ -15,13 +16,15 @@ const bytesDigest=value=>'sha256:'+crypto.createHash('sha256').update(value).dig
 const allowed=new Set([...deviceExecutionCapabilities.base,...deviceExecutionCapabilities.manual,
  ...deviceExecutionCapabilities.initial_control,...deviceExecutionCapabilities.without_reference]);
 const sealed=value=>({...value,snapshot_digest:digest(value)});
+const supportsSnapshotRevision=(revision,minimum)=>typeof revision==='string'&&
+ String(Number(revision))===revision&&supportsStorageRevision(Number(revision),minimum);
 
 // 设备快照读取命令及执行准备历史。已核验的同 Ready 排队后继可进入当前资源清单。
 function scope(db,service,current=false){
  need(db.inTransaction,'writer');
  const row=db.prepare('SELECT service_id,database_instance_id,schema_revision FROM service_state').raw().get();
  need(row&&row[0]===service.service_id&&row[1]===service.database_instance_id&&row[2]===service.schema_revision&&
-  (current?['44','45','46','47','48','49','50','51','52','53','54','55','56','57','58','59','60','61','62','63','64','65','66','67','68','69','70','71','72','73','74','75','76','77','78','79','80','81','82','83','84','85','86','87','88','89','90','91','92','93','94','95','96','97','98'].includes(row[2]):Number(row[2])>=44),'schema');
+  (current?supportsSnapshotRevision(row[2],44):Number(row[2])>=44),'schema');
  return {authority_service_id:row[0],database_instance_id:row[1]};
 }
 function frame(db,id,automation=false){
@@ -53,11 +56,11 @@ export function readInitialDenials(db,service,device,value){
  const scoped=value?.history_scope==='device';
  need(!Object.hasOwn(value??{},'history_scope')||scoped&&successor&&Number(value.schema_revision)>=97,'history_scope');
  if(value?.format==='initial-manual-deny-snapshots/3'){
-  need(['57','58','59','60','61','62','63','64','65','66','67','68','69','70','71','72','73','74','75','76','77','78','79','80','81','82','83','84','85','86','87','88','89','90','91','92','93','94','95','96','97','98'].includes(value.schema_revision)&&
+  need(supportsSnapshotRevision(value.schema_revision,57)&&
    Array.isArray(value.retired_preparation_refs)&&value.retired_preparation_refs.length>0,'retired');
   for(const reference of value.retired_preparation_refs){const retired=readRetiredPreparation(db,reference);need(retired.value.binding.device_id===device,'retired');}
  }
- need((successor||value?.format==='initial-manual-deny-snapshots/1')&&['44','45','46','47','48','49','50','51','52','53','54','55','56','57','58','59','60','61','62','63','64','65','66','67','68','69','70','71','72','73','74','75','76','77','78','79','80','81','82','83','84','85','86','87','88','89','90','91','92','93','94','95','96','97','98'].includes(value.schema_revision)&&same(value.scope,expectedScope)&&
+ need((successor||value?.format==='initial-manual-deny-snapshots/1')&&supportsSnapshotRevision(value.schema_revision,44)&&same(value.scope,expectedScope)&&
   value.device_id===device&&(successor?Array.isArray(value.pending_admission_refs)&&value.accepted_command_count===value.pending_admission_refs.length:value.accepted_command_count===0)&&Array.isArray(value.outgoing_frame_refs)&&
   value.outgoing_frame_refs.length>0&&value.outgoing_frame_refs.length<=4096,'source');
  if(successor){let last='';for(const ref of value.pending_admission_refs){const saved=readCommandRecord(db,ref.id);
@@ -77,8 +80,9 @@ export function readInitialDenials(db,service,device,value){
 export function captureInitialDenials(db,service,device,ownOpen=null,ready=null,preparedRef=null,history=null,deviceScoped=Number(service.schema_revision)>=97){
  const selectedScope=scope(db,service,true);
  const automation=Number(service.schema_revision)>=79;
- const pending=[49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98].includes(Number(service.schema_revision))?pendingInitialCommands(db,ready,preparedRef,history?.commandIds,deviceScoped?device:null):[];
- if(![49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98].includes(Number(service.schema_revision)))need(!db.prepare('SELECT 1 FROM ca_command_initial LIMIT 1').pluck().get(),'command_history');
+ const supportsPendingCommands=supportsStorageRevision(Number(service.schema_revision),49);
+ const pending=supportsPendingCommands?pendingInitialCommands(db,ready,preparedRef,history?.commandIds,deviceScoped?device:null):[];
+ if(!supportsPendingCommands)need(!db.prepare('SELECT 1 FROM ca_command_initial LIMIT 1').pluck().get(),'command_history');
  const rows=deviceScoped?db.prepare(`SELECT record_id,message_type FROM execution_frame_record WHERE direction='c2w'
   AND (device_id IS NULL OR device_id=?) ORDER BY record_id COLLATE BINARY LIMIT 4097`).raw().all(device):
   db.prepare("SELECT record_id,message_type FROM execution_frame_record WHERE direction='c2w' ORDER BY record_id COLLATE BINARY LIMIT 4097").raw().all();
@@ -98,8 +102,8 @@ export function captureInitialDenials(db,service,device,ownOpen=null,ready=null,
    binding.database_instance_id===selectedScope.database_instance_id,'scope');
   readRunFence(db,binding,id);encoding.add(id);
  }
- const value={format:[49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98].includes(Number(service.schema_revision))?'initial-manual-deny-snapshots/2':'initial-manual-deny-snapshots/1',schema_revision:service.schema_revision,scope:selectedScope,device_id:device,accepted_command_count:pending.length,
-  ...([49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98].includes(Number(service.schema_revision))?{pending_admission_refs:pending}:{}),
+ const value={format:supportsPendingCommands?'initial-manual-deny-snapshots/2':'initial-manual-deny-snapshots/1',schema_revision:service.schema_revision,scope:selectedScope,device_id:device,accepted_command_count:pending.length,
+  ...(supportsPendingCommands?{pending_admission_refs:pending}:{}),
   outgoing_frame_refs:rows.filter(([id])=>id!==ownOpen?.id&&!encoding.has(id)).map(([id])=>frame(db,id,automation).reference),
   run_deny_snapshot:automation?captureRunDenySnapshot(db,selectedScope):sealed({controller_scope:selectedScope,snapshot_revision:'0',entries:[]}),
   command_deny_snapshot:sealed({scope:selectedScope,device_id:device,snapshot_revision:'0',entries:[]})};

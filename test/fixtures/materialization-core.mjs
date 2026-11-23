@@ -687,7 +687,7 @@ try{
                         const committed=await business.workerLaunches.whenCommandFinalized(accepted.adjudication.command_ref.object_id);
                         report({event:'command-final-admission',record:committed.saved.record,value:committed.saved.lifecycle.final_admission.value,
                           observation:committed.observation,replay:committed.replay});
-                        if(!input.reference_schema&&!input.mode.includes('_cleanup_successor')&&!input.mode.endsWith('_control_unresolved'))report({event:'command-prepared-current',value:preparedProof??executionClient.currentPreparedCommand(committed.saved.source.command_id)});
+                        if(!input.reference_schema&&!input.mode.endsWith('_cleanup_current_schema')&&!input.mode.includes('_cleanup_successor')&&!input.mode.endsWith('_control_unresolved'))report({event:'command-prepared-current',value:preparedProof??executionClient.currentPreparedCommand(committed.saved.source.command_id)});
                         if(input.mode.includes('_t2_guard')){
                           if(guardProof)report(guardProof);
                           else await business.workerLaunches.whenCommandGuarded(committed.saved.source.command_id);
@@ -706,7 +706,7 @@ try{
                     }
                     const terminalHttp=commandHttp?await commandHttp('GET','/api/v1/commands/'+accepted.adjudication.command_ref.object_id):null;
                     if(terminalHttp&&terminalHttp.status!==200)throw Object.assign(new Error('command_http_terminal'),{code:'command_http_terminal',cause:terminalHttp.body});
-                    if(input.reference_schema||input.mode.endsWith('_dispatch_closure')||input.mode.endsWith('_closure_cleanup')){
+                    if(input.reference_schema||input.mode.endsWith('_dispatch_closure')||input.mode.endsWith('_closure_cleanup')||input.mode.endsWith('_cleanup_current_schema')){
                       const commandId=accepted.adjudication.command_ref.object_id,first=await commandHttp('GET','/api/v1/commands/'+commandId+'/evidence?state_revision=5&limit=1'),
                         second=await commandHttp('GET','/api/v1/commands/'+commandId+'/evidence?state_revision=5&limit=1&cursor='+encodeURIComponent(first.body.next_cursor)),
                         original=await commandHttp('GET','/api/v1/commands/'+commandId+'/evidence/'+first.body.items?.[0]?.source_ref.id+'/revisions/1'),

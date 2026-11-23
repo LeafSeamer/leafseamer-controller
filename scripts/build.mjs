@@ -9,6 +9,7 @@ if (buildOptions.length && (buildOptions.length !== 2 || !referenceTimeProvider 
     process.platform !== 'win32' || process.arch !== 'x64')) throw new Error('controller_build_arguments');
 const names = ['authority-source-window.mjs', 'supervisor-control.mjs', 'core-bootstrap.mjs', 'core-runtime.sql', 'cli.mjs', 'server.mjs', 'storage.mjs', 'storage.sql', 'identity.sql', 'identity-crypto.mjs', 'identity-store.mjs', 'local-admin.mjs', 'native-clock.mjs', 'clock-monitor.mjs', 'clock.sql', 'auth-clock.sql', 'auth-clock.mjs', 'auth-clock-value.mjs', 'auth-clock-store.mjs', 'session-store.mjs', 'session.sql', 'access-token-store.mjs', 'access-token.sql'];
 names.push('trusted-pairing-profile.mjs', 'local-pairing-admin.mjs', 'clock-evidence.mjs');
+names.push('storage-revision.mjs');
 const files = await Promise.all(names.map(async name => [name, await fs.readFile(path.join(root, 'src', name))]));
 for(const name of ['device-event-source.sql','device-event-source.mjs','device-source-time.sql','device-event-qualification.mjs','simulator-event-review.json'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 for (const name of ['time-provider-runtime.sql', 'time-provider-link.mjs', 'time-provider-polls.sql', 'time-provider-polls.mjs',

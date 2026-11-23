@@ -1,3 +1,4 @@
+import {supportsStorageRevision} from './storage-revision.mjs';
 import {sqliteRow} from './sqlite-rows.mjs';
 import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import {withExecutionReadView,memoExecutionRead} from './execution-read-view.mjs';
@@ -74,7 +75,7 @@ function readGuard(db,id){
  return {...saved,ack:{value:acknowledgement,ref:ref(id+'.response',acknowledgement),reply}};
 }
 export function selectCommandGuard(db,{id,binding,provider,tick,features}){
- need(db.inTransaction&&[53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98].includes(Number(db.pragma('user_version',{simple:true}))),'writer');
+ need(db.inTransaction&&supportsStorageRevision(Number(db.pragma('user_version',{simple:true})),53),'writer');
  const prior=db.prepare('SELECT g.guard_id FROM command_guard_request g JOIN command_final_admission f ON f.transaction_id=g.final_transaction_id WHERE f.command_id=?').pluck().get(id);
  if(prior)return {saved:readCommandGuard(db,prior)};
  const actual=currentPreparedCommand(db,{id,binding,provider,tick}),v=actual.final.value;
