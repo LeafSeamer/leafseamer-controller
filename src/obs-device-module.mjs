@@ -2,16 +2,21 @@ import {canonical, digest} from './auth-clock-value.mjs';
 import {ObsDiscoveryError, openObsCutSession} from './obs-discovery.mjs';
 
 export const obsDeviceIdentity = Object.freeze({kind: 'physical', model: 'obs.studio', revision: '1'});
+const sceneUuid = {type: 'string', pattern: '^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}(?![\\s\\S])'};
 const document = {
-  type: 'object', additionalProperties: false, required: ['sample_sequence', 'program_scene_uuid'],
+  type: 'object', additionalProperties: false, required: ['sample_sequence', 'program_scene_uuid', 'scenes'],
   properties: {
     sample_sequence: {type: 'string', pattern: '^[1-9][0-9]{0,19}(?![\\s\\S])'},
-    program_scene_uuid: {type: 'string', pattern: '^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}(?![\\s\\S])'}
+    program_scene_uuid: sceneUuid,
+    scenes: {type: 'array', minItems: 2, maxItems: 2, items: {
+      type: 'object', additionalProperties: false, required: ['obs_scene_uuid', 'display_name'],
+      properties: {obs_scene_uuid: sceneUuid, display_name: {type: 'string', minLength: 1, maxLength: 1024}}
+    }}
   }
 };
 const catalog = {
   catalog_revision: '1', action_ids: [], trigger_ids: [],
-  state_schema: {schema_id: 'leafseamer.obs.program-scene.1', dialect: 'https://json-schema.org/draft/2020-12/schema',
+  state_schema: {schema_id: 'leafseamer.obs.program-scene.2', dialect: 'https://json-schema.org/draft/2020-12/schema',
     document, digest: digest(document)}
 };
 export const obsDeviceCatalog = () => structuredClone(catalog);
@@ -71,7 +76,8 @@ export function createObsDeviceModule({resource, password, signal, onInvalidated
         const sample = await active.sample();
         current(input);
         matches(sample);
-        return {sample_sequence: String(++ordinal), program_scene_uuid: sample.program_scene_uuid};
+        const scenes = [...sample.scenes].sort((left, right) => left.obs_scene_uuid < right.obs_scene_uuid ? -1 : 1);
+        return {sample_sequence: String(++ordinal), program_scene_uuid: sample.program_scene_uuid, scenes};
       } catch (error) {
         if (error.code !== 'obs_session_busy') retire();
         throw error;

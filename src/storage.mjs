@@ -471,7 +471,8 @@ export function openStorage(dataDir) {
           authority===localAuthority?value=>{commandEncodingProvider=value;}:null,authority===localAuthority?workerLaunches?.queueCommandEncoding:null,
           authority===localAuthority?workerLaunches?.deviceCapabilitiesCurrent:null,authority===localAuthority?workerLaunches?.eventScopes:null,
           authority===localAuthority?workerLaunches?.deviceAutomationCurrent:null,
-          authority===localAuthority && Number(state.schema_revision)>=88 ? accepted=>referenceAnchor?.acceptAt(accepted)??null : null); return sessions;
+          authority===localAuthority && Number(state.schema_revision)>=88 ? accepted=>referenceAnchor?.acceptAt(accepted)??null : null,
+          authority===localAuthority?workerLaunches?.deviceSceneCatalogCurrent:null); return sessions;
       },
       close() {
         if (closed) return; closed = true;

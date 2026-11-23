@@ -1,7 +1,7 @@
 import {canonical,digest} from './auth-clock-value.mjs';
 import {IdentityError} from './identity-error.mjs';
 import {readDeviceFootprint} from './device-footprint-qualification.mjs';
-import {isObsModuleEntry,obsModuleDefinition} from './obs-module-profile.mjs';
+import {isObsModuleEntry,obsModuleDefinition,projectObsSceneCatalog,validateObsSceneSample} from './obs-module-profile.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('device_capabilities_'+code);};
 const same=(a,b)=>canonical(a)===canonical(b);
 const read=(text,expected)=>{const value=JSON.parse(text);need(canonical(value)===text&&digest(value)===expected,'integrity');return value;};
@@ -50,4 +50,17 @@ export function readDeviceCapabilities(db,input){
  return {provider_id:intent.member_id,provider_boot_id:runtime.binding.admission_receipt.member_boot_id,catalog_revision:approved.catalog.catalog_revision,
   module_id:content.manifest.extension_id,module_version:content.manifest.extension_version,
   devices:[{...descriptor,connection_state:'ready',actions,triggers:structuredClone(template.triggers),state_schema:structuredClone(template.state_schema)}]};
+}
+
+export function readDeviceSceneCatalog(db,input){
+ const {approved}=readCurrentDeviceCatalog(db,input),q=approved.qualification;
+ need(q.qualification===obsModuleDefinition.qualification,'unavailable');
+ const row=db.prepare('SELECT body_jcs,body_digest FROM device_baseline_sample WHERE approval_id=? ORDER BY length(sample_sequence) DESC,sample_sequence DESC LIMIT 1')
+  .raw().get(approved.approval_id);
+ need(row,'unavailable');
+ const sample=read(...row);
+ need(sample.device_id===approved.device_id&&sample.device_session_id===approved.device_session_id&&
+  sample.catalog_approval_ref.object_id===approved.approval_id&&sample.catalog_approval_ref.digest===digest(approved)&&
+  validateObsSceneSample(sample.value,q.obs_binding.scene_uuids),'binding');
+ return projectObsSceneCatalog(approved,sample);
 }

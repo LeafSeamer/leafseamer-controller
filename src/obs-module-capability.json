@@ -6,14 +6,15 @@
   "actions": [],
   "triggers": [],
   "state_schema": {
-    "schema_id": "leafseamer.obs.program-scene.1",
+    "schema_id": "leafseamer.obs.program-scene.2",
     "dialect": "https://json-schema.org/draft/2020-12/schema",
     "document": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "sample_sequence",
-        "program_scene_uuid"
+        "program_scene_uuid",
+        "scenes"
       ],
       "properties": {
         "sample_sequence": {
@@ -23,9 +24,33 @@
         "program_scene_uuid": {
           "type": "string",
           "pattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}(?![\\s\\S])"
+        },
+        "scenes": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "obs_scene_uuid",
+              "display_name"
+            ],
+            "properties": {
+              "obs_scene_uuid": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}(?![\\s\\S])"
+              },
+              "display_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            }
+          }
         }
       }
     },
-    "digest": "sha256:b32d09ac372e363e6cc0fa41ee8c8c49c87d70df12b3e2518553eb9538705ad8"
+    "digest": "sha256:7d1de370419ed36512610ab8e66b9ed53400c309ba9785b729ed505dab52a62c"
   }
 }

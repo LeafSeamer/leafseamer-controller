@@ -34,7 +34,7 @@ function rows(db, sql, ...args) {
 }
 
 // 内部人员会话服务；clock由同服务认证时钟装配，HTTP Cookie与Origin边界另由传输层落实。
-export function sessionStore(db, serviceId, clock, authority = null, tokensEnabled = false, contextBinding = null, createExtensionManagement = null,controlBarrier=null,executionCurrent=null,attachOpeningSource=null,attachEncodingSource=null,queueCommand=null,capabilityCurrent=null,eventScopes=null,deviceAutomationCurrent=null,referenceAcceptance=null) {
+export function sessionStore(db, serviceId, clock, authority = null, tokensEnabled = false, contextBinding = null, createExtensionManagement = null,controlBarrier=null,executionCurrent=null,attachOpeningSource=null,attachEncodingSource=null,queueCommand=null,capabilityCurrent=null,eventScopes=null,deviceAutomationCurrent=null,referenceAcceptance=null,sceneCatalogCurrent=null) {
   let stopped = false, dummy = null;
   const buckets = new Map(), global = {start: process.hrtime.bigint(), failed: 0, pending: 0};
   const salt = crypto.randomBytes(32);
@@ -198,6 +198,17 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
       if (!last.permissions.includes(permission)) fail('device_read_denied'); revalidate(); return result;
     }));
   }
+  function readCurrentDeviceCatalog(input,deviceId,provider) {
+    let value;
+    const current=()=>{
+      devices.descriptor(deviceId); if(!provider)fail('device_capabilities_unavailable');
+      try{return provider(deviceId);}catch(error){
+        if(error?.code==='device_capabilities_unavailable'||error?.name==='WorkerRuntimeError'&&!String(error.code).includes('integrity'))fail('device_capabilities_unavailable');
+        throw error;
+      }
+    };
+    return readDevice(input,'device.read',()=>value=current(),()=>{if(canonical(current())!==canonical(value))fail('device_capabilities_changed');});
+  }
   const peerPairings=Number(contextBinding?.service.schema_revision)>=59?peerPairingStore({db,service:contextBinding.service,bootId:contextBinding.bootId,writer,authenticated,authority,
     time(){
       if(typeof clock.pairingSample!=='function')fail('peer_pairing_clock_unavailable');
@@ -253,15 +264,10 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
     lookupExtensionActivation(input,requestId){if(!extensionManagement?.lifecycle)fail('extension_activation_unavailable');return extensionManagement.lifecycle.query(input,requestId);},
     listDevices(input, cursor) { return readDevice(input, 'device.read', () => devices.list(cursor)); },
     getCapabilities(input, deviceId) {
-      let value;
-      const current=()=>{
-        devices.descriptor(deviceId); if(!capabilityCurrent)fail('device_capabilities_unavailable');
-        try{return capabilityCurrent(deviceId);}catch(error){
-          if(error?.code==='device_capabilities_unavailable'||error?.name==='WorkerRuntimeError'&&!String(error.code).includes('integrity'))fail('device_capabilities_unavailable');
-          throw error;
-        }
-      };
-      return readDevice(input,'device.read',()=>value=current(),()=>{if(canonical(current())!==canonical(value))fail('device_capabilities_changed');});
+      return readCurrentDeviceCatalog(input,deviceId,capabilityCurrent);
+    },
+    getSceneCatalog(input, deviceId) {
+      return readCurrentDeviceCatalog(input,deviceId,sceneCatalogCurrent);
     },
     getControl(input, deviceId) { return readDevice(input, 'control.read', () => devices.control(deviceId)); },
     localPermissions(input) {

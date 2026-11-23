@@ -16,7 +16,7 @@ import {deviceControlBarrier} from './device-control-barrier.mjs';
 import {deviceExecutionJournal,executionJournalHistory} from './device-execution-journal.mjs';
 import {connectDeviceExecution} from './device-execution-client.mjs';
 import {currentDeviceExecutionBinding} from './device-execution-binding.mjs';
-import {readDeviceCapabilities} from './device-capability-view.mjs';
+import {readDeviceCapabilities,readDeviceSceneCatalog} from './device-capability-view.mjs';
 import {readDeviceAutomationBindings} from './device-automation-binding.mjs';
 import {currentInitialReady} from './device-initial-ready.mjs';
 import {currentControlSource} from './device-control-source.mjs';
@@ -184,6 +184,7 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     whenCommandCleaned(id){available();const task=cleanupTasks.get(id)??commandTasks.get(id)?.then(()=>cleanupTasks.get(id));need(task,'execution_cleanup_not_queued');return task;},
     whenCommandFinalized(id){available();const task=finalAdmissionTasks.get(id)??commandTasks.get(id)?.then(()=>finalAdmissionTasks.get(id));need(task,'execution_finalization_not_queued');return task;},
     deviceCapabilitiesCurrent(device){return readDeviceCapabilities(db,currentDeviceCatalogInput(device));},
+    deviceSceneCatalogCurrent(device){return readDeviceSceneCatalog(db,currentDeviceCatalogInput(device));},
     deviceAutomation(device,expectedRegistrationRef=null){available();return db.transaction(()=>readDeviceAutomationBindings(db,currentDeviceCatalogInput(device),expectedRegistrationRef)).immediate();},
     deviceAutomationCurrent(device,expectedRegistrationRef=null){return readDeviceAutomationBindings(db,currentDeviceCatalogInput(device),expectedRegistrationRef);},
     deviceEvents:readDeviceEvents,

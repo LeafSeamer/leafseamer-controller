@@ -283,7 +283,7 @@ schema 22的新worker准备必须匹配本次服务启动的人员受理、当�
 
 新登记实时读取 OBS，匹配后为设备及回环端口签发唯一资源引用。重用相同请求标识和登记参数返回原回执。密码只传给当次探测，资源记录与审计均不保存密码。结果的 `ready` 为 `false`，表示还需在受监督 Worker 中建立当前设备会话并批准目录。
 
-管理员可用同样的私有管道运行 `observe-obs-resource --data-dir ABSOLUTE_PATH`，输入 `device_id`、`password` 和整数 `samples`（1–8）。Controller 从数据库取得目标端口和已登记目录，并在同一条连接上返回有序节目场景 UUID 样本。断连、集合或配置变化、目录不再匹配时终止本次会话。这个入口用于本机核对，回执中的观察会话在命令退出时关闭。
+管理员可用同样的私有管道运行 `observe-obs-resource --data-dir ABSOLUTE_PATH`，输入 `device_id`、`password` 和整数 `samples`（1–8）。Controller 从数据库取得目标端口和已登记目录，并在同一条连接上返回有序样本。每份样本包含节目场景 UUID 和两个场景的名称与 UUID。断连、集合或配置变化、目录不再匹配时终止本次会话。这个入口用于本机核对，回执中的观察会话在命令退出时关闭。
 
 ### Linux 本机 OBS 凭据
 
@@ -302,6 +302,8 @@ schema 22的新worker准备必须匹配本次服务启动的人员受理、当�
 ### OBS Worker 与目录
 
 Controller 的 OBS 只读目录资格绑定安装包内的 `obs-device-module.mjs`、`obs-module-policy.json` 和 `obs-module-capability.json`。扩展声明单个 `device` 角色，绑定一个已登记 OBS 设备，权限模板留空。批准的扩展配置只含当前 `resource_ref` 与该资源的 `secret_ref`。Windows Worker 核验装载帧中的资源原件和引用，从固定凭据目录解封后建立只读会话。Worker 依赖与目录核验拒绝其他模块或策略、跨资源引用及任何动作或触发范围。通过只读目录核验的样本须使用登记的场景 UUID，并在同一设备会话内保持序号连续。
+
+状态 schema `leafseamer.obs.program-scene.2` 的样本持久保存当前节目场景以及两条按 UUID 排序的场景名称。持 `device.read` 的令牌可经 `GET /api/v1/devices/{device_id}/scene-catalog` 取得当前会话的待确认目录。场景 ID 在同一批准内保持稳定，重连分配新的集合引用。失联后原目录停止对外提供。采用该 schema 时，重新安装并批准包含当前 OBS 模块和能力模板的扩展包。
 
 ### 执行会话与初始控制屏障
 

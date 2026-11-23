@@ -120,13 +120,25 @@ test('已登记 OBS 资源进入当前依赖、只读目录及采样，断连使
   assert.deepEqual(graph.links[0].obs_binding.secret_ref,f.secretRef);
   assert.deepEqual(f.prepared().links,graph.links);
   f.receive('CONNECTED',{identity:obs.identity,catalog:obs.catalog});
-  const baseline = value => f.receive('CAPTURED',{capture_id:'capture-'+value.sample_sequence,value});
+  assert.equal(f.catalog.current('channel','obs','session').scene_catalog,null);
+  const scenes=[{obs_scene_uuid:sceneB,display_name:'B'},{obs_scene_uuid:sceneA,display_name:'A'}];
+  const baseline = value => f.receive('CAPTURED',{capture_id:'capture-'+value.sample_sequence,value:{scenes,...value}});
   assert.throws(()=>baseline({sample_sequence:'1',program_scene_uuid:'ba76b876-35d6-4476-b28c-0b10cb0cafd3'}),{code:'module_sample_schema'});
+  assert.throws(()=>baseline({sample_sequence:'1',program_scene_uuid:sceneA,scenes:[scenes[0],scenes[0]]}),{code:'module_sample_schema'});
   baseline({sample_sequence:'1',program_scene_uuid:sceneA});
+  const first=f.catalog.current('channel','obs','session').scene_catalog;
+  assert.equal(first.collection_ref,f.catalog.current('channel','obs','session').approval.approval_id);
+  assert.equal(first.status,'unconfirmed');
+  assert.deepEqual(first.entries.map(({scene_id,...scene})=>scene),scenes);
+  assert.equal(new Set(first.entries.map(({scene_id})=>scene_id)).size,2);
+  assert.throws(()=>baseline({sample_sequence:'2',program_scene_uuid:sceneA,scenes:[scenes[0],{...scenes[1],display_name:'Renamed'}]}),
+    {code:'module_sample_scene_catalog_changed'});
+  assert.equal(f.catalog.current('channel','obs','session').sample.value.sample_sequence,'1');
   assert.throws(()=>baseline({sample_sequence:'3',program_scene_uuid:sceneB}),{code:'module_sample_sequence'});
   baseline({sample_sequence:'2',program_scene_uuid:sceneB});
   const current=f.catalog.current('channel','obs','session');
-  assert.deepEqual(current.sample.value,{sample_sequence:'2',program_scene_uuid:sceneB});
+  assert.deepEqual(current.sample.value,{sample_sequence:'2',program_scene_uuid:sceneB,scenes});
+  assert.deepEqual(current.scene_catalog,first);
   assert.equal(current.approval.evidence_policy.write_eligible,false);
   assert.equal(current.approval.automation_registration,null);
   assert.deepEqual(f.read().devices[0].actions,[]);
@@ -134,6 +146,12 @@ test('已登记 OBS 资源进入当前依赖、只读目录及采样，断连使
   f.receive('DISCONNECTED',{});
   assert.throws(()=>f.catalog.current('channel','obs','session'),{code:'module_session'});
   assert.throws(f.read,{code:'device_capabilities_unavailable'});
+  f.receive('CONNECTED',{device_session_id:'reconnected',identity:obs.identity,catalog:obs.catalog});
+  f.receive('CAPTURED',{device_session_id:'reconnected',capture_id:'reconnected-first',value:{sample_sequence:'1',program_scene_uuid:sceneA,scenes}});
+  const reconnected=f.catalog.current('channel','obs','reconnected').scene_catalog;
+  assert.notEqual(reconnected.collection_ref,first.collection_ref);
+  assert.notEqual(reconnected.entries[0].scene_id,first.entries[0].scene_id);
+  assert.throws(()=>f.catalog.current('channel','obs','session'),{code:'module_session'});
 });
 
 test('错配模块、资源、凭据引用和发布的目录均不获批准',t=>{

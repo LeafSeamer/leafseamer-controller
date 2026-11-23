@@ -9,7 +9,7 @@ import {bindDeviceExecution} from './device-execution-binding.mjs';
 import {qualifyDeviceFootprint,readDeviceFootprint} from './device-footprint-qualification.mjs';
 import {registerDeviceAutomation,readDeviceAutomationRegistration} from './device-automation-binding.mjs';
 import {qualifyDeviceEventFrame} from './device-event-qualification.mjs';
-import {obsModuleDefinition} from './obs-module-profile.mjs';
+import {obsModuleDefinition,projectObsSceneCatalog,validateObsSceneSample} from './obs-module-profile.mjs';
 
 const digest=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
 const hash=value=>digest(canonicalize(value));
@@ -77,7 +77,11 @@ export function deviceCatalogStore({db,current,select}){
    readDeviceFootprint(approved.body,runtime);
    if(approved.body.automation_registration)readDeviceAutomationRegistration(approved.body,runtime);
    const row=db.prepare('SELECT body_jcs,body_digest FROM device_baseline_sample WHERE approval_id=? ORDER BY length(sample_sequence) DESC,sample_sequence DESC LIMIT 1').raw().get(approved.id);
-   return frozen({catalog_approval_ref:ref(runtime,'catalog_approval',approved.id,approved.body),approval:approved.body,sample:row?read(...row):null});
+   const sample=row?read(...row):null;
+   const obs=approved.body.qualification.qualification===obsModuleDefinition.qualification;
+   const scene_catalog=obs&&sample?projectObsSceneCatalog(approved.body,sample):null;
+   return frozen({catalog_approval_ref:ref(runtime,'catalog_approval',approved.id,approved.body),approval:approved.body,sample,
+    ...(obs&&{scene_catalog})});
   }).immediate();
  }
  return Object.freeze({
@@ -107,12 +111,15 @@ export function deviceCatalogStore({db,current,select}){
      const approved=catalog(channel,body.device_id,body.device_session_id);need(same(approved.body.qualification,qualification),'module_catalog_stale');
      const value=body.value;
      const obs=definition===obsModuleDefinition;
-     const shape=obs?'program_scene_uuid,sample_sequence':definition.template?'sample_sequence,value,write_sequence':'sample_sequence,value';
+     const shape=obs?'program_scene_uuid,sample_sequence,scenes':definition.template?'sample_sequence,value,write_sequence':'sample_sequence,value';
      need(value&&Object.keys(value).sort().join(',')===shape&&
       typeof value.sample_sequence==='string'&&/^[1-9][0-9]{0,19}$(?![\s\S])/.test(value.sample_sequence),'module_sample_schema');
      const previous=db.prepare('SELECT sample_sequence,body_jcs,body_digest FROM device_baseline_sample WHERE approval_id=? ORDER BY length(sample_sequence) DESC,sample_sequence DESC LIMIT 1').raw().get(approved.id);
      need(BigInt(value.sample_sequence)===BigInt(previous?.[0]??'0')+1n,'module_sample_sequence');
-     if(obs)need(qualification.obs_binding.scene_uuids.includes(value.program_scene_uuid),'module_sample_schema');
+     if(obs){
+      need(validateObsSceneSample(value,qualification.obs_binding.scene_uuids),'module_sample_schema');
+      if(previous)need(same(value.scenes,read(previous[1],previous[2]).value.scenes),'module_sample_scene_catalog_changed');
+     }
      else if(definition.template){
       need(Number.isInteger(value.value)&&!Object.is(value.value,-0)&&value.value>=-2147483648&&value.value<=2147483647&&
        typeof value.write_sequence==='string'&&/^(?:0|[1-9][0-9]{0,19})$(?![\s\S])/.test(value.write_sequence)&&

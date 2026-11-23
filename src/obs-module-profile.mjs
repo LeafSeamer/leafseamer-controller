@@ -27,6 +27,29 @@ export function isObsModuleEntry(content, entry) {
     files.some(file => file.file_id === entry.io_policy_file_id && file.role === 'policy' && file.digest === definition.policy);
 }
 
+export function validateObsSceneSample(value, expectedUuids) {
+  const scenes = value.scenes;
+  return Array.isArray(scenes) && scenes.length === expectedUuids.length &&
+    scenes.every((scene, index) => scene && Object.keys(scene).sort().join(',') === 'display_name,obs_scene_uuid' &&
+      scene.obs_scene_uuid === expectedUuids[index] && typeof scene.display_name === 'string' &&
+      scene.display_name.length > 0 && Buffer.byteLength(scene.display_name) <= 1024) &&
+    expectedUuids.includes(value.program_scene_uuid);
+}
+
+// 每个持久目录批准分配独立集合身份，重连不沿用旧场景引用。
+export function projectObsSceneCatalog(approved, sample) {
+  const collection = approved.approval_id;
+  return {
+    device_id: approved.device_id, device_session_id: approved.device_session_id, collection_ref: collection,
+    collection_generation: '1', catalog_revision: approved.catalog.catalog_revision, binding_revision: '1',
+    status: 'unconfirmed',
+    entries: sample.value.scenes.map(scene => ({
+      scene_id: 'scene_' + digest({collection_ref: collection, obs_scene_uuid: scene.obs_scene_uuid}).slice(7),
+      ...scene
+    }))
+  };
+}
+
 export function isObsReadOnlyRole(manifest, inventory, role, device) {
   return role?.kind === 'device' && role.minimum === 1 && role.maximum === 1 &&
     role.role_id === template.device_role && device?.device_kind === template.device_kind &&

@@ -19,7 +19,8 @@ const commandReads=['getCommand','getCommandEvidence','getCommandEvidenceRevisio
 const commandOperations = ['submitCommand', 'lookupCommandAdmission', 'rejectCommandAdmission',...commandReads];
 const controlWrites=['acquireControl','releaseControl','offerTransfer','acceptTransfer','cancelTransfer'];
 const controlOperations=['getControl','getControlOperation','getTransfer','lookupControlRequest',...controlWrites];
-const readOperations = ['getSession', 'listDevices', 'getCapabilities', 'getControl','getControlOperation','getTransfer',...commandReads];
+const deviceCatalogReads = ['getCapabilities','getSceneCatalog'];
+const readOperations = ['getSession', 'listDevices', ...deviceCatalogReads, 'getControl','getControlOperation','getTransfer',...commandReads];
 const rawPairs = flat => Array.from({length: flat.length / 2}, (_, i) => [flat[2 * i], flat[2 * i + 1]]);
 const credentialPattern = /^v1\.([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([A-Za-z0-9_-]{43})$/;
 const cookieFlags = '; Path=/auth; Secure; HttpOnly; SameSite=Strict';
@@ -173,12 +174,12 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
             target_id: record.session_id, revision_floor: record.revision_floor}, issuer_commit_revision: record.revision_floor,
           target_service_ids: record.target_service_ids, state: 'accepted', receipts: [], reason: 'logout', audit_id: record.tx_id}};
         await reply(res, request, 202, null, {data, extraHeaders: [clearCookie], beforeSend() { sessions.confirmLogout(result.operation_ref); }});
-      } else if (operation === 'listDevices' || operation === 'getControl' || operation === 'getCapabilities') {
+      } else if (operation === 'listDevices' || operation === 'getControl' || deviceCatalogReads.includes(operation)) {
         const proof = tokenInput(req);
         const view = () => operation === 'listDevices' ? sessions.listDevices(proof, request.parameters.query.cursor) :
-          operation === 'getCapabilities' ? sessions.getCapabilities(proof, request.parameters.path.device_id) : sessions.getControl(proof, request.parameters.path.device_id);
+          sessions[operation](proof, request.parameters.path.device_id);
         const data = view();
-        await reply(res, request, 200, null, {data, beforeSend() { if (canonical(view()) !== canonical(data)) reject(operation === 'getCapabilities' ? 'device_capabilities_changed' : 'device_registry_integrity'); }});
+        await reply(res, request, 200, null, {data, beforeSend() { if (canonical(view()) !== canonical(data)) reject(deviceCatalogReads.includes(operation) ? 'device_capabilities_changed' : 'device_registry_integrity'); }});
       } else if(controlOperations.includes(operation)){
         const proof=tokenInput(req),parameters=request.parameters.path;
         if(!readOperations.includes(operation)){
@@ -293,7 +294,7 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
       void serveLocalPairing(req, res).catch(() => empty(res, 503)); return true;
     }
     const pathname = req.url?.split('?')[0];
-    const method = routes.get(pathname) ?? (/^\/api\/v1\/commands\/[^/]+(?:\/evidence(?:\/[^/]+\/revisions\/[^/]+)?)?$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/(?:control|capabilities)$/.test(pathname)||/^\/api\/v1\/control-operations\/[^/]+$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+$/.test(pathname)?'GET':
+    const method = routes.get(pathname) ?? (/^\/api\/v1\/commands\/[^/]+(?:\/evidence(?:\/[^/]+\/revisions\/[^/]+)?)?$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/(?:control|capabilities|scene-catalog)$/.test(pathname)||/^\/api\/v1\/control-operations\/[^/]+$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+$/.test(pathname)?'GET':
       /^\/api\/v1\/devices\/[^/]+\/control\/(acquire|release|transfers)$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+\/(accept|cancel)$/.test(pathname)||pathname==='/api/v1/control-requests/lookup'?'POST':null);
     if (!method) return false;
     if (req.method !== method) { empty(res, 405, {Allow: method}); return true; }

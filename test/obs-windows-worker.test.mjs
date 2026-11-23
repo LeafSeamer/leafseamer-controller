@@ -125,7 +125,8 @@ test('Windows Worker 从 DPAPI 存储读取 OBS 密码，经两端命名管道�
     assert.deepEqual(connected.body.identity,obsModuleDefinition.identity);
     assert.deepEqual(connected.body.catalog.action_ids,[]);
     const sample=await client.captureBaseline('obs');
-    assert.deepEqual(sample.body.value,{sample_sequence:'1',program_scene_uuid:program});
+    assert.deepEqual(sample.body.value,{sample_sequence:'1',program_scene_uuid:program,
+      scenes:[{obs_scene_uuid:alternate,display_name:'B'},{obs_scene_uuid:program,display_name:'A'}]});
     assert.ok(requests.includes('GetCurrentProgramScene'));
     assert.ok(!JSON.stringify(record).includes(password));
     for(const socket of ws.clients)socket.terminate();

@@ -48,10 +48,10 @@ async function startCommandHttp(material){
   const spki=crypto.createHash('sha256').update(new crypto.X509Certificate(material.cert).publicKey.export({type:'spki',format:'der'})).digest('base64');
   report({event:'gui-endpoint',origin,spki});
  }
- commandHttp=(method,route,value)=>new Promise((resolve,reject)=>{
+ commandHttp=(method,route,value,token=commandToken)=>new Promise((resolve,reject)=>{
   const body=value===undefined?null:Buffer.from(JSON.stringify(value));
   const request=https.request(origin+route,{method,ca:material.cert,rejectUnauthorized:true,agent:commandAgent,headers:{Origin:origin,
-   Authorization:'Bearer v1.'+commandToken.token_id+'.'+commandToken.secret,
+   ...(token?{Authorization:'Bearer v1.'+token.token_id+'.'+token.secret}:{}),
    'X-LeafSeamer-Contract':contractSelection.contract_id,'X-LeafSeamer-Contract-Digest':contractSelection.contract_digest,
    ...(body?{'Content-Type':'application/json','Content-Length':body.length}:{})}},response=>{
     const chunks=[];response.on('data',chunk=>chunks.push(chunk));response.on('error',reject);
@@ -372,7 +372,7 @@ if(input.runtime){
  manager=await authenticated({after(){}},{store:business},{native:{source:clock,descriptor:assignment.clock_domain_descriptor},sampleWindowPolicy:'authentication-clock-sample/2'});
  if(needsReference)await collectCommandReference(timeBinding);
  if(input.command_tls)await startCommandHttp(input.command_tls);
- if(input.mode.endsWith('_capabilities')){
+ if(input.mode.endsWith('_capabilities')||input.mode==='supervisor_create_module_obs'){
   const before=manager.sessions.localPermissions(manager.auth);
   manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id:manager.logged.session.principal_id,expected_revision:before.revision,permissions:[...new Set([...before.permissions,'device.read'])]});
   commandToken=manager.token(['device.read']);
@@ -476,13 +476,23 @@ try{
       const connected=await moduleClient.connectReadOnly(device),first=await moduleClient.captureBaseline(device),second=await moduleClient.captureBaseline(device);
       const accepted=moduleClient.currentBaseline(device);
       if(input.mode==='supervisor_create_module_obs'){
+        const route='/api/v1/devices/'+device+'/scene-catalog';
+        manager.real.refresh();
+        report({event:'obs-scene-catalog-http',current:await commandHttp('GET',route),
+          noPermission:await commandHttp('GET',route,undefined,manager.token()),
+          noToken:await commandHttp('GET',route,undefined,null)});
         report({event:'obs-module-samples',connected,first,second,accepted});
         const until=performance.now()+5000;
         while(!fs.existsSync(options['--fixture']+'.obs-stopped')){
           if(performance.now()>=until)throw new Error('fixture_obs_stop_timeout');
           await delay(20);
         }
-        await moduleClient.captureBaseline(device);
+        try{await moduleClient.captureBaseline(device);}
+        catch(error){
+          manager.real.refresh();
+          report({event:'obs-scene-catalog-withdrawn',response:await commandHttp('GET',route)});
+          throw error;
+        }
         throw new Error('fixture_obs_stale_sample');
       }
       const armTarget=input.automation_peer?.arm_target;
