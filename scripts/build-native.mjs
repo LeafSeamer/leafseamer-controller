@@ -7,8 +7,11 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const args = process.argv.slice(2), options = {};
 if (args.length % 2) throw new Error('native_build_arguments');
 for (let i = 0; i < args.length; i += 2) {
-  if (!['--headers', '--node-library'].includes(args[i]) || Object.hasOwn(options, args[i]) || !path.isAbsolute(args[i + 1])) throw new Error('native_build_arguments');
-  options[args[i]] = args[i + 1];
+  const [name, value] = args.slice(i, i + 2);
+  const valid = name === '--windows-generator' ? process.platform === 'win32' && value === 'NMake Makefiles' :
+    ['--headers', '--node-library'].includes(name) && path.isAbsolute(value);
+  if (!valid || Object.hasOwn(options, name)) throw new Error('native_build_arguments');
+  options[name] = value;
 }
 if (!['win32', 'linux'].includes(process.platform) || process.arch !== 'x64') throw new Error('native_build_platform');
 const lock = JSON.parse(fs.readFileSync(path.join(root, 'native-inputs.json'), 'utf8'));
@@ -28,9 +31,15 @@ function run(args) {
   if (result.status !== 0) throw new Error('native_build_failed');
 }
 const configure = ['--fresh', '-S', path.join(root, 'native'), '-B', output, '-DCMAKE_BUILD_TYPE=Release', '-DNODE_INCLUDE_DIR=' + options['--headers']];
-if (process.platform === 'win32') configure.push('-G', 'Visual Studio 17 2022', '-A', 'x64', '-DNODE_LIBRARY=' + options['--node-library'], '-DSQLITE_SOURCE_DIR=' + sqliteSource);
+const visualStudio = process.platform === 'win32' && !options['--windows-generator'];
+if (process.platform === 'win32') {
+  configure.push('-G', options['--windows-generator'] ?? 'Visual Studio 17 2022');
+  if (visualStudio) configure.push('-A', 'x64');
+  configure.push('-DNODE_LIBRARY=' + options['--node-library'], '-DSQLITE_SOURCE_DIR=' + sqliteSource);
+}
 run(configure); run(['--build', output, '--config', 'Release']);
-const binary = fs.readFileSync(path.join(output, process.platform === 'win32' ? 'Release' : '', 'leafseamer_clock.node'));
+const built = name => fs.readFileSync(path.join(output, visualStudio ? 'Release' : '', name));
+const binary = built('leafseamer_clock.node');
 fs.mkdirSync(artifact, {recursive: true});
 fs.writeFileSync(path.join(artifact, 'leafseamer_clock.node'), binary);
 fs.writeFileSync(path.join(artifact, 'manifest.json'), JSON.stringify({format: 'leafseamer-native-artifact/1', platform: process.platform, arch: process.arch,
@@ -41,7 +50,7 @@ fs.writeFileSync(path.join(artifact, 'manifest.json'), JSON.stringify({format: '
   compiler: JSON.parse(fs.readFileSync(path.join(output, 'compiler.json'), 'utf8'))}, null, 2) + '\n');
 console.log(JSON.stringify({native_artifact: process.platform + '-' + process.arch, sha256: hash(binary)}));
 if (process.platform === 'win32') {
-  const materialization = fs.readFileSync(path.join(output, 'Release/leafseamer_materialization.node'));
+  const materialization = built('leafseamer_materialization.node');
   fs.writeFileSync(path.join(artifact, 'leafseamer_materialization.node'), materialization);
   fs.writeFileSync(path.join(artifact, 'materialization-manifest.json'), JSON.stringify({format: 'leafseamer-materialization-artifact/1',
     platform: process.platform, arch: process.arch, node_version: lock.node_version, napi_version: lock.napi_version,
@@ -49,7 +58,7 @@ if (process.platform === 'win32') {
     content_source_sha256: hash(fs.readFileSync(path.join(root, 'native/content-root.h'))),
     inputs_sha256: hash(fs.readFileSync(path.join(root, 'native-inputs.json'))),
     cmake_source_sha256: hash(fs.readFileSync(path.join(root, 'native/CMakeLists.txt')))}, null, 2) + '\n');
-  const host = fs.readFileSync(path.join(output, 'Release/leafseamer_process_host.exe'));
+  const host = built('leafseamer_process_host.exe');
   fs.writeFileSync(path.join(artifact, 'leafseamer_process_host.exe'), host);
   fs.writeFileSync(path.join(artifact, 'process-host-manifest.json'), JSON.stringify({format: 'leafseamer-process-host/1',
     platform: process.platform, arch: process.arch, binary_sha256: hash(host),

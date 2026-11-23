@@ -60,6 +60,7 @@ export function installationDependencies(db,service,selected){
    const current=device(db,service,ref.object_id),kind=current.body.device_kind;
    need(same(current.ref,ref),'device_stale');
    need(kind==='simulator'||kind==='obs','resource_provider_unavailable');
+   if(kind==='obs')need(Number(service.schema_revision)>=99,'obs_resource_ownership_migration_required');
    const matches=evidence.documents.filter(value=>value.template.device_role===role.role_id&&value.template.device_kind===kind);
    need(matches.length===1,'footprint_unavailable');const template=matches[0].template;
    const obs=kind==='obs'?selectObsWorkerResource(db,service,selected,ref,template):null;

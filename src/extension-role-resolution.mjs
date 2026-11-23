@@ -1,5 +1,6 @@
 import canonicalize from 'canonicalize';
 import {isIP} from 'node:net';
+import {isObsReadOnlyRole} from './obs-module-profile.mjs';
 export class RoleResolutionError extends Error {constructor(code){super(code);this.name='RoleResolutionError';this.code=code;}}
 export const roleNeed=(ok,code)=>{if(!ok)throw new RoleResolutionError('extension_role_'+code);};
 const same=(a,b)=>canonicalize(a)===canonicalize(b);
@@ -61,7 +62,11 @@ export function resolveRolePermissions({manifest,inventory,configuration_ref,bin
   }
   permissions.push({request_id,kind,purpose,scope:out});
  }
- need(used.size===declarations.size,'unused');const byId=new Map(permissions.map(p=>[p.request_id,p]));
+ for(const [name,binding] of selected){
+  if(!used.has(name))need(binding.values.length===1&&isObsReadOnlyRole(manifest,inventory,declarations.get(name),
+   objects.get(canonicalize(binding.values[0]))),'unused');
+ }
+ const byId=new Map(permissions.map(p=>[p.request_id,p]));
  for(const permission of permissions)if(permission.kind==='protocol_io'){const endpoint=byId.get(permission.scope.endpoint_request_id);
   need(endpoint?.kind==='network_endpoint'&&same(endpoint.scope.profile_ref,permission.scope.profile_ref),'protocol_binding');}
  return structuredClone(permissions);

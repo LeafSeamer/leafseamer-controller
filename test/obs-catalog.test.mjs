@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import test from 'node:test';
 import Database from 'better-sqlite3';
@@ -8,6 +9,7 @@ import {deviceCatalogStore} from '../dist/device-catalog-store.mjs';
 import {readDeviceCapabilities} from '../dist/device-capability-view.mjs';
 import {deviceModuleJournal} from '../dist/device-module-store.mjs';
 import {obsModuleDefinition as obs} from '../dist/obs-module-profile.mjs';
+import {resolveRolePermissions} from '../dist/extension-role-resolution.mjs';
 import {installationDependencies, workerDependencies} from '../dist/worker-dependencies.mjs';
 import {decodeCapabilityTemplate} from '../dist/sdk/capability-template.mjs';
 
@@ -19,7 +21,7 @@ function fixture(t) {
   const db = new Database(':memory:');
   t.after(() => db.close());
   // 当前原生准入由测试装配提供，从这里执行真实核心依赖、日志、目录与样本代码。
-  db.exec(`PRAGMA user_version=98;
+  db.exec(`PRAGMA user_version=99;
     CREATE TABLE device_record(device_id TEXT PRIMARY KEY,descriptor_body BLOB,descriptor_digest TEXT);
     CREATE TABLE obs_local_resource(device_id TEXT PRIMARY KEY,body_jcs TEXT,body_digest TEXT,transaction_id TEXT);
     CREATE TABLE obs_local_resource_commit(transaction_id TEXT,device_id TEXT,audit_jcs TEXT);
@@ -30,7 +32,7 @@ function fixture(t) {
     CREATE TABLE device_module_frame_commit(transaction_id TEXT,message_id TEXT,audit TEXT);
     CREATE TABLE device_catalog_approval(approval_id TEXT,channel_id TEXT,device_id TEXT,device_session_id TEXT,connected_message_id TEXT,body_jcs TEXT,body_digest TEXT,audit TEXT);
     CREATE TABLE device_baseline_sample(sample_id TEXT,approval_id TEXT,captured_message_id TEXT,sample_sequence TEXT,body_jcs TEXT,body_digest TEXT,audit TEXT);`);
-  const service = {service_id: 'core', database_instance_id: 'database', schema_revision: '98'};
+  const service = {service_id: 'core', database_instance_id: 'database', schema_revision: '99'};
   const scope = {authority_service_id: service.service_id, database_instance_id: service.database_instance_id};
   const ref = (kind, name, body) => ({kind, ...scope, object_id: name, revision: '1', digest: digest(body)});
   const descriptor = {device_id: 'obs', device_kind: 'obs', display_name: 'OBS'};
@@ -85,6 +87,30 @@ test('OBS 固定模板可由当前 SDK 解码且不声明动作或事件', async
   assert.deepEqual(await decodeCapabilityTemplate(data('obs-module-capability.json')),obs.template);
   assert.deepEqual(obs.catalog.action_ids,[]);
   assert.deepEqual(obs.catalog.trigger_ids,[]);
+});
+
+test('仅安装包的固定 OBS 模块可绑定无动作与触发权限的设备角色', () => {
+  const reference = {kind:'device',authority_service_id:'core',database_instance_id:'database',object_id:'obs',revision:'1',digest:digest('obs')};
+  const manifest = {roles:[{role_id:'device',kind:'device',minimum:1,maximum:1}],permission_templates:[],
+    entrypoints:[{kind:'worker',loader:'node_module',file_id:'module',io_policy_file_id:'policy'}],
+    api_versions:['leafseamer-device-module/2'],ipc_versions:['device-module/3'],capability_template_file_ids:['template']};
+  const templateDigest = 'sha256:'+createHash('sha256').update(data('obs-module-capability.json')).digest('hex');
+  const inventory = {files:[{file_id:'module',role:'module',digest:obs.module},
+    {file_id:'policy',role:'policy',digest:obs.policy},{file_id:'template',role:'schema',digest:templateDigest}]};
+  const configuration_ref = {id:'config'};
+  const input = {manifest,inventory,configuration_ref,scope:reference,
+    bindings:[{role_id:'device',kind:'device',values:[reference],configuration_ref}]};
+  const current = () => ({device_kind:'obs'});
+  assert.deepEqual(resolveRolePermissions({...input,current}),[]);
+  assert.throws(()=>resolveRolePermissions({...input,current:()=>({device_kind:'simulator'})}),{code:'extension_role_unused'});
+  for (const file of inventory.files) {
+    const saved = file.digest;
+    file.digest = digest('different');
+    assert.throws(()=>resolveRolePermissions({...input,current}),{code:'extension_role_unused'});
+    file.digest = saved;
+  }
+  manifest.api_versions.push('leafseamer-device-primitives/1');
+  assert.throws(()=>resolveRolePermissions({...input,current}),{code:'extension_role_unused'});
 });
 
 test('已登记 OBS 资源进入当前依赖、只读目录及采样，断连使原批准失效', t => {

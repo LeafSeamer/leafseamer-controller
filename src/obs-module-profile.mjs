@@ -10,6 +10,7 @@ const hash = name => 'sha256:' + createHash('sha256').update(bytes(name)).digest
 const same = (left, right) => canonical(left) === canonical(right);
 const need = (ok, reason) => { if (!ok) throw new IdentityError('obs_worker_' + reason); };
 const template = JSON.parse(bytes('obs-module-capability.json'));
+const templateDigest = hash('obs-module-capability.json');
 const catalog = obsDeviceCatalog();
 need(same(template.state_schema, catalog.state_schema) && template.actions.length === 0 && template.triggers.length === 0, 'capability');
 
@@ -24,6 +25,17 @@ export function isObsModuleEntry(content, entry) {
   return entry?.kind === 'worker' && entry.loader === 'node_module' &&
     files.some(file => file.file_id === entry.file_id && file.role === 'module' && file.digest === definition.module) &&
     files.some(file => file.file_id === entry.io_policy_file_id && file.role === 'policy' && file.digest === definition.policy);
+}
+
+export function isObsReadOnlyRole(manifest, inventory, role, device) {
+  return role?.kind === 'device' && role.minimum === 1 && role.maximum === 1 &&
+    role.role_id === template.device_role && device?.device_kind === template.device_kind &&
+    manifest.roles.length === 1 && manifest.permission_templates.length === 0 && manifest.entrypoints.length === 1 &&
+    isObsModuleEntry({inventory}, manifest.entrypoints[0]) &&
+    manifest.api_versions.length === 1 && manifest.api_versions[0] === 'leafseamer-device-module/2' &&
+    manifest.ipc_versions.length === 1 && manifest.ipc_versions[0] === 'device-module/3' &&
+    manifest.capability_template_file_ids.length === 1 && inventory.files.some(file =>
+      file.file_id === manifest.capability_template_file_ids[0] && file.role === 'schema' && file.digest === templateDigest);
 }
 
 export function selectObsWorkerResource(db, service, selected, device, template) {

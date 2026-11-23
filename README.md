@@ -19,6 +19,8 @@ npm run build
 
 原生构建输入来自 [Node 24.22.0 官方发行目录](https://nodejs.org/dist/v24.22.0/) 的 headers 和 Windows x64 `node.lib`，下载后先核对官方 SHASUMS256.txt。构建脚本再按 `native-inputs.json` 校验四个 N-API 头文件和导入库，当前只接受 Node 24.22.0、x64。Windows 使用 CMake 与 Visual Studio 2022 C++ 工具链；Linux 使用 CMake 和 C++17，并省略 `--node-library`。原生构建每次重新探测工具链，源码及制品摘要仍由打包入口校验。既有 Windows 制品使用 CMake 4.2.1、MSVC 19.44.35222.0 和 Windows SDK 10.0.26100.0。Linux x64 在 Debian Bookworm 隔离环境使用 CMake 4.2.1 和 GNU 12.2.0 完成原生构建、打包和保护态运行检查。正式发行及运行域资格继续使用独立批准与验收。
 
+已准备好 x64 MSVC 命令行环境时，在 `build:native` 的参数末尾加 `--windows-generator "NMake Makefiles"` 可用 NMake 构建。CMake、`cl.exe`、`nmake.exe` 和 Windows SDK 工具须在 `PATH`，MSVC 和 Windows SDK 的头文件与库须可由 `INCLUDE` 和 `LIB` 找到。曾用 MSVC 19.44.35230.0、CMake 4.2.1 和 Windows SDK 10.0.26100.0 从源码生成三个原生组件。[Microsoft C++ 命令行工具](https://learn.microsoft.com/en-us/cpp/build/building-on-the-command-line?view=msvc-170)
+
 首次显式创建业务库，再启动本机服务。`--data-dir` 必须是绝对路径；以下路径需替换为自己控制的独立目录。
 
 ```sh
@@ -277,7 +279,7 @@ schema 22的新worker准备必须匹配本次服务启动的人员受理、当�
 
 ### 登记本机 OBS 资源
 
-停止 Controller 后，使用 `migrate-storage --data-dir ABSOLUTE_PATH --to-revision 98` 显式迁移并保留生成的备份。由本机管理员用 `register-device` 登记 `device_kind=obs`，再经私有管道运行 `register-obs-resource --data-dir ABSOLUTE_PATH`。输入 JSON 包含 `request_id`、已登记的 `device_id`、OBS 回环 `port`、`password`、已核对的 `collection_name` 和两个 `scene_uuids`。可从 `inspect-obs-cut` 核对目录和 UUID。
+停止 Controller 后，使用 `migrate-storage --data-dir ABSOLUTE_PATH --to-revision 99` 显式迁移并保留生成的备份。由本机管理员用 `register-device` 登记 `device_kind=obs`，再经私有管道运行 `register-obs-resource --data-dir ABSOLUTE_PATH`。输入 JSON 包含 `request_id`、已登记的 `device_id`、OBS 回环 `port`、`password`、已核对的 `collection_name` 和两个 `scene_uuids`。可从 `inspect-obs-cut` 核对目录和 UUID。
 
 新登记实时读取 OBS，匹配后为设备及回环端口签发唯一资源引用。重用相同请求标识和登记参数返回原回执。密码只传给当次探测，资源记录与审计均不保存密码。结果的 `ready` 为 `false`，表示还需在受监督 Worker 中建立当前设备会话并批准目录。
 
@@ -299,7 +301,7 @@ schema 22的新worker准备必须匹配本次服务启动的人员受理、当�
 
 ### OBS Worker 与目录
 
-Controller 的 OBS 只读目录资格绑定安装包内的 `obs-device-module.mjs`、`obs-module-policy.json` 和 `obs-module-capability.json`。批准的扩展配置只含当前 `resource_ref` 与该资源的 `secret_ref`。Windows Worker 核验装载帧中的资源原件和引用，从固定凭据目录解封后建立只读会话。Worker 依赖与目录核验拒绝其他模块或策略、跨资源引用及任何动作或触发范围。通过只读目录核验的样本须使用登记的场景 UUID，并在同一设备会话内保持序号连续。Windows 原生监督全链仍待验收。
+Controller 的 OBS 只读目录资格绑定安装包内的 `obs-device-module.mjs`、`obs-module-policy.json` 和 `obs-module-capability.json`。扩展声明单个 `device` 角色，绑定一个已登记 OBS 设备，权限模板留空。批准的扩展配置只含当前 `resource_ref` 与该资源的 `secret_ref`。Windows Worker 核验装载帧中的资源原件和引用，从固定凭据目录解封后建立只读会话。Worker 依赖与目录核验拒绝其他模块或策略、跨资源引用及任何动作或触发范围。通过只读目录核验的样本须使用登记的场景 UUID，并在同一设备会话内保持序号连续。
 
 ### 执行会话与初始控制屏障
 

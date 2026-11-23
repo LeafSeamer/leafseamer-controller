@@ -475,6 +475,16 @@ try{
       }
       const connected=await moduleClient.connectReadOnly(device),first=await moduleClient.captureBaseline(device),second=await moduleClient.captureBaseline(device);
       const accepted=moduleClient.currentBaseline(device);
+      if(input.mode==='supervisor_create_module_obs'){
+        report({event:'obs-module-samples',connected,first,second,accepted});
+        const until=performance.now()+5000;
+        while(!fs.existsSync(options['--fixture']+'.obs-stopped')){
+          if(performance.now()>=until)throw new Error('fixture_obs_stop_timeout');
+          await delay(20);
+        }
+        await moduleClient.captureBaseline(device);
+        throw new Error('fixture_obs_stale_sample');
+      }
       const armTarget=input.automation_peer?.arm_target;
       if(armTarget){await moduleClient.connectReadOnly(armTarget);await moduleClient.captureBaseline(armTarget);}
       if(eventCaptureMode){

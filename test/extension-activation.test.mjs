@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
+import Database from 'better-sqlite3';
 import {setup} from './fixtures/extension-capabilities.mjs';
 import {authenticated} from './fixtures/extension-auth.mjs';
 import {bind,workerIntent} from './fixtures/core-binding.mjs';
@@ -114,4 +116,36 @@ test('数据库完整性约束阻止漏掉资源占用后提交受理',{timeout:
  const x=await ready(t,{inject:'CREATE TRIGGER omit_owner BEFORE INSERT ON extension_resource_owner_head BEGIN SELECT RAISE(IGNORE); END'});
  await assert.rejects(x.accept(),/extension_activation_incomplete/);close(x);
  inspect(x.f.dir,db=>{assert.equal(db.prepare('SELECT count(*) FROM extension_activation').pluck().get(),0);assert.equal(db.prepare('SELECT revision FROM extension_slot_head').pluck().get(),2);});
+});
+
+test('schema98到99保留模拟器归属及历史，并拒绝伪造共享资源身份',{timeout:60000},async t=>{
+ const x=await ready(t,{revision:98});
+ await x.accept();
+ close(x);
+ const snapshot=db=>Object.fromEntries(['extension_resource_owner','extension_resource_owner_head','schema_migration'].map(table=>
+  [table,db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).raw().all()]));
+ const before=inspect(x.f.dir,snapshot);
+ assert.equal(before.extension_resource_owner.length,1);
+ assert.equal(before.extension_resource_owner_head.length,1);
+ const result=await migrateStorage(x.f.dir,99);
+ assert.equal(result.steps.length,1);
+ assert.equal(result.schema_revision,'99');
+ inspect(x.f.dir,db=>{
+  const after=snapshot(db);
+  assert.deepEqual(after.extension_resource_owner,before.extension_resource_owner);
+  assert.deepEqual(after.extension_resource_owner_head,before.extension_resource_owner_head);
+  assert.deepEqual(after.schema_migration.slice(0,-1),before.schema_migration);
+  assert.deepEqual(db.prepare('SELECT resource_id,device_id,body_digest FROM device_resource_identity').raw().all(),
+   db.prepare('SELECT resource_id,device_id,body_digest FROM virtual_device_resource').raw().all());
+  assert.deepEqual(db.pragma('foreign_key_check'),[]);
+  assert.throws(()=>db.prepare('INSERT INTO device_resource_identity VALUES (?,?,?)').run('unknown',x.registered.device_id,hash('unknown')),
+   /device_resource_identity_parent/);
+  const [, , resource, device, resourceRef]=before.extension_resource_owner[0];
+  const wrongDigest={...JSON.parse(resourceRef),digest:hash('wrong')};
+  assert.throws(()=>db.prepare('INSERT INTO extension_resource_owner VALUES (?,?,?,?,?)')
+   .run('unknown','unknown',resource,device,JSON.stringify(wrongDigest)),/extension_owner_binding/);
+ });
+ const backup=new Database(path.join(x.f.dir,result.backup_file),{readonly:true,fileMustExist:true});
+ try{assert.equal(backup.pragma('user_version',{simple:true}),98);assert.deepEqual(snapshot(backup),before);}
+ finally{backup.close();}
 });
