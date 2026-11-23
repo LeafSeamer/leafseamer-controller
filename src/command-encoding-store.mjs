@@ -7,22 +7,27 @@ import {preparedFrame,insertFrame,executionTick} from './device-execution-handsh
 import {deviceExecutionVersion,assertDeviceExecutionFeatures} from './sdk/device-execution.mjs';
 import {memoExecutionRead,withExecutionReadView} from './execution-read-view.mjs';
 import {readInitialReady} from './device-initial-ready.mjs';
+import {encodeObsCutPacket,obsCutPacketBytes,obsCutPrimitive} from './obs-cut-packet.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError('execution_encoding_'+code);};
 const ref=(id,value)=>({id,revision:'1',digest:digest(value)});
 const hash=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
 const parse=cacheVerifiedDocument((text,expected)=>{const v=JSON.parse(text);need(canonical(v)===text&&digest(v)===expected,'integrity');return v;});
 const written=result=>need(result.changes===1,'storage');
 const row=sqliteRow;
-const reservation=(prepare,command)=>({format:'command-encoding-reservation/1',prepare_id:prepare,command_id:command,
- profile:{id:'leafseamer.simulator.encoding.limits.1',max_entries:256,max_bytes:2048},slots:1,max_bytes:8,state:'reserved'});
+const reservation=(prepare,command,binding)=>{
+ const obs=binding.primitive_plan.primitive_id===obsCutPrimitive,max_bytes=obs?obsCutPacketBytes:8;
+ return {format:'command-encoding-reservation/1',prepare_id:prepare,command_id:command,
+  profile:{id:obs?'leafseamer.obs.isolated_cut.encoding.limits.1':'leafseamer.simulator.encoding.limits.1',max_entries:256,max_bytes:256*max_bytes},
+  slots:1,max_bytes,state:'reserved'};
+};
 function authority(actual,prepare,attempt){
- const s=actual.command.source,b=actual.execution.value,r=reservation(prepare,s.command_id);
+ const s=actual.command.source,b=actual.execution.value,r=reservation(prepare,s.command_id,b);
  const automated=s.metadata.origin==='automation';
  const value={format_version:'encoding-authorization/0.1.0-draft.1',authorization_id:prepare+'.authorization',revision:'1',binding:b.binding,
   target:{kind:'ordinary',command_ref:{id:s.command_id,revision:'1',digest:s.initial_ref.digest},proposed_attempt_id:attempt,cancellation_ref:null,execution_ref:null},
   requester:{kind:automated?'service':'human',...actual.identity.actor},admission_source_ref:ref(s.command_id+'.admission-source',s),authorization_snapshot_ref:actual.snapshot_ref,
   capability_ref:b.capability_ref,primitive_id:b.primitive_plan.primitive_id,primitive_plan_ref:b.primitive_plan_ref,transport_profile_ref:b.transport_profile_ref,
-  content_digest:automated?s.execution_content_digest:s.metadata.request_identity.request_digest,encoding_reservation_ref:ref(prepare+'.reservation',r),max_bytes:8,
+  content_digest:automated?s.execution_content_digest:s.metadata.request_identity.request_digest,encoding_reservation_ref:ref(prepare+'.reservation',r),max_bytes:r.max_bytes,
   created_tick_ns:actual.snapshot.authentication_window.selected_tick_ns,expires_tick_ns:actual.expires_tick_ns};
  return {...value,authorization_digest:digest(value)};
 }
@@ -47,11 +52,11 @@ export function commitCommandEncoding(db,{binding,candidate,provider,tick}){
  need(db.inTransaction,'writer');const frame=candidate.frame,id=frame.body.prepare_id;
  const actual=withExecutionReadView(db,()=>provider.current(frame.body.command_id,candidate.snapshot));
  need(same(frame.body,requestBody(actual,id,frame.body.attempt_id)),'changed');
- const item=preparedFrame(binding,frame,Buffer.from(JSON.stringify(frame)),'c2w',tick()),r=reservation(id,frame.body.command_id);
+ const item=preparedFrame(binding,frame,Buffer.from(JSON.stringify(frame)),'c2w',tick()),r=reservation(id,frame.body.command_id,actual.execution.value);
  const value={format:'command-encoding-request/1',prepare_id:id,command_id:frame.body.command_id,binding_ref:actual.execution.ref,
   authorization:frame.body.encoding_authorization,identity_snapshot:candidate.snapshot,reservation_ref:ref(id+'.reservation',r),
   request_record_ref:{id:item.record.record_id,revision:'1',digest:item.record.record_digest}};
- written(db.prepare('INSERT INTO command_encoding_reservation VALUES(?,?,8,?,?)').run(id,value.command_id,canonical(r),digest(r)));
+ written(db.prepare('INSERT INTO command_encoding_reservation VALUES(?,?,?,?,?)').run(id,value.command_id,r.max_bytes,canonical(r),digest(r)));
  insertFrame(db,item,'command_encoding');
  written(db.prepare('INSERT INTO command_encoding_request VALUES(?,?,?,?,?,?,?)').run(id,value.command_id,actual.execution.ref.id,item.record.record_id,item.transaction,canonical(value),digest(value)));
  effect(db,item,id,'request',value,tick());const saved=readCommandEncoding(db,id);
@@ -94,7 +99,7 @@ function readRequest(db,id){return memoExecutionRead(db,'command-encoding-reques
  const reserve=row(db,'SELECT * FROM command_encoding_reservation WHERE prepare_id=?',id),source=row(db,'SELECT body_jcs,body_digest FROM command_admission_source WHERE command_id=?',r.command_id),
   binding=row(db,'SELECT body_jcs,body_digest FROM device_execution_binding WHERE binding_id=?',r.binding_id);need(reserve&&source&&binding,'source');
  const s=parse(source.body_jcs,source.body_digest),b=parse(binding.body_jcs,binding.body_digest),z=parse(reserve.body_jcs,reserve.body_digest);
- need(same(z,reservation(id,r.command_id))&&reserve.command_id===r.command_id&&reserve.max_bytes===8&&same(value.reservation_ref,ref(id+'.reservation',z))&&
+ need(same(z,reservation(id,r.command_id,b))&&reserve.command_id===r.command_id&&reserve.max_bytes===z.max_bytes&&same(value.reservation_ref,ref(id+'.reservation',z))&&
   value.format==='command-encoding-request/1'&&value.prepare_id===id&&value.command_id===r.command_id&&same(value.authorization,a)&&
   same(value.binding_ref,ref(r.binding_id,b))&&same(s.binding_ref,value.binding_ref)&&same(s.binding,a.binding)&&
   same(value.request_record_ref,{id:r.record_id,revision:'1',digest:request.record.record_digest})&&request.transaction===r.transaction_id&&request.replyRecord===null&&request.frame.reply_to===null,'source');
@@ -106,7 +111,7 @@ function readRequest(db,id){return memoExecutionRead(db,'command-encoding-reques
   snapshot.command_id===s.command_id&&snapshot.identity.token_id===s.token_id&&same(snapshot.identity.actor,actor)&&
   snapshot.identity.authorization_digest===s.authorization_digest&&same(snapshot.identity.ready_ref,s.ready_ref)&&same(snapshot.identity.binding_ref,s.binding_ref)&&
   same(a.capability_ref,b.capability_ref)&&same(a.primitive_plan_ref,b.primitive_plan_ref)&&same(a.transport_profile_ref,b.transport_profile_ref)&&a.primitive_id===b.primitive_plan.primitive_id&&
-  same(a.encoding_reservation_ref,value.reservation_ref)&&a.max_bytes===8&&a.created_tick_ns===snapshot.authentication_window.selected_tick_ns&&a.expires_tick_ns===snapshot.authentication_window.before_tick_ns&&
+  same(a.encoding_reservation_ref,value.reservation_ref)&&a.max_bytes===z.max_bytes&&a.created_tick_ns===snapshot.authentication_window.selected_tick_ns&&a.expires_tick_ns===snapshot.authentication_window.before_tick_ns&&
   BigInt(a.created_tick_ns)<=request.observedTick&&request.committedTick<BigInt(a.expires_tick_ns)&&BigInt(a.expires_tick_ns)<=BigInt(s.deadline.queue_deadline_tick_ns),'authority');
  const {context_id,idempotency_key,...content}=body.request;
  need((automated?same(body.request,s.execution_request)&&same(snapshot.authentication_window,s.authentication_window)&&digest(content)===s.execution_content_digest:
@@ -121,12 +126,14 @@ function packetBytes(saved,frame){
  need(body.prepare_id===saved.value.prepare_id&&same(body.encoding_authorization_ref,{id:a.authorization_id,revision:'1',digest:a.authorization_digest}),'reply');
  if(frame.type==='PACKET_ENCODING_FAILED')return null;
  const p=body.packet,{packet_digest,...unsigned}=p,bytes=Buffer.from(body.bytes_hex,'hex'),b=saved.bound;
- need(bytes.length===8&&bytes.toString('hex')===body.bytes_hex&&digest(unsigned)===packet_digest&&
+ need(bytes.length===a.max_bytes&&bytes.toString('hex')===body.bytes_hex&&digest(unsigned)===packet_digest&&
   p.command_id===saved.value.command_id&&p.attempt_id===a.target.proposed_attempt_id&&p.primitive_id===a.primitive_id&&
   p.writer_exit_id===a.binding.writer_exit_id&&p.device_session_id===a.binding.device_session_id&&p.socket_instance_id===b.exit.socket_instance_id&&p.protocol_session===b.exit.protocol_session&&
   p.wire_packet_id===null&&p.tracking_ids.length===0&&p.byte_length===bytes.length&&p.sha256===hash(bytes)&&same(p.immutable_bytes_ref,{object_id:'bytes_'+p.packet_id,digest:hash(bytes)})&&
-  same(p.transport_profile_ref,saved.request.frame.body.transport_profile_ref)&&same(p.primitive_plan_ref,saved.request.frame.body.primitive_plan_ref)&&
-  bytes.subarray(0,4).toString('hex')==='4c534d31'&&bytes.readInt32BE(4)===saved.request.frame.body.request.parameters.value,'packet');return bytes;
+  same(p.transport_profile_ref,saved.request.frame.body.transport_profile_ref)&&same(p.primitive_plan_ref,saved.request.frame.body.primitive_plan_ref),'packet');
+ const parameters=saved.request.frame.body.request.parameters;
+ need(p.primitive_id===obsCutPrimitive?bytes.equals(encodeObsCutPacket(b.primitive_plan.scene_catalog,b.binding,parameters)):
+  bytes.subarray(0,4).toString('hex')==='4c534d31'&&bytes.readInt32BE(4)===parameters.value,'packet');return bytes;
 }
 function evidence(saved,frame,bytes,received){
  if(!bytes)return null;
@@ -223,7 +230,7 @@ export function selectCommandFinalization(db,{id,provider,tick}){
  need(db.inTransaction&&provider&&typeof tick==='function','finalization_writer');
  return withExecutionReadView(db,()=>{
   const encoding=readCommandEncoding(db,id),response=encoding.response;
-  need(response?.value.disposition==='prepared'&&response.bytes?.length===8,'finalization_prepared');
+  need(response?.value.disposition==='prepared'&&response.bytes?.length===encoding.value.authorization.max_bytes,'finalization_prepared');
   const session=encoding.value.authorization.binding.ipc_session_id;
   need(!db.prepare('SELECT 1 FROM execution_session_end WHERE ipc_session_id=?').pluck().get(session),'finalization_session');
   const write=row(db,'SELECT result,completed_tick FROM execution_write_result WHERE attempt_id=?',response.value.write_attempt_id);

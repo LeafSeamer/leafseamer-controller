@@ -49,9 +49,9 @@ export function readCurrentDeviceCatalog(db,{service,device,runtime,selected,dep
 }
 export function readDeviceCapabilities(db,input){
  const {approved,qualified,template,descriptor,content,intent}=readCurrentDeviceCatalog(db,input),q=approved.qualification,runtime=input.runtime;
- // 受监督 OBS 装配保持关闭，公开动作须有对应持久控制与结算策略。
- const actions=q.qualification===obsCutModuleDefinition.qualification?[]:template.actions.map(action=>({...structuredClone(action),footprint:qualified?.action_footprints.find(value=>value.action_id===action.action_id)??{manifest_digest:q.manifest_digest,semantics_revision:'1',complete:false,
-  reads:[],writes:[],failure_writes:[],resources:[],safe_failure_classes:[],action_id:action.action_id}}));
+ const supported=q.qualification!==obsCutModuleDefinition.qualification||Number(input.service.schema_revision)>=103;
+ const actions=supported?template.actions.map(action=>({...structuredClone(action),footprint:qualified?.action_footprints.find(value=>value.action_id===action.action_id)??{manifest_digest:q.manifest_digest,semantics_revision:'1',complete:false,
+  reads:[],writes:[],failure_writes:[],resources:[],safe_failure_classes:[],action_id:action.action_id}})):[];
  return {provider_id:intent.member_id,provider_boot_id:runtime.binding.admission_receipt.member_boot_id,catalog_revision:approved.catalog.catalog_revision,
   module_id:content.manifest.extension_id,module_version:content.manifest.extension_version,
   devices:[{...descriptor,connection_state:'ready',actions,triggers:structuredClone(template.triggers),state_schema:structuredClone(template.state_schema)}]};

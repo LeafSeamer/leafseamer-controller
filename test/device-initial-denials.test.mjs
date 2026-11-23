@@ -42,7 +42,7 @@ test('首次快照必须处于writer，零水位绑定真实scope和设备；未
  assert.equal(source.outgoing_frame_refs.length,1);
  f.add('b');assert.notDeepEqual(f.capture(),source);
  assert.deepEqual(f.run(()=>readInitialDenials(f.db,f.service,'device',source)),source);
- for(const revision of ['94','95','96','97','98','99','100','101','102']){
+ for(const revision of ['94','95','96','97','98','99','100','101','102','103']){
   f.db.prepare('UPDATE service_state SET schema_revision=?').run(revision);
   f.service.schema_revision=revision;
   assert.equal(f.capture().schema_revision,revision);

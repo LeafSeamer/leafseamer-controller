@@ -6,6 +6,7 @@ import {preparedFrame,insertFrame,executionTick} from './device-execution-handsh
 import {readCommandDispatch,dispatchEffect,dispatchApplied} from './command-dispatch.mjs';
 import {readOriginalRecord,readCommandRecord,readReportedCommandRecord,settledCommandProjection} from './command-record-store.mjs';
 import {readCommandEncoding} from './command-encoding-store.mjs';
+import {obsCutPacketBytes,readObsCutPacket} from './obs-cut-packet.mjs';
 import {readInitialReady,protectInitialReadies} from './device-initial-ready.mjs';
 import {readControlSource,currentControlSource} from './device-control-source.mjs';
 import {currentDeviceExecutionBinding} from './device-execution-binding.mjs';
@@ -145,6 +146,30 @@ export function fixedMemoryCompletion({source,report,observation,receivedTick,ba
   observation.response?.value===source.policies.completion.observation.value&&/^(?:0|[1-9][0-9]{0,19})$/.test(observation.response?.write_sequence)&&
   BigInt(observation.response.write_sequence)===BigInt(baseline.value.write_sequence)+1n&&coverage.proof==='transport_entered';
 }
+const unsigned=value=>typeof value==='string'&&/^(?:0|[1-9][0-9]{0,19})$(?![\s\S])/.test(value);
+const requestId=value=>typeof value==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$(?![\s\S])/.test(value);
+export function fixedObsCutCompletion({source,report,observation,receivedTick,committedTick,coverage,scene}){
+ if(!observation||report.transport_entered_tick_ns===null||coverage?.proof!=='transport_entered'||
+  report.disposition!=='in_flight'||report.proof!=='transport_entered'||observation.bytes_written!==obsCutPacketBytes)return false;
+ const entered=BigInt(report.transport_entered_tick_ns),before=entered+BigInt(source.deadline.evidence_timeout_ms)*1000000n;
+ const wire=observation.response,kinds=['set_send','set_ack','query_send','query_result'];
+ if(wire?.format!=='leafseamer-obs-cut-wire/1'||Object.keys(wire).sort().join(',')!=='format,frames,target_scene_uuid'||
+  wire.target_scene_uuid!==scene||!Array.isArray(wire.frames)||wire.frames.length!==4||
+  !unsigned(report.gate_io_seq)||!unsigned(observation.observed_tick_ns)||receivedTick>committedTick||committedTick>=before)return false;
+ let lastOrder=BigInt(report.gate_io_seq),lastTick=entered;
+ for(const [index,frame] of wire.frames.entries()){
+  if(!frame||Object.keys(frame).sort().join(',')!=='io_seq,kind,protocol_request_id,scene_uuid,success,tick_ns'||
+   frame.kind!==kinds[index]||frame.success!==true||!requestId(frame.protocol_request_id)||!unsigned(frame.io_seq)||!unsigned(frame.tick_ns))return false;
+  const order=BigInt(frame.io_seq),tick=BigInt(frame.tick_ns);
+  if(order<=lastOrder||tick<lastTick||tick>BigInt(observation.observed_tick_ns)||
+   frame.scene_uuid!==(index===0||index===3?scene:null))return false;
+  lastOrder=order;lastTick=tick;
+ }
+ const [set,ack,query,result]=wire.frames;
+ return set.protocol_request_id===report.protocol_request_id&&set.protocol_request_id===ack.protocol_request_id&&
+  query.protocol_request_id===result.protocol_request_id&&set.protocol_request_id!==query.protocol_request_id&&
+  BigInt(observation.observed_tick_ns)<=receivedTick;
+}
 function settlement(db,closed,commit,evidenceRef=undefined){
  need(closed.ack,'closure_required');const {dispatch:d,initial}=closed.source,p=d.final.value.permit,s=initial.source;
  need(d.report,'report_required');const evidenceSource=evidenceRef===null?null:d.evidence;
@@ -156,13 +181,24 @@ function settlement(db,closed,commit,evidenceRef=undefined){
  const sampleRef=resource.inventory.baseline_ref,sample=row(db,'SELECT body_jcs,body_digest FROM device_baseline_sample WHERE sample_id=?',sampleRef.id);
  need(sample,'sample');const baseline=parse(sample.body_jcs,sample.body_digest);
  need(same(ref(baseline.sample_id,baseline),sampleRef)&&baseline.device_id===s.binding.device_id&&baseline.device_session_id===p.device_session_id,'sample');
- const succeeded=fixedMemoryCompletion({source:s,report:r,observation:o,receivedTick:evidenceSource?.reply.observedTick,baseline,coverage:closed.ack.reply.frame.body.transmission_coverage.find(v=>v.intent.intent.permit_id===p.permit_id)});
- const id=s.command_id,policy=initial.record.policy,closure={format:'fixed-memory-future-writes-closed/1',command_id:id,binding:s.binding,
+ const coverage=closed.ack.reply.frame.body.transmission_coverage.find(v=>v.intent.intent.permit_id===p.permit_id);
+ const inputs={source:s,report:r,observation:o,receivedTick:evidenceSource?.reply.observedTick,baseline,coverage};
+ const obs=s.policies.completion.format==='fixed-obs-cut-completion/1';
+ let scene=null,succeeded;
+ if(obs){
+  const catalog=encoded.bound.primitive_plan.scene_catalog,sceneCatalogDigest=digest(catalog);
+  scene=readObsCutPacket(encoded.response.bytes,catalog,s.binding);
+  need(s.policies.completion.target_scene_uuid===scene&&s.policies.completion.scene_catalog_digest===sceneCatalogDigest&&
+   resource.inventory.obs_cut_observation?.scene_catalog_digest===sceneCatalogDigest&&
+   same(resource.inventory.external_resources,s.policies.release.external_resources),'obs_profile');
+  succeeded=fixedObsCutCompletion({...inputs,scene,committedTick:evidenceSource?.reply.committedTick});
+ }else succeeded=fixedMemoryCompletion(inputs);
+ const id=s.command_id,policy=initial.record.policy,closure={format:obs?'fixed-obs-cut-future-writes-closed/1':'fixed-memory-future-writes-closed/1',command_id:id,binding:s.binding,
   final_admission_ref:d.final.ref,cut_ref:closed.ref,ack_ref:closed.ack.ref,transmissions:closed.request.frame.body.open_transmission_intents,automatic_resends:false},
-  module={format:'fixed-memory-settlement-proof/1',command_id:id,binding:s.binding,baseline_ref:sampleRef,
+  module={format:obs?'fixed-obs-cut-settlement-proof/1':'fixed-memory-settlement-proof/1',command_id:id,binding:s.binding,baseline_ref:sampleRef,
    dispatch_ref:d.ref,report_ref:d.report.ref,observation_ref:evidenceSource?.ref??null,closed_ref:ref(id+'.writes-closed',closure),
    evidence_deadline_tick_ns:r.transport_entered_tick_ns===null?null:String(BigInt(r.transport_entered_tick_ns)+BigInt(s.deadline.evidence_timeout_ms)*1000000n),
-   module_settled:succeeded},
+   module_settled:succeeded,...(obs&&{target_scene_uuid:scene,scene_catalog_digest:s.policies.completion.scene_catalog_digest})},
   decision=evidenceRecord('decision',{evidence_id:id+'.decision',command_id:id,scope:s.metadata.scope,kind:succeeded?'completion':'failure',
    policy_ref:policy.completion_policy_ref,retry_policy_ref:null,attempt_ids:[p.attempt_id],achieved:succeeded?'effect_verified':null,
    effect_status:succeeded?'verified':'possible',resolved_outcome:null}),

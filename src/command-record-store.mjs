@@ -12,12 +12,16 @@ import {readDispatchLifecycle} from './command-dispatch.mjs';
 import {readSettlementLifecycle} from './command-settlement.mjs';
 import {readCommandFinalAdmission} from './command-final-admission.mjs';
 import {verifyCommandReferenceAcceptance} from './reference-time-anchor.mjs';
+import {obsCutModuleDefinition} from './obs-module-profile.mjs';
+import {encodeObsCutPacket,obsCutPacketBytes,readObsCutPacket} from './obs-cut-packet.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('command_'+code);};
 const bytes=value=>Buffer.from(canonical(value));
 const reference=(id,value)=>({id,revision:'1',digest:digest(value)});
 const template=JSON.parse(fs.readFileSync(new URL('./simulator-control-capability.json',import.meta.url)));
 const capacity={format:'command-capacity/1',profile_id:'leafseamer.simulator.control.limits.1',scope:'development_fixed_memory',
  max_request_keys:4096,max_commands:4096,max_queued_per_device:8,per_command:{commands:1,claims:1,attempts:1,max_packet_bytes:8}};
+const obsCapacity={...capacity,profile_id:'leafseamer.obs.isolated_cut.limits.1',scope:'fixed_obs_cut',max_queued_per_device:1,
+ per_command:{...capacity.per_command,max_packet_bytes:obsCutPacketBytes}};
 const readSchema=getSchema(routes.operations.find(v=>v.authority==='controller'&&v.operation_id==='getCommand').responses['200']);
 function validate(record){
  const value={view:'current',record},numbers=new Map();
@@ -29,15 +33,30 @@ function original(text,hash){const value=JSON.parse(text);need(canonical(value)=
 const actor=proof=>({principal_id:proof.principal_id,session_id:proof.session_id,authorization_revision:proof.policy_revision,
  issuer_id:proof.issuer_id,issuer_epoch:proof.issuer_epoch,local_subject_id:proof.principal_id});
 export function commandPolicyInput(value,execution){
- const action=template.actions[0],p=value.parameters,b=execution.value;
- need(execution.catalog.qualification.template_digest===digest(template)&&b.action.action_id===action.action_id&&
+ const b=execution.value,p=value.parameters,obs=b.transport_profile?.format==='leafseamer-obs-cut-transport/1';
+ const selected=obs?obsCutModuleDefinition.template:template,action=selected.actions[0];
+ need(execution.catalog.qualification.template_digest===digest(selected)&&b.action.action_id===action.action_id&&
   b.action.parameters_schema_digest===action.parameters_schema.digest&&b.action.result_schema_digest===action.result_schema.digest,'capability');
  need(value.action_id===action.action_id&&value.capability_version===action.capability_version,'capability');
- need(p&&Object.keys(p).join(',')==='value'&&Number.isInteger(p.value)&&p.value>=-2147483648&&p.value<=2147483647,'parameters');
  need(value.dispatch.mode==='immediate','reference_time_required');
  need(Array.isArray(value.preconditions)&&value.preconditions.length===0,'preconditions');
  need(action.completion.supported.includes(value.required_completion),'completion');
  need(value.evidence_timeout_ms>0&&value.evidence_timeout_ms<=action.evidence_timeout_ms,'evidence_timeout');
+ if(obs){
+  need(value.origin==='manual'&&execution.catalog.qualification.qualification===obsCutModuleDefinition.qualification,'capability');
+  const catalog=b.primitive_plan.scene_catalog;
+  let packet;
+  try{packet=encodeObsCutPacket(catalog,b.binding,p);}catch(error){
+   if(!error?.code?.startsWith('obs_cut_packet_'))throw error;
+   need(false,'parameters');
+  }
+  return {completion:{format:'fixed-obs-cut-completion/1',policy_id:action.completion.evidence_policy_id,capability_ref:b.capability_ref,
+    action:b.action,transport_profile_ref:b.transport_profile_ref,levels:action.completion.supported,
+    scene_catalog_digest:digest(catalog),target_scene_uuid:readObsCutPacket(packet,catalog,b.binding)},
+   release:{format:'fixed-obs-cut-release/1',policy_id:'leafseamer.obs.isolated_cut.quiescent.1',transport_profile_ref:b.transport_profile_ref,
+    automatic_resends:false,external_resources:[b.transport_profile.resource_ref],required:'correlated_cut_and_fenced_writer',failure:'unresolved'},capacity:obsCapacity};
+ }
+ need(p&&Object.keys(p).join(',')==='value'&&Number.isInteger(p.value)&&p.value>=-2147483648&&p.value<=2147483647,'parameters');
  return {completion:{format:'fixed-memory-completion/1',policy_id:action.completion.evidence_policy_id,capability_ref:b.capability_ref,
    action:b.action,transport_profile_ref:b.transport_profile_ref,levels:action.completion.supported,
    sent:{disposition:'in_flight',proof:'transport_entered',observation_source:'correlated_primitive_observation',bytes_written:8},
@@ -180,9 +199,10 @@ export function storeAutomationCommandRecord(db,{command:initial,adjudication,re
 }
 export function storeCommandRecord(db,prepared,keyId,commitId,beforeCount){
  need(db.inTransaction,'writer');const p=prepared,s=p.source,w=result=>need(result.changes===1,'storage');
+ const dimensions=s.policies.capacity;
  w(db.prepare('INSERT INTO ca_command_initial(command_id,key_id,decision,revision,command_digest,command_body,admission_binding_body) VALUES(?,?,\'accepted\',\'1\',?,?,?)')
   .run(p.id,keyId,digest(p.initial),bytes(p.initial),bytes({source_ref:reference(p.id,s)})));
- w(db.prepare('INSERT INTO ca_reservation VALUES(?,?,?,?)').run(keyId,p.id,bytes(reference(capacity.profile_id,capacity)),bytes(capacity.per_command)));
+ w(db.prepare('INSERT INTO ca_reservation VALUES(?,?,?,?)').run(keyId,p.id,bytes(reference(dimensions.profile_id,dimensions)),bytes(dimensions.per_command)));
  w(db.prepare('INSERT INTO command_policy VALUES(?,?,?)').run(p.id,canonical(p.policy),digest(p.policy)));
  w(db.prepare('INSERT INTO command_resource_claim VALUES(?,?,?,?)').run(p.id,s.binding.device_id,canonical(p.claim),digest(p.claim)));
  if(s.context_id!==null){
@@ -245,10 +265,19 @@ function readInitialRecord(db,id){
  if(automated||initial.accepted_at===null)need(observed===undefined && initial.accepted_reference_ref===undefined,'reference_acceptance');
  else need(observed?.accepted_at===initial.accepted_at && same(initial.accepted_reference_ref,reference(id+'_reference_acceptance',observed)) &&
   verifyCommandReferenceAcceptance(db,observed,initial.accepted_monotonic,source.binding.ipc_session_id),'reference_acceptance');
+ const bound=db.prepare('SELECT body_jcs,body_digest FROM device_execution_binding WHERE binding_id=?').raw().get(source.binding_ref.id);
+ need(bound,'record_binding');const binding=original(...bound),obs=binding.transport_profile.format==='leafseamer-obs-cut-transport/1';
+ const limits=obs?obsCapacity:capacity;
+ if(obs){
+  const ref=binding.catalog_approval_ref,row=db.prepare('SELECT body_jcs,body_digest FROM device_catalog_approval WHERE approval_id=?').raw().get(ref.id);
+  need(row&&row[1]===ref.digest,'record_policy');
+  const catalog=original(...row);
+  need(same(source.policies,commandPolicyInput(value,{value:binding,catalog})),'record_policy');
+ }
  need(same(policy.admission_ref,source.admission_ref)&&same(policy.original_deadline_ref,reference(id+'_deadline',source.deadline))&&
   same(policy.completion_policy_ref,reference(id+'_completion_policy',source.policies.completion))&&same(policy.release_policy_ref,reference(id+'_release_policy',source.policies.release))&&
   policy.required_completion===value.required_completion&&policy.max_attempts===1&&policy.retry_policy_ref===null&&policy.conflict_scope==='whole_device'&&
-  same(JSON.parse(cr.toString()),reference(capacity.profile_id,capacity))&&same(JSON.parse(dimensions.toString()),capacity.per_command)&&same(source.policies.capacity,capacity),'record_policy');
+  same(JSON.parse(cr.toString()),reference(limits.profile_id,limits))&&same(JSON.parse(dimensions.toString()),limits.per_command)&&same(source.policies.capacity,limits),'record_policy');
  need(state.revision==='1'&&state.phase==='queued'&&state.outcome==='pending'&&state.effect_status==='not_sent'&&state.resource_status==='clear'&&
   state.attempt_ids.length===0&&state.completion_evidence_refs.length===0&&state.resource_evidence_refs.length===0&&
   claim.command_id===id&&claim.state==='queued'&&claim.hold_ref===null&&claim.ownership_ref===null&&claim.device_id===value.device_id&&
@@ -256,8 +285,7 @@ function readInitialRecord(db,id){
  const record=publicRecord(source,policy,state,manifest);need(canonical(record)===rt&&record.record_digest===rh,'record_projection');
  const charge=db.prepare('SELECT context_id,before_count,after_count FROM command_context_charge WHERE command_id=?').raw().get(id);
  need(automated?!charge:charge&&charge[0]===source.context_id&&charge[2]===charge[1]+1,'record_charge');
- const ready=readInitialReady(db,source.ready_ref.id),bound=db.prepare('SELECT body_jcs,body_digest FROM device_execution_binding WHERE binding_id=?').raw().get(source.binding_ref.id);
- need(bound,'record_binding');const binding=original(...bound);
+ const ready=readInitialReady(db,source.ready_ref.id);
  need(same(ready.ref,source.ready_ref)&&same(source.binding,ready.value.binding)&&same(source.binding,binding.binding)&&
   same(source.binding_ref,reference(binding.binding_id,binding))&&same(accepted.domain,{clock_domain_id:source.binding.clock_domain_id,descriptor_digest:source.binding.descriptor_digest})&&
   BigInt(accepted.tick_ns)>=BigInt(ready.value.selected_tick_ns)&&BigInt(accepted.tick_ns)<BigInt(ready.value.expires_tick_ns)&&
@@ -279,13 +307,17 @@ export function pendingInitialCommands(db,ready,preparedRef=null,retiredIds=[],d
   need((saved.record.state.phase==='queued'||prepared&&saved.lifecycle.dispatch&&['dispatching','awaiting_evidence'].includes(saved.record.state.phase))&&(saved.record.attempts.length===0||prepared)&&same(saved.source.ready_ref,ready.ref)&&same(saved.source.binding,ready.value.binding),'resource_successor');
   return {id,revision:'1',digest:saved.source.initial_ref.digest};});
 }
-export function commandCapacity(db,device){
+export function commandCapacity(db,device,execution=null){
  need(db.inTransaction,'writer');
  need(db.prepare('SELECT count(*) FROM ca_request_key').pluck().get()<capacity.max_request_keys&&
   db.prepare('SELECT count(*) FROM ca_command_initial').pluck().get()<capacity.max_commands&&
   db.prepare(Number(db.pragma('user_version',{simple:true}))>=50?
    'SELECT count(*) FROM command_resource_claim c WHERE device_id=? AND NOT EXISTS(SELECT 1 FROM command_lifecycle_head h WHERE h.command_id=c.command_id)':
    'SELECT count(*) FROM command_resource_claim WHERE device_id=?').pluck().get(device)<capacity.max_queued_per_device,'capacity');
+ // 当前 OBS 就绪确认只预留一次 Cut；后续命令必须持有新的开闸与无占用证据。
+ if(execution?.value.transport_profile?.format==='leafseamer-obs-cut-transport/1'){
+  need(!db.prepare('SELECT 1 FROM command_admission_source WHERE device_id=? AND ready_id=? LIMIT 1').pluck().get(device,execution.ready.ref.id),'capacity');
+ }
 }
 
 function outgoingCut(db,session,through=null){

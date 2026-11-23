@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {decodeExecutionPayload,DeviceExecutionError} from './device-execution-channel.mjs';
 import {authorizationRevoked,runGenerationMatches} from './device-authorization-fence.mjs';
+import {obsCutPrimitive} from './obs-cut-packet.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError(code);};
 const digest=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 const same=(a,b)=>canonicalize(a)===canonicalize(b);
@@ -98,8 +99,9 @@ export function deviceTransmissionWriter({binding,preparation,executor,action,cu
  }
  function report(entry,disposition,proof,observation=null){
   const p=entry.frame.body.permit,tx=p.transmission;
+  const protocolRequestId=tx.primitive_id===obsCutPrimitive?observation?.response?.frames?.[0]?.protocol_request_id??null:null;
   return frozen({type:'SEND_REPORT',reply_to:null,device_id:bound.device_id,body:{report_id:entry.reportId,permit_id:p.permit_id,
-   attempt_id:p.attempt_id,dispatch_intent_id:p.dispatch_intent_id,device_session_id:bound.device_session_id,disposition,proof,protocol_request_id:null,
+   attempt_id:p.attempt_id,dispatch_intent_id:p.dispatch_intent_id,device_session_id:bound.device_session_id,disposition,proof,protocol_request_id:protocolRequestId,
    transmission_id:tx.transmission_id,packet_ref:tx.packet_ref,ordinal:tx.ordinal,gate_io_seq:entry.order,
    transport_entered_tick_ns:disposition==='in_flight'?entry.enteredTick:null,
    socket_callback_observation_ref:observation?{object_id:observation.observation_id,digest:digest(observation)}:null}});

@@ -221,10 +221,10 @@ async function inspectObs(input,cut,signal,onInvalidated,writable=false){
     const setType='SetCurrentProgramScene',setId=randomUUID();
     const setReply=await receive(7,{op:6,d:{requestType:setType,requestId:setId,requestData:{sceneUuid}}},()=>{
      if(relative)evidenceDeadline=tick()+evidenceBudgetNs;
-     frame('set_send',setId,sceneUuid);
      try{requireValue(enterTransmission()===undefined,'cut_dispatch');}
      catch(error){permitRejected=error instanceof ObsCutEntryRejected;throw error;}
      entered=true;
+     frame('set_send',setId,sceneUuid);
      cutTarget=sceneUuid;
     });
     verifyReply(setReply,setType,setId);

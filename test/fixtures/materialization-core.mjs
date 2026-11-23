@@ -269,7 +269,8 @@ scheduling?.enable();
 const omitRetirementRequest=input.mode.endsWith('_reference_restart_missing');
 const automaticReady=input.mode.endsWith('_ready_automatic');
 const manualGateMigration=input.mode.endsWith('_ready_manual_migration');
-const obsOpen=input.mode==='supervisor_create_module_obs_cut_open';
+const obsCommand=input.mode==='supervisor_create_module_obs_cut_command';
+const obsOpen=input.mode==='supervisor_create_module_obs_cut_open'||obsCommand;
 const controlFlow=obsOpen||input.mode==='supervisor_create_module_writable'||input.mode.includes('_control_fence_')||(input.mode.includes('_manual_authority_')||input.mode.includes('_manual_challenge_')||input.mode.includes('_evidence_'))||(input.mode.includes('_evaluator_')||(input.mode.includes('_recovery_')||input.mode.includes('_consumption_')||input.mode.includes('_evidence_')));
 const source=await connectCoreSupervisor({pipe:options['--supervisor-pipe'],channelId:options['--supervisor-channel'],policy,
  timeProviderIntent:options['--time-provider-intent']??null,binding:{descriptor:assignment.clock_domain_descriptor,receipt}});
@@ -508,11 +509,30 @@ try{
           report({event:'obs-cut-execution-bound',first,repeated,state:executionClient.state,features:executionClient.negotiation.selected_features,
             capabilities:await commandHttp('GET','/api/v1/devices/'+device+'/capabilities')});
           if(obsOpen){
+            if(obsCommand)await commandHttp('GET','/api/v1/commands/00000000-0000-4000-8000-000000000001');
             await business.workerLaunches.runtime.refreshCurrent(key);
             await source.refreshCoreObservation();
             manager.real.refresh();
             const opened=await openOrdinaryGate(device,false);
             report({event:'obs-cut-opened',...opened,state:executionClient.state});
+            if(obsCommand){
+              const route='/api/v1/commands';
+              const request={...commandRequest,action_id:'obs.program_scene.set',parameters:{scene_ref},required_completion:'effect_verified',
+                idempotency_key:crypto.randomUUID(),dispatch:{mode:'immediate',max_queue_ms:10000}};
+              const stale=await commandHttp('POST',route,{...request,parameters:{scene_ref:{...scene_ref,binding_revision:'1'}}});
+              const admitted=await commandHttp('POST',route,request);
+              report({event:'obs-cut-command-admission',admitted,stale});
+              if(admitted.status!==202)throw new Error('obs_cut_command_http');
+              const id=admitted.body.command_ref.object_id;
+              for(const [stage,method] of [['encoding','whenCommandEncoded'],['final-admission','whenCommandFinalized'],['guard','whenCommandGuarded'],['dispatch','whenCommandDispatched'],['settlement','whenCommandSettled'],['cleanup','whenCommandCleaned']]){
+                try{await business.workerLaunches[method](id);}catch(error){report({event:'obs-cut-command-failed',stage,code:error.code,cause:error.cause?.code});throw error;}
+              }
+              const sample=await moduleClient.captureBaseline(device);
+              manager.real.refresh();
+              const finished=await commandHttp('GET',route+'/'+id),evidence=await commandHttp('GET',route+'/'+id+'/evidence?state_revision=5&limit=5'),
+                replayed=await commandHttp('POST',route,request),control=manager.sessions.getControl(commandToken,device);
+              report({event:'obs-cut-command-result',finished,evidence,replayed,control,sample:sample.body.value});
+            }
           }
         }
         report({event:'obs-module-samples',connected,first,second,accepted});
@@ -718,7 +738,7 @@ try{
                         const committed=await business.workerLaunches.whenCommandFinalized(accepted.adjudication.command_ref.object_id);
                         report({event:'command-final-admission',record:committed.saved.record,value:committed.saved.lifecycle.final_admission.value,
                           observation:committed.observation,replay:committed.replay});
-                        if(!input.reference_schema&&!input.mode.endsWith('_cleanup_current_schema')&&!input.mode.includes('_cleanup_successor')&&!input.mode.endsWith('_control_unresolved'))report({event:'command-prepared-current',value:preparedProof??executionClient.currentPreparedCommand(committed.saved.source.command_id)});
+                        if(!input.reference_schema&&!input.mode.endsWith('_current_schema')&&!input.mode.includes('_cleanup_successor')&&!input.mode.endsWith('_control_unresolved'))report({event:'command-prepared-current',value:preparedProof??executionClient.currentPreparedCommand(committed.saved.source.command_id)});
                         if(input.mode.includes('_t2_guard')){
                           if(guardProof)report(guardProof);
                           else await business.workerLaunches.whenCommandGuarded(committed.saved.source.command_id);
@@ -737,7 +757,7 @@ try{
                     }
                     const terminalHttp=commandHttp?await commandHttp('GET','/api/v1/commands/'+accepted.adjudication.command_ref.object_id):null;
                     if(terminalHttp&&terminalHttp.status!==200)throw Object.assign(new Error('command_http_terminal'),{code:'command_http_terminal',cause:terminalHttp.body});
-                    if(input.reference_schema||input.mode.endsWith('_dispatch_closure')||input.mode.endsWith('_closure_cleanup')||input.mode.endsWith('_cleanup_current_schema')){
+                    if(input.reference_schema||input.mode.endsWith('_dispatch_closure')||input.mode.endsWith('_closure_cleanup')||input.mode.endsWith('_current_schema')){
                       const commandId=accepted.adjudication.command_ref.object_id,first=await commandHttp('GET','/api/v1/commands/'+commandId+'/evidence?state_revision=5&limit=1'),
                         second=await commandHttp('GET','/api/v1/commands/'+commandId+'/evidence?state_revision=5&limit=1&cursor='+encodeURIComponent(first.body.next_cursor)),
                         original=await commandHttp('GET','/api/v1/commands/'+commandId+'/evidence/'+first.body.items?.[0]?.source_ref.id+'/revisions/1'),

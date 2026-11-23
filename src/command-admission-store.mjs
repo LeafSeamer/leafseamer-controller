@@ -94,6 +94,7 @@ export function commandAdmissionStore({db, binding, writer, time, authorizeToken
     try{execution=executionCurrent(value.device_id);}catch(error){executionFailure(error);}
     const action=execution.value.action;
     if(value.action_id!==action.action_id||value.capability_version!==action.capability_version)fail('command_capability');
+    if(execution.value.transport_profile?.format==='leafseamer-obs-cut-transport/1'&&Number(service.schema_revision)<103)fail('command_capability');
     if(control.gate_state!=='ready')fail('command_gate_not_ready');
     // 身份取证允许读取未开放的执行绑定；新命令另须在同一writer内取得完整当前Ready。
     // 会话默认闸保持closed，不能用它替代设备级的已提交资格。
@@ -167,7 +168,7 @@ export function commandAdmissionStore({db, binding, writer, time, authorizeToken
         // 原裁决只需当前查询权；新键必须使用当前凭据、上下文、控制权与执行来源。
         const current=withExecutionReadView(db,()=>freshSubmission(input,value));if(current.denied)return current;
         if(Number(service.schema_revision)<49||!domain)fail('command_admission_unavailable');
-        commandCapacity(db,value.device_id);
+        commandCapacity(db,value.device_id,current.execution);
         const k=identity.key,owner=ownership(current.proof,k),commitId=crypto.randomUUID(),keyId=crypto.randomUUID();
         const commit={kind:'controller_commit',scope,object_id:commitId,revision:'1',operation:'accept',identity,acquisition_ref:time().acquisition};
         const commitRef={kind:commit.kind,scope,object_id:commitId,revision:'1',digest:digest(commit)};

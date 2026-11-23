@@ -12,6 +12,7 @@ import {preparedCommandProjection,readCommandRecord} from './command-record-stor
 import {deviceExecutionVersion,assertDeviceExecutionFeatures} from './sdk/device-execution.mjs';
 import {routes} from './sdk/runtime/panel-wire/preview/routes.mjs';
 import {getSchema,validateValue} from './sdk/runtime/panel-wire/preview/registry.mjs';
+import {obsCutPacketBytes,obsCutPrimitive} from './obs-cut-packet.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError('command_final_'+code);};
 const ref=(id,v)=>({id,revision:'1',digest:digest(v)});
 const signed=(v,key)=>({...v,[key]:digest(v)});
@@ -19,9 +20,13 @@ const named=(v,id,key,revision='1')=>({id:v[id],revision,digest:v[key]});
 const parse=cacheVerifiedDocument((text,hash)=>{const v=JSON.parse(text);need(canonical(v)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===hash,'integrity');return v;},{immutable:true});
 const counter=v=>String(v).padStart(20,'0');
 const limits={format:'fixed-memory-transmission-budget/1',profile_id:'leafseamer.simulator.transmission.limits.1',max_transmissions:4096,max_bytes:32768,per_transmission:{attempts:1,transmissions:1,bytes:8}};
+const obsLimits={format:'fixed-obs-cut-transmission-budget/1',profile_id:'leafseamer.obs.isolated_cut.transmission.limits.1',
+ max_transmissions:4096,max_bytes:4096*obsCutPacketBytes,per_transmission:{attempts:1,transmissions:1,bytes:obsCutPacketBytes}};
 const row=sqliteRow;
 function materialize({initial,encoding,ready,principalAuthorization,ids,issue,previous,before,selected,sealed}){
  const source=initial.source,command=source.command_id,b=source.binding,opening=ready.dispatch.plan,access=opening.access,packet=encoding.response.reply.frame.body.packet;
+ const budget=packet.primitive_id===obsCutPrimitive?obsLimits:limits;
+ need(packet.byte_length===budget.per_transmission.bytes&&source.policies.capacity.per_command.max_packet_bytes===packet.byte_length,'budget');
  const {binding:authorizationBinding}=principalAuthorization,{origin,grant_revision,arm_generation}=authorizationBinding;
  const automation=source.metadata.automation_binding,contentDigest=encoding.value.authorization.content_digest;
  const expires=encoding.value.authorization.expires_tick_ns,window={not_before_tick_ns:selected,before_tick_ns:expires};
@@ -64,7 +69,7 @@ function materialize({initial,encoding,ready,principalAuthorization,ids,issue,pr
   control_authority_ref:access.control_authority_ref,control_epoch:access.control_epoch,effective_version:access.effective_version,authorization_ref:access.authorization_ref,guard_ref:guardRef,
   packet_ref:packetRecordRef,ordinal:'0',selected_tick_ns:selected,expires_tick_ns:expires},'authority_digest');
  const charge={format:'command-transmission-charge/1',charge_id:ids.budget,transaction_id:ids.transaction,permit_id:ids.permit,issued_revision:issue,previous_revision:previous,
-  command_id:command,device_id:b.device_id,profile:limits,charged:limits.per_transmission,before_count:before,after_count:before+1,selected_tick_ns:selected,window};
+  command_id:command,device_id:b.device_id,profile:budget,charged:budget.per_transmission,before_count:before,after_count:before+1,selected_tick_ns:selected,window};
  const {state_digest:_before,...resourceBody}=opening.resource;
  need(resourceBody.holds.length===0,'resource');
  const after=signed({...resourceBody,format_version:'command-resource-state/1',state_id:ids.resource,revision:'2',control_state_ref:ready.value.control_after_ref,
@@ -145,7 +150,7 @@ function commitFinalAdmission(db,{id,provider,tick,features}){
  write(db.prepare('INSERT INTO command_final_admission VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(ids.transaction,value.command_id,id,initial.source.binding_ref.id,ids.permit,ids.hold,value.attempt.attempt_id,ids.seal,ids.intent,canonical(value),digest(value),ids.commit));
  write(db.prepare('INSERT INTO command_device_hold VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(ids.hold,ids.transaction,value.command_id,initial.source.binding.device_id,ids.ownership,
   value.ownership_receipt.receipt_id,canonical(value.ownership_receipt),digest(value.ownership_receipt),canonical(value.hold),digest(value.hold),canonical(value.ownership),value.ownership.ownership_digest));
- write(db.prepare('INSERT INTO command_transmission_issue VALUES(?,?,?,?,8,?,?)').run(ids.permit,ids.transaction,counter(value.seal.issued_revision),counter(previous),canonical(value.transmission_charge),digest(value.transmission_charge)));
+ write(db.prepare('INSERT INTO command_transmission_issue VALUES(?,?,?,?,?,?,?)').run(ids.permit,ids.transaction,counter(value.seal.issued_revision),counter(previous),value.transmission_charge.charged.bytes,canonical(value.transmission_charge),digest(value.transmission_charge)));
  if(schema>=92)need(db.prepare("SELECT 1 FROM command_issue_order WHERE issued_revision=? AND permit_id=? AND kind='ordinary'")
   .pluck().get(counter(value.seal.issued_revision),ids.permit)===1,'storage');
  write(db.prepare('INSERT INTO command_attempt_inventory VALUES(?,2,?,?,?,?)').run(value.command_id,ids.transaction,value.attempt.attempt_id,canonical(value.inventory),digest(value.inventory)));
@@ -178,7 +183,7 @@ function readFinalAdmission(db,initial,reference){
  need(r.body_jcs===canonical(expected)&&r.transaction_id===value.ids.transaction&&r.commit_id===value.ids.commit&&r.command_id===value.command_id&&r.permit_id===value.ids.permit&&
   r.hold_id===value.ids.hold&&r.attempt_id===value.attempt.attempt_id&&r.seal_id===value.ids.seal&&r.dispatch_intent_id===value.ids.intent&&r.binding_id===initial.source.binding_ref.id,'binding');
  need(encoding.response.value.disposition==='prepared'&&same(encoding.value.authorization.binding,initial.source.binding)&&
-  encoding.value.command_id===initial.source.command_id&&issue.permit_id===r.permit_id&&issue.previous_revision===counter(previous)&&issue.charged_bytes===8&&
+  encoding.value.command_id===initial.source.command_id&&issue.permit_id===r.permit_id&&issue.previous_revision===counter(previous)&&issue.charged_bytes===expected.transmission_charge.charged.bytes&&
   issue.body_jcs===canonical(value.transmission_charge)&&issue.body_digest===digest(value.transmission_charge)&&
   hold.hold_id===r.hold_id&&hold.ownership_id===value.ownership.ownership_id&&hold.command_id===r.command_id&&hold.device_id===initial.source.binding.device_id&&
   hold.receipt_id===value.ownership_receipt.receipt_id&&hold.receipt_jcs===canonical(value.ownership_receipt)&&hold.receipt_digest===digest(value.ownership_receipt)&&

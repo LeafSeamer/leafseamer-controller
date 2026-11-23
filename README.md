@@ -307,9 +307,11 @@ Controller 的 OBS 只读目录资格绑定安装包内的 `obs-device-module.mj
 
 已迁移至 99 的库可在 Controller 停止后通过 `migrate-storage --data-dir ABSOLUTE_PATH --to-revision 100` 启用人员确认账本。Controller 内部的 `confirmSceneCatalog` 使用持 `device.read` 和 `extension.manage` 的人员令牌、该会话的 CSRF 值以及待确认目录的摘要。确认后 HTTPS 查询返回 `ready` 和绑定修订 `2`。同一会话按原请求重投返回原结果，重连须确认新目录。此版本的 HTTP 接口提供目录读取。
 
-Schema 101 可显式迁移以装配独立的固定 Cut 扩展。它使用 `obs-cut-device-module.mjs`、`obs-cut-module-policy.json` 和 `obs-cut-module-capability.json`，审批范围为单个已登记的 OBS 设备及 `obs.program_scene.set`。完成当前会话的目录确认后，Controller 把固定执行配置交给同一受监督 Worker，绑定目录、资源和设备会话，写门保持关闭。当前公开能力查询仍不列出 Cut，等待 OBS 命令准入、终态与资源释放接通。
+Schema 101 可显式迁移以装配独立的固定 Cut 扩展。它使用 `obs-cut-device-module.mjs`、`obs-cut-module-policy.json` 和 `obs-cut-module-capability.json`，审批范围为单个已登记的 OBS 设备及 `obs.program_scene.set`。完成当前会话的目录确认后，Controller 把固定执行配置交给同一受监督 Worker，绑定目录、资源和设备会话，写门保持关闭。公开能力查询在 Schema 103 起列出固定 Cut。
 
 Schema 102 可显式迁移以启用固定 Cut 的首次开闸流程。人员接管后，Controller 在关闭屏障内核对已确认的场景目录、当前节目场景、设备会话和登记资源，再持久保存首次资源依据与开闸回执。连接中断或观测到计划外的节目场景切换会撤销当前会话的就绪状态并进入保护。
+
+Schema 103 将隔离 OBS 的首次固定 Cut 接入 `submitCommand`。当前控制持有人可凭已确认的 `SceneRef` 提交即时动作，每份就绪确认受理一次 Cut。Controller 核对固定编码和本次发送、设置应答、独立查询、读回结果，待关闭屏障提交后才核销设备占用。证据缺失、过期或不匹配时保留未决占用。结算后设备进入保护，后续开闸流程尚待接通。
 
 ### 执行会话与初始控制屏障
 

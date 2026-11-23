@@ -72,7 +72,7 @@ function validateEvidence(saved,frame,receivedTick){
   same(v.send_report_ref,{object_id:r.report_id,digest:digest(r)})&&o&&e.observation_id===o.observation_id&&
   same(v.observation_ref,{object_id:o.observation_id,digest:digest(o)})&&same(r.socket_callback_observation_ref,v.observation_ref)&&
   o.permit_id===p.permit_id&&o.transmission_id===p.transmission.transmission_id&&same(o.packet_ref,p.transmission.packet_ref)&&
-  Number.isSafeInteger(o.bytes_written)&&o.bytes_written>=0&&o.bytes_written<=8&&r.transport_entered_tick_ns!==null&&
+  Number.isSafeInteger(o.bytes_written)&&o.bytes_written>=0&&o.bytes_written<=saved.final.value.transmission_charge.charged.bytes&&r.transport_entered_tick_ns!==null&&
   BigInt(o.observed_tick_ns)>=BigInt(r.transport_entered_tick_ns)&&BigInt(o.observed_tick_ns)<=receivedTick,'evidence_binding');
 }
 export function readCommandDispatch(db,id){return withExecutionReadView(db,()=>memoExecutionRead(db,'command-dispatch',id,()=>readDispatch(db,id)));}
