@@ -30,7 +30,7 @@ function retirement(selected,tick){return {format:'command-preparation-retiremen
  encoding_authorization_ref:selected.encoding.response.value.evidence.authorization_ref,
  selected_tick_ns:String(tick),reason:'command_finished'};}
 function current(db,id,binding,runtime){
- need([56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97].includes(Number(db.pragma('user_version',{simple:true}))),'version');const selected=source(db,id),b=selected.saved.source.binding,
+ need([56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98].includes(Number(db.pragma('user_version',{simple:true}))),'version');const selected=source(db,id),b=selected.saved.source.binding,
   actual=currentDeviceExecutionBinding(db,runtime,b.device_id,b.ipc_session_id);
  need(binding.ipc_session_id===b.ipc_session_id&&same(actual.ref,selected.saved.source.binding_ref)&&same(actual.value.binding,b)&&
   !db.prepare('SELECT 1 FROM execution_session_end WHERE ipc_session_id=?').pluck().get(b.ipc_session_id),'binding');return selected;

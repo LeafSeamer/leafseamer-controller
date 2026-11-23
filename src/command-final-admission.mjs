@@ -213,7 +213,7 @@ export function observeCommandFinalAdmission(db,{commandId,binding,tick,readOnly
 
 // T2之后的当前资格与封存历史分离。只能采用原占用、原许可和原窗口，不续期、不重新签发。
 export function currentPreparedCommand(db,{id,binding,provider,tick}){
- need(db.inTransaction&&[52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97].includes(Number(db.pragma('user_version',{simple:true}))),'prepared_writer');
+ need(db.inTransaction&&[52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98].includes(Number(db.pragma('user_version',{simple:true}))),'prepared_writer');
  return withExecutionReadView(db,()=>{
   const saved=readCommandRecord(db,id),final=saved.lifecycle?.final_admission;need(final,'prepared_source');
   const v=final.value,b=v.seal.binding;

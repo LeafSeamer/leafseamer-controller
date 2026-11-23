@@ -275,6 +275,12 @@ schema 22的新worker准备必须匹配本次服务启动的人员受理、当�
 
 隔离验收夹具可用同样的私有管道运行 `node --disallow-code-generation-from-strings dist/cli.mjs inspect-obs-cut`。它核对 OBS 32.0.4、obs-websocket 5.6.3、RPC 1 和已测请求表，并在同一连接读取两个空场景、Studio Mode、当前 Cut 转场、场景转场覆盖及推流状态。`obs_cut_checked` 只表示本次只读检查通过。单画布与无其他写入方由隔离夹具保证，连接关闭后需重新检查。
 
+### 登记本机 OBS 资源
+
+停止 Controller 后，使用 `migrate-storage --data-dir ABSOLUTE_PATH --to-revision 98` 显式迁移并保留生成的备份。由本机管理员用 `register-device` 登记 `device_kind=obs`，再经私有管道运行 `register-obs-resource --data-dir ABSOLUTE_PATH`。输入 JSON 包含 `request_id`、已登记的 `device_id`、OBS 回环 `port`、`password`、已核对的 `collection_name` 和两个 `scene_uuids`。可从 `inspect-obs-cut` 核对目录和 UUID。
+
+新登记实时读取 OBS，匹配后为设备及回环端口签发唯一资源引用。重用相同请求标识和登记参数返回原回执。密码只传给当次探测，资源记录与审计均不保存密码。结果的 `ready` 为 `false`，表示还需在受监督 Worker 中建立当前设备会话并批准目录。
+
 ### 执行会话与初始控制屏障
 
 schema42将人员执行来源改为实际挑战／响应：`beginManualExecutionChallenge`核验人员令牌、当前持有人、权限和运行装配，生成32字节随机nonce，将挑战与提交审计同事务保存；`completeManualExecutionChallenge`核验实际令牌秘密、完整挑战引用和nonce，响应关联与人员来源／审计同事务提交。挑战绑定实际token、会话、凭据、控制原件、完整执行Binding及原核心观察；截止不超过挑战开始后两秒和原观察期限。相同请求只返回仍有效的原件，不换nonce或续期；错误nonce、不同响应内容、过期及旧单步取证入口均拒绝。

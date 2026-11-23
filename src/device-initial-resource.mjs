@@ -60,8 +60,8 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
    fence.ack.frame.body.cancel_coverage.length===0,'fence');
   // 同Ready下的排队claim不产生attempt或hold；schema51编码帧另须精确持久准备账本。
   // 编码只占独立缓存预留，派发或其他历史仍拒绝；此路径不证明非空hold释放。
-  const admissions=[49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97].includes(Number(service.schema_revision))?pendingInitialCommands(db,ready,preparedRef,history?.commandIds,deviceScoped?device:null):[];
-  if(![49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97].includes(Number(service.schema_revision)))need(!db.prepare('SELECT 1 FROM ca_command_initial c JOIN ca_request_key k USING(key_id) WHERE k.device_id=? LIMIT 1').pluck().get(device),'command_history');
+  const admissions=[49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98].includes(Number(service.schema_revision))?pendingInitialCommands(db,ready,preparedRef,history?.commandIds,deviceScoped?device:null):[];
+  if(![49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98].includes(Number(service.schema_revision)))need(!db.prepare('SELECT 1 FROM ca_command_initial c JOIN ca_request_key k USING(key_id) WHERE k.device_id=? LIMIT 1').pluck().get(device),'command_history');
   let sent=db.prepare(`SELECT record_id,record_digest,message_type,sequence FROM execution_frame_record
    WHERE ipc_session_id=? AND direction='c2w' AND (device_id=? OR device_id IS NULL) ORDER BY sequence`).raw().all(b.ipc_session_id,device).filter(v=>v[0]!==ownOpen?.id);
   sent=sent.filter(v=>{const old=history?.outgoing.get(v[0]);if(!old)return true;need(old.digest===v[1],'retired_frame');return false;});
@@ -145,7 +145,7 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
   need(!readyRef||ready,'ready');
   let successor=null;
   if(preparedRef){
-   need(ready&&[52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97].includes(Number(service.schema_revision)),'prepared_version');
+   need(ready&&[52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98].includes(Number(service.schema_revision)),'prepared_version');
    const held=db.prepare(`SELECT command_id,transaction_id FROM command_device_hold h WHERE device_id=?
     ${Number(service.schema_revision)>=57?'AND NOT EXISTS(SELECT 1 FROM command_hold_release r WHERE r.hold_id=h.hold_id)':''}`).raw().all(saved.value.binding.device_id);
    need(held.length===1&&held[0][1]===preparedRef.id,'prepared_hold');
