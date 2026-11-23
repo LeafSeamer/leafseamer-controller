@@ -42,15 +42,12 @@ test('首次快照必须处于writer，零水位绑定真实scope和设备；未
  assert.equal(source.outgoing_frame_refs.length,1);
  f.add('b');assert.notDeepEqual(f.capture(),source);
  assert.deepEqual(f.run(()=>readInitialDenials(f.db,f.service,'device',source)),source);
- f.db.exec("UPDATE service_state SET schema_revision='94'");f.service.schema_revision='94';
- assert.equal(f.capture().schema_revision,'94');
- f.db.exec("UPDATE service_state SET schema_revision='95'");f.service.schema_revision='95';
- assert.equal(f.capture().schema_revision,'95');
- f.db.exec("UPDATE service_state SET schema_revision='96'");f.service.schema_revision='96';
- assert.equal(f.capture().schema_revision,'96');
- f.db.exec("UPDATE service_state SET schema_revision='97'");f.service.schema_revision='97';
- assert.equal(f.capture().schema_revision,'97');
- f.db.exec("UPDATE service_state SET schema_revision='98'");f.service.schema_revision='98';
+ for(const revision of ['94','95','96','97','98','99','100','101','102']){
+  f.db.prepare('UPDATE service_state SET schema_revision=?').run(revision);
+  f.service.schema_revision=revision;
+  assert.equal(f.capture().schema_revision,revision);
+ }
+ f.db.exec("UPDATE service_state SET schema_revision='9000'");f.service.schema_revision='9000';
  assert.throws(f.capture,/initial_denials_schema/);
  assert.deepEqual(f.run(()=>readInitialDenials(f.db,f.service,'device',source)),source);
 });

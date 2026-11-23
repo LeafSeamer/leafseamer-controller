@@ -15,7 +15,11 @@ import {readInitialOpenDispatch} from './device-execution-open.mjs';
 import {readInitialReady} from './device-initial-ready.mjs';
 import {memoExecutionRead,withExecutionReadView} from './execution-read-view.mjs';
 import {pendingInitialCommands,readCommandRecord} from './command-record-store.mjs';
+import {obsCutExecutionProfile,obsCutModuleDefinition,projectObsSceneCatalog,validateObsSceneSample} from './obs-module-profile.mjs';
+import {readConfirmedObsSceneCatalog} from './obs-scene-confirmation.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('initial_resource_'+code);};
+export const obsCutInitialResourceFormat='leafseamer-obs-cut-initial-resource-source/1';
+const obsCutInitialProvider='fixed_obs_cut_initial/1';
 const freeze=v=>{if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Object.freeze(v);}return v;};
 const objectRef=(id,v)=>({id,revision:'1',digest:digest(v)});
 const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/.test(v);
@@ -38,20 +42,33 @@ const decodeEvidence=cacheVerifiedDocument((text,hash)=>{
 // 初始来源原件保持空库存；精确T2后继另返回非空资源当前资格，不能替代hold释放或恢复。
 // 全部输入取自同一writer内的实际运行、已批准固定模块、原始采样、屏障与命令/出站账本。
 export function deviceInitialResource({db,service,writer,evidenceCurrent,executionCurrent,domain,attachCurrent,attachRead}){
+ function obsInventory(execution,catalog,sample){
+  const q=catalog.qualification,plan=execution.primitive_plan;
+  need(q.qualification===obsCutModuleDefinition.qualification&&
+   validateObsSceneSample(sample.value,q.obs_binding.scene_uuids),'obs_sample');
+  const sceneCatalog=readConfirmedObsSceneCatalog(db,projectObsSceneCatalog(catalog,sample));
+  const resource=q.obs_binding.resource_ref,profile=obsCutExecutionProfile(execution.binding_id,execution.binding,resource,sceneCatalog);
+  need(same(execution.transport_profile,profile.transport)&&same(plan,profile.plan)&&same(execution.exit,profile.exit)&&
+   same(sample.catalog_approval_ref.digest,execution.catalog_approval_ref.digest),'obs_binding');
+  return {obs_cut_observation:{scene_catalog_digest:digest(sceneCatalog),program_scene_uuid:sample.value.program_scene_uuid},
+   external_resources:[resource]};
+ }
  function sources(device,ownOpen=null,ready=null,preparedRef=null,deviceScoped=Number(service.schema_revision)>=97){
   need(db.inTransaction,'writer');const authorization=evidenceCurrent(device),execution=executionCurrent(device),b=execution.value.binding;
   need(same(b,authorization.value.requirement.binding),'binding');
   const q=execution.catalog.qualification,p=execution.value.transport_profile,sample=execution.baseline;
-  need(q.qualification==='fixed_memory_control_catalog/1'&&p.format==='leafseamer-memory-transport/1'&&p.transport==='memory'&&
+  const obs=q.qualification===obsCutModuleDefinition.qualification;
+  need(obs||q.qualification==='fixed_memory_control_catalog/1'&&p.format==='leafseamer-memory-transport/1'&&p.transport==='memory'&&
    p.automatic_resends===false&&p.max_in_flight===1&&same(p.external_resources,[])&&p.module_digest===q.module_digest&&
    p.policy_digest===q.protocol_io_policy_digest,'qualification');
-  const history=Number(service.schema_revision)>=57?retiredCommandHistory(db,b):null,last=history?.latest;
+  const history=!obs&&Number(service.schema_revision)>=57?retiredCommandHistory(db,b):null,last=history?.latest;
   need(sample.device_id===device&&sample.device_session_id===b.device_session_id&&
-   (last?sample.value.write_sequence===last.observation.write_sequence&&sample.value.value===last.observation.value&&
-    BigInt(sample.captured_tick_ns)>=last.steps.release_ack.frame.committedTick:sample.value.write_sequence==='0'&&sample.value.value===0),'observed_write');
+   (obs||(last?sample.value.write_sequence===last.observation.write_sequence&&sample.value.value===last.observation.value&&
+    BigInt(sample.captured_tick_ns)>=last.steps.release_ack.frame.committedTick:sample.value.write_sequence==='0'&&sample.value.value===0)),'observed_write');
+  const observed=obs?obsInventory(execution.value,execution.catalog,sample):{observed_write_sequence:sample.value.write_sequence,external_resources:[]};
   const control=currentControlSource(db,device);
   const controlRef=ready?ready.value.control_before_ref:control.current.ref;
-  need(control.current.value.pending_operation_id===null&&
+  need((!obs||control.current.value.mode==='manual'&&control.current.value.holder)&&control.current.value.pending_operation_id===null&&
    (ready?control.current.value.gate_state==='ready'&&same(control.current.ref,ready.value.control_after_ref):control.current.value.gate_state==='protected')&&
    same(controlRef,authorization.value.requirement.control_state_ref)&&same(control.authority.ref,authorization.value.requirement.control_authority_ref),'control');
   const fenceId=db.prepare('SELECT fence_id FROM execution_initial_fence WHERE binding_id=?').pluck().get(execution.ref.id);
@@ -75,13 +92,13 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
   const now=domain();need(now.ref.clock_domain_id===b.clock_domain_id&&now.ref.descriptor_digest===b.descriptor_digest&&
    same(sample.clock_domain_descriptor.clock_domain_id,b.clock_domain_id)&&sample.clock_domain_descriptor.descriptor_digest===b.descriptor_digest&&
    BigInt(sample.captured_tick_ns)<=BigInt(now.tick),'clock');
-  return {authorization,execution,control,fence,now,admissions,encoding,guards,dispatches,history,denials:captureInitialDenials(db,service,device,ownOpen,ready,preparedRef,history,deviceScoped),inventory:{binding_ref:execution.ref,authorization_evidence_ref:authorization.ref,
+  return {authorization,execution,control,fence,now,admissions,encoding,guards,dispatches,history,obs,denials:captureInitialDenials(db,service,device,ownOpen,ready,preparedRef,history,deviceScoped),inventory:{binding_ref:execution.ref,authorization_evidence_ref:authorization.ref,
    authorization_state_ref:authorization.value.state_ref,control_state_ref:controlRef,control_authority_ref:control.authority.ref,
    catalog_ref:execution.value.catalog_approval_ref,baseline_ref:objectRef(sample.sample_id,sample),
    initial_fence_ref:fence.ref,initial_confirmation_ref:fence.confirmation_ref,
    command_ids:admissions.map(v=>v.id),outgoing_records:sent.map(v=>({record_ref:{id:v[0],revision:'1',digest:v[1]},type:v[2],sequence:String(BigInt(v[3]))})),
    module_digest:q.module_digest,protocol_io_policy_digest:q.protocol_io_policy_digest,transport_profile_ref:execution.value.transport_profile_ref,
-   observed_write_sequence:sample.value.write_sequence,external_resources:[],
+   ...observed,
    ...(last?{retired_preparation_refs:history.refs,closing_ref:last.source.closure.ref,closing_ack_ref:last.source.closure.ack.ref}: {})}};
  }
  function read(reference){return withExecutionReadView(db,()=>memoExecutionRead(db,'initial-resource',reference,()=>readOriginal(reference)));}
@@ -90,8 +107,9 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
    r.binding_id,r.evidence_id,r.fence_id,r.sample_id,r.commit_id,c.body_jcs,c.body_digest,c.audit_jcs
    FROM device_initial_resource r JOIN device_initial_resource_commit c USING(commit_id) WHERE r.source_id=?`).raw().get(reference?.id);
   need(row,'missing');const value=decode(row[0],row[1]),commit=decode(row[10],row[11]),request=JSON.parse(row[4]);
-  const successor=value.format==='leafseamer-device-resource-successor/1';
-  need((successor||['leafseamer-initial-resource-source/1','leafseamer-initial-resource-source/2'].includes(value.format))&&value.provider===(successor?'fixed_memory_control_successor/1':'fixed_memory_control_initial/1')&&
+  const successor=value.format==='leafseamer-device-resource-successor/1',obs=value.format===obsCutInitialResourceFormat;
+  need((obs||successor||['leafseamer-initial-resource-source/1','leafseamer-initial-resource-source/2'].includes(value.format))&&
+   value.provider===(obs?obsCutInitialProvider:successor?'fixed_memory_control_successor/1':'fixed_memory_control_initial/1')&&
    commit.format==='initial-device-resource-commit/1'&&same(ref(value),reference)&&request.request_id===row[2]&&request.device_id===value.binding.device_id&&
    same(request.expected_evidence_ref,value.inventory.authorization_evidence_ref)&&
    canonicalize(request)===row[4]&&digest(request)===row[3]&&same(commit.request,request)&&same(commit.source_ref,reference)&&commit.id===row[9]&&
@@ -103,6 +121,13 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
    return decodeSource(...row);
   };
   const binding=original('device_execution_binding','binding_id',i.binding_ref),sample=original('device_baseline_sample','sample_id',i.baseline_ref);
+  if(obs){
+   const catalog=original('device_catalog_approval','approval_id',i.catalog_ref),observed=obsInventory(binding,catalog,sample);
+   need(same(i.obs_cut_observation,observed.obs_cut_observation)&&same(i.external_resources,observed.external_resources)&&
+    !Object.hasOwn(i,'observed_write_sequence'),'obs_binding');
+  }else{
+   need(same(i.external_resources,[])&&i.observed_write_sequence===sample.value.write_sequence,'source_binding');
+  }
   const authorizationRow=db.prepare('SELECT body_jcs,body_digest FROM device_authorization_evidence WHERE evidence_id=?').raw().get(i.authorization_evidence_ref.id);
   need(authorizationRow,'source_missing');const authorization=decodeEvidence(...authorizationRow);
   need(same(i.authorization_evidence_ref,{id:authorization.evidence_id,revision:authorization.revision,digest:authorization.evidence_digest})&&
@@ -117,15 +142,16 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
    sample.value.write_sequence===last.observation.write_sequence&&sample.value.value===last.observation.value&&
    BigInt(sample.captured_tick_ns)>=last.steps.release_ack.frame.committedTick,'retired_source');
   need(same(value.binding,binding.binding)&&same(i.catalog_ref,binding.catalog_approval_ref)&&same(sample.catalog_approval_ref.digest,i.catalog_ref.digest)&&
-   sample.device_session_id===value.binding.device_session_id&&(successor||sample.value.write_sequence==='0'&&sample.value.value===0)&&
+   sample.device_id===value.binding.device_id&&sample.device_session_id===value.binding.device_session_id&&
+   (obs||successor||sample.value.write_sequence==='0'&&sample.value.value===0)&&
    same(fence?.ref,i.initial_fence_ref)&&same(fence.confirmation_ref,i.initial_confirmation_ref)&&same(fence.value.binding_ref,i.binding_ref)&&
-   same(i.command_ids,[])&&same(i.external_resources,[])&&i.observed_write_sequence===sample.value.write_sequence,'source_binding');
+   same(i.command_ids,[]),'source_binding');
   for(const sent of i.outgoing_records){
    const row=db.prepare('SELECT record_digest,message_type,sequence,ipc_session_id,direction FROM execution_frame_record WHERE record_id=?').raw().get(sent.record_ref.id);
    need(row&&row[0]===sent.record_ref.digest&&sent.record_ref.revision==='1'&&row[1]===sent.type&&String(BigInt(row[2]))===sent.sequence&&
     row[3]===value.binding.ipc_session_id&&row[4]==='c2w'&&['HELLO_ACK','FENCE'].includes(sent.type),'source_binding');
   }
-  if(successor||value.format==='leafseamer-initial-resource-source/2')readInitialDenials(db,service,value.binding.device_id,value.deny_snapshots);
+  if(obs||successor||value.format==='leafseamer-initial-resource-source/2')readInitialDenials(db,service,value.binding.device_id,value.deny_snapshots);
   return {ref:reference,value,commit};
  }
  function currentInside(reference,dispatchRef=null,readyRef=null,preparedRef=null){
@@ -164,7 +190,7 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
   const inventory={...actual.inventory,command_ids:[]},denials=['initial-manual-deny-snapshots/2','initial-manual-deny-snapshots/3'].includes(actual.denials.format)?
    {...actual.denials,accepted_command_count:0,pending_admission_refs:[]}:actual.denials;
   need(same(saved.value.binding,actual.execution.value.binding)&&same(saved.value.inventory,inventory),'changed');
-  need(['leafseamer-initial-resource-source/2','leafseamer-device-resource-successor/1'].includes(saved.value.format)&&same(saved.value.deny_snapshots,denials),'deny_snapshots_changed');
+  need([obsCutInitialResourceFormat,'leafseamer-initial-resource-source/2','leafseamer-device-resource-successor/1'].includes(saved.value.format)&&same(saved.value.deny_snapshots,denials),'deny_snapshots_changed');
   need(BigInt(saved.value.selected_tick_ns)<=now&&now<BigInt(saved.value.expires_tick_ns),'expired');return {...saved,pending_admission_refs:actual.admissions,
    ...(actual.encoding.length?{encoding_preparation_refs:actual.encoding}:{}),...(actual.guards.length?{guard_installation_refs:actual.guards}:{}),...(actual.dispatches.length?{active_dispatch_refs:actual.dispatches}:{}),...(successor?{prepared_resource:successor}:{})};
  }
@@ -177,8 +203,8 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
     const actual=withExecutionReadView(db,()=>sources(fixed.device_id));need(same(actual.authorization.ref,fixed.expected_evidence_ref),'authorization_changed');
     need(db.prepare('SELECT count(*) FROM device_initial_resource').pluck().get()<16384,'capacity');
     const successor=Boolean(actual.history?.latest);
-    const value=seal({format:successor?'leafseamer-device-resource-successor/1':'leafseamer-initial-resource-source/2',id:crypto.randomUUID(),revision:'1',binding:actual.execution.value.binding,
-     provider:successor?'fixed_memory_control_successor/1':'fixed_memory_control_initial/1',inventory:actual.inventory,deny_snapshots:actual.denials,selected_tick_ns:actual.now.tick,
+    const value=seal({format:actual.obs?obsCutInitialResourceFormat:successor?'leafseamer-device-resource-successor/1':'leafseamer-initial-resource-source/2',id:crypto.randomUUID(),revision:'1',binding:actual.execution.value.binding,
+     provider:actual.obs?obsCutInitialProvider:successor?'fixed_memory_control_successor/1':'fixed_memory_control_initial/1',inventory:actual.inventory,deny_snapshots:actual.denials,selected_tick_ns:actual.now.tick,
      expires_tick_ns:actual.authorization.value.requirement.expires_tick_ns});
     const commit=seal({format:'initial-device-resource-commit/1',id:crypto.randomUUID(),revision:'1',source_ref:ref(value),request:fixed});
     const audit=canonicalize({kind:'initial_device_resource_selected',source_ref:ref(value),commit_ref:ref(commit)}),written=v=>need(v.changes===1,'storage');

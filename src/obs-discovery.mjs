@@ -53,7 +53,7 @@ async function inspectObs(input,cut,signal,onInvalidated,writable=false){
  requireValue(record(input)&&Object.keys(input).sort().join(',')==='password,port'&&Number.isInteger(input.port)&&
   input.port>0&&input.port<=65535&&name(input.password),'input');
  requireValue(signal===undefined||signal instanceof AbortSignal&&!signal.aborted,'disconnected');
- let password=input.password,pending=null,failure=null,retained=false,sampling=false,cutTarget=null;
+ let password=input.password,pending=null,failure=null,retained=false,sampling=false,cutTarget=null,writableProgram=null;
  const port=input.port;
  let deadline=performance.now()+budgetMs;
  const socket=new WebSocket('ws://127.0.0.1:'+port,protocol,{
@@ -86,8 +86,10 @@ async function inspectObs(input,cut,signal,onInvalidated,writable=false){
    requireValue(record(frame)&&record(frame.d),'frame');
    if(frame.op===5){
     requireValue(typeof frame.d.eventType==='string','frame');
-    if(frame.d.eventType==='CurrentProgramSceneChanged'&&retained&&
-     (!sampling||(cutTarget!==null&&frame.d.eventData?.sceneUuid===cutTarget)))return;
+    if(frame.d.eventType==='CurrentProgramSceneChanged'&&retained){
+     const scene=frame.d.eventData?.sceneUuid;
+     if(writable?scene===(cutTarget??writableProgram):!sampling)return;
+    }
     requireValue(!invalidate.has(frame.d.eventType)&&!(cut&&cutInvalidate.has(frame.d.eventType)),'observation_changed');
     return;
    }
@@ -164,6 +166,7 @@ async function inspectObs(input,cut,signal,onInvalidated,writable=false){
    available_requests_digest:availableRequestsDigest,...(cut&&{profile:'obs_isolated_empty_cut/1'})};
   const initial=Object.freeze({...profile,...await observe()});
   if(signal===undefined)return initial;
+  writableProgram=initial.program_scene_uuid;
   retained=true;
   clearTimeout(timer);
   deadline=Infinity;
@@ -173,7 +176,11 @@ async function inspectObs(input,cut,signal,onInvalidated,writable=false){
    sampling=true;
    deadline=performance.now()+budgetMs;
    timer=setTimeout(()=>fail(new ObsDiscoveryError('timeout')),budgetMs);
-   try{return Object.freeze({...profile,...await observe()});}
+   try{
+    const value=await observe();
+    if(writable)requireValue(value.program_scene_uuid===writableProgram,'observation_changed');
+    return Object.freeze({...profile,...value});
+   }
    catch(error){fail(error);throw error;}
    finally{sampling=false;clearTimeout(timer);deadline=Infinity;}
   }
@@ -208,7 +215,9 @@ async function inspectObs(input,cut,signal,onInvalidated,writable=false){
    timer=setTimeout(()=>fail(new ObsDiscoveryError('timeout')),budgetMs);
    executionSignal.addEventListener('abort',abortExecution,{once:true});
    try{
-    sameCut(await observe(),expectedDirectory);
+    const preflight=await observe();
+    sameCut(preflight,expectedDirectory);
+    requireValue(preflight.program_scene_uuid===writableProgram,'observation_changed');
     const setType='SetCurrentProgramScene',setId=randomUUID();
     const setReply=await receive(7,{op:6,d:{requestType:setType,requestId:setId,requestData:{sceneUuid}}},()=>{
      if(relative)evidenceDeadline=tick()+evidenceBudgetNs;
@@ -232,6 +241,7 @@ async function inspectObs(input,cut,signal,onInvalidated,writable=false){
     const evaluated=tick();
     requireValue(verified.program_scene_uuid===observed&&typeof evaluated==='bigint'&&
      evaluated>=BigInt(frames.at(-1).tick_ns)&&evaluated<evidenceDeadline,'cut_evidence_changed');
+    writableProgram=observed;
     return Object.freeze({format:'leafseamer-obs-cut-wire/1',target_scene_uuid:sceneUuid,frames:Object.freeze(frames)});
    }catch(error){
     // 许可拒绝只发生在发送前。进入出口后，任何异常都关闭会话，交由调用方保留未决尝试。

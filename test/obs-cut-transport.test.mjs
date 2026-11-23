@@ -50,13 +50,29 @@ async function fixture(t,mode='success'){
   });
  });
  const controller=new AbortController(),signal=controller.signal;
- const session=await openObsCutWriterSession({port:server.address().port,password:'synthetic'},signal);
+ let invalidated;
+ const invalidation=new Promise(resolve=>{invalidated=resolve;});
+ const session=await openObsCutWriterSession({port:server.address().port,password:'synthetic'},signal,invalidated);
  t.after(()=>session.close());
  let sequence=0n;
  const invoke=enterTransmission=>session.cutScene({sceneUuid:b,enterTransmission,tick:process.hrtime.bigint,
   nextIoSequence:()=>++sequence,evidenceDeadline:process.hrtime.bigint()+5000000000n,signal});
- return {session,trace,invoke,abort:()=>controller.abort()};
+ const changeProgram=(emit=true)=>{
+  program=b;
+  if(emit)for(const socket of server.clients)socket.send(JSON.stringify({op:5,d:{eventType:'CurrentProgramSceneChanged',eventData:{sceneUuid:b,sceneName:'B'}}}));
+ };
+ return {session,trace,invoke,changeProgram,invalidation,abort:()=>controller.abort()};
 }
+
+test('固定 Cut 遇到外部节目场景变化立即保护，漏事件时预检仍拒发', async t=>{
+ for(const emitted of [true,false]){
+  const {invoke,trace,changeProgram,invalidation}=await fixture(t);
+  changeProgram(emitted);
+  if(emitted)assert.equal((await invalidation).code,'obs_observation_changed');
+  await assert.rejects(invoke(()=>assert.fail('旧状态不得进入写出口')),{code:'obs_observation_changed'});
+  assert.ok(!trace.some(frame=>frame.requestType==='SetCurrentProgramScene'));
+ }
+});
 
 test('固定 Cut 以一次同步许可发送 UUID，使用该应答之后的新查询记录四帧',async t=>{
  const {invoke,trace}=await fixture(t);

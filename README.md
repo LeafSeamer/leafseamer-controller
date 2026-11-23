@@ -309,6 +309,8 @@ Controller 的 OBS 只读目录资格绑定安装包内的 `obs-device-module.mj
 
 Schema 101 可显式迁移以装配独立的固定 Cut 扩展。它使用 `obs-cut-device-module.mjs`、`obs-cut-module-policy.json` 和 `obs-cut-module-capability.json`，审批范围为单个已登记的 OBS 设备及 `obs.program_scene.set`。完成当前会话的目录确认后，Controller 把固定执行配置交给同一受监督 Worker，绑定目录、资源和设备会话，写门保持关闭。当前公开能力查询仍不列出 Cut，等待 OBS 命令准入、终态与资源释放接通。
 
+Schema 102 可显式迁移以启用固定 Cut 的首次开闸流程。人员接管后，Controller 在关闭屏障内核对已确认的场景目录、当前节目场景、设备会话和登记资源，再持久保存首次资源依据与开闸回执。连接中断或观测到计划外的节目场景切换会撤销当前会话的就绪状态并进入保护。
+
 ### 执行会话与初始控制屏障
 
 schema42将人员执行来源改为实际挑战／响应：`beginManualExecutionChallenge`核验人员令牌、当前持有人、权限和运行装配，生成32字节随机nonce，将挑战与提交审计同事务保存；`completeManualExecutionChallenge`核验实际令牌秘密、完整挑战引用和nonce，响应关联与人员来源／审计同事务提交。挑战绑定实际token、会话、凭据、控制原件、完整执行Binding及原核心观察；截止不超过挑战开始后两秒和原观察期限。相同请求只返回仍有效的原件，不换nonce或续期；错误nonce、不同响应内容、过期及旧单步取证入口均拒绝。

@@ -168,7 +168,7 @@ async function openOrdinaryGate(device,automatic,token=commandToken){
  const opened=await executionClient.initialOpen(opening.ref,{ready:true});
  const control=manager.sessions.getControl(token,device);
  const current=executionClient.currentReady(opened.ready.ref);
- return {control,selected,recovery,renewed,opening,ready:opened.ready,current};
+ return {control,selected,recovery,renewed,resources,opening,ready:opened.ready,current};
 }
 async function runOrdinaryGate(device,automatic){
  const {control,selected,recovery,renewed,opening,ready,current}=await openOrdinaryGate(device,automatic);
@@ -269,7 +269,8 @@ scheduling?.enable();
 const omitRetirementRequest=input.mode.endsWith('_reference_restart_missing');
 const automaticReady=input.mode.endsWith('_ready_automatic');
 const manualGateMigration=input.mode.endsWith('_ready_manual_migration');
-const controlFlow=input.mode==='supervisor_create_module_writable'||input.mode.includes('_control_fence_')||(input.mode.includes('_manual_authority_')||input.mode.includes('_manual_challenge_')||input.mode.includes('_evidence_'))||(input.mode.includes('_evaluator_')||(input.mode.includes('_recovery_')||input.mode.includes('_consumption_')||input.mode.includes('_evidence_')));
+const obsOpen=input.mode==='supervisor_create_module_obs_cut_open';
+const controlFlow=obsOpen||input.mode==='supervisor_create_module_writable'||input.mode.includes('_control_fence_')||(input.mode.includes('_manual_authority_')||input.mode.includes('_manual_challenge_')||input.mode.includes('_evidence_'))||(input.mode.includes('_evaluator_')||(input.mode.includes('_recovery_')||input.mode.includes('_consumption_')||input.mode.includes('_evidence_')));
 const source=await connectCoreSupervisor({pipe:options['--supervisor-pipe'],channelId:options['--supervisor-channel'],policy,
  timeProviderIntent:options['--time-provider-intent']??null,binding:{descriptor:assignment.clock_domain_descriptor,receipt}});
 source.subscribeLost(error=>report({event:'core-source-lost',code:error.code,stack:error.stack,...error.timing,
@@ -377,7 +378,7 @@ if(input.runtime){
   manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id:manager.logged.session.principal_id,expected_revision:before.revision,permissions:[...new Set([...before.permissions,'device.read'])]});
   commandToken=manager.token(['device.read']);
  }
- if(input.mode==='supervisor_create_module_writable'||(input.mode.includes('_evaluator_')||(input.mode.includes('_recovery_')||input.mode.includes('_consumption_')||input.mode.includes('_evidence_')))){
+ if(obsOpen||input.mode==='supervisor_create_module_writable'||(input.mode.includes('_evaluator_')||(input.mode.includes('_recovery_')||input.mode.includes('_consumption_')||input.mode.includes('_evidence_')))){
   const objectRef=value=>({id:value.id,revision:value.revision,digest:value.digest}),now=manager.real.current();
   const principal=manager.sessions.createServicePrincipal(manager.auth,{request_id:crypto.randomUUID(),display_name:'模拟器评估器身份',purpose:'controller_evaluator'});
   const approved=manager.sessions.approveServicePrincipal(manager.auth,{request_id:crypto.randomUUID(),principal_id:principal.id,expected_revision:principal.revision,
@@ -406,6 +407,7 @@ if(input.runtime){
  if(controlFlow){
   const armTarget=input.automation_peer?.arm_target;
   const permissions=['control.read','control.acquire','device.command','device.recover','command.read','command.evidence.read','command.cancel','request.create',...(automaticReady||armTarget||input.mode.endsWith('_successor_control')||input.mode.includes('_control_queued')||input.mode.endsWith('_control_unresolved')?['control.release']:[])];
+  if(obsOpen)permissions.push('device.read');
   const before=manager.sessions.localPermissions(manager.auth);manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id:manager.logged.session.principal_id,expected_revision:before.revision,permissions:[...new Set([...before.permissions,...permissions,...(input.gui?['device.read']:[])])]});
   commandToken=manager.token(permissions);const device=intent.object_scope.device_ids[0],{contractSelection:selection}=await import('../../dist/sdk/index.mjs');
   const context=manager.sessions.createRequestContext(commandToken,{audience:business.identity.service_id,
@@ -499,12 +501,19 @@ try{
         const packet=business.workerLaunches.prepareObsCutPacket(device,{scene_ref});
         report({event:'obs-cut-packet',target:target.obs_scene_uuid,packet_hex:packet.toString('hex'),
           stale:rejected(()=>business.workerLaunches.prepareObsCutPacket(device,{scene_ref:{...scene_ref,binding_revision:'1'}}))});
-        if(input.mode==='supervisor_create_module_obs_cut'){
+        if(input.mode==='supervisor_create_module_obs_cut'||obsOpen){
           executionClient=await business.workerLaunches.openExecution(key);
           const first=await moduleClient.configureExecution(device),repeated=await moduleClient.configureExecution(device);
           manager.real.refresh();
           report({event:'obs-cut-execution-bound',first,repeated,state:executionClient.state,features:executionClient.negotiation.selected_features,
             capabilities:await commandHttp('GET','/api/v1/devices/'+device+'/capabilities')});
+          if(obsOpen){
+            await business.workerLaunches.runtime.refreshCurrent(key);
+            await source.refreshCoreObservation();
+            manager.real.refresh();
+            const opened=await openOrdinaryGate(device,false);
+            report({event:'obs-cut-opened',...opened,state:executionClient.state});
+          }
         }
         report({event:'obs-module-samples',connected,first,second,accepted});
         const until=performance.now()+20000;
@@ -515,8 +524,17 @@ try{
         try{await moduleClient.captureBaseline(device);}
         catch(error){
           manager.real.refresh();
+          let control;
+          if(obsOpen){
+            const deadline=performance.now()+3000;
+            do{
+              control=manager.sessions.getControl(commandToken,device);
+              if(control.gate_state==='protected'||performance.now()>=deadline)break;
+              await delay(20);
+            }while(true);
+          }
           report({event:'obs-scene-catalog-withdrawn',response:await commandHttp('GET',route),
-            confirmation:rejected(confirm)});
+            confirmation:rejected(confirm),...(obsOpen&&{control})});
           throw error;
         }
         throw new Error('fixture_obs_stale_sample');
