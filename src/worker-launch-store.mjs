@@ -6,6 +6,7 @@ import {workerRuntimeStore} from './worker-runtime-store.mjs';
 import {workerAuthorizationStore} from './worker-authorization-store.mjs';
 import {connectDeviceModule} from './device-module-client.mjs';
 import {isObsModuleEntry} from './obs-module-profile.mjs';
+import {encodeObsCutPacket} from './obs-cut-packet.mjs';
 import {readRegisteredObsResource} from './obs-resource.mjs';
 import {deviceModuleJournal} from './device-module-store.mjs';
 import {deviceCatalogStore} from './device-catalog-store.mjs';
@@ -185,6 +186,13 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     whenCommandFinalized(id){available();const task=finalAdmissionTasks.get(id)??commandTasks.get(id)?.then(()=>finalAdmissionTasks.get(id));need(task,'execution_finalization_not_queued');return task;},
     deviceCapabilitiesCurrent(device){return readDeviceCapabilities(db,currentDeviceCatalogInput(device));},
     deviceSceneCatalogCurrent(device,includeConfirmation){return readDeviceSceneCatalog(db,currentDeviceCatalogInput(device),includeConfirmation);},
+    prepareObsCutPacket(device,parameters){
+      const prepare=()=>{
+        const catalog=readDeviceSceneCatalog(db,currentDeviceCatalogInput(device));
+        return encodeObsCutPacket(catalog,{device_id:device,device_session_id:catalog.device_session_id},parameters);
+      };
+      return db.inTransaction?prepare():db.transaction(prepare).immediate();
+    },
     deviceAutomation(device,expectedRegistrationRef=null){available();return db.transaction(()=>readDeviceAutomationBindings(db,currentDeviceCatalogInput(device),expectedRegistrationRef)).immediate();},
     deviceAutomationCurrent(device,expectedRegistrationRef=null){return readDeviceAutomationBindings(db,currentDeviceCatalogInput(device),expectedRegistrationRef);},
     deviceEvents:readDeviceEvents,

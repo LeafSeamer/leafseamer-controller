@@ -493,8 +493,14 @@ try{
         report({event:'obs-scene-confirmed',ready,replayed,denied,csrf,stale,conflict,
           actor:{principal_id:manager.logged.session.principal_id,session_id:manager.logged.session.session_id},
           current:await commandHttp('GET',route)});
+        const {collection_ref,collection_generation,catalog_revision,binding_revision}=ready;
+        const target=ready.entries.find(entry=>entry.obs_scene_uuid!==second.body.value.program_scene_uuid);
+        const scene_ref={collection_ref,collection_generation,catalog_revision,binding_revision,scene_id:target.scene_id};
+        const packet=business.workerLaunches.prepareObsCutPacket(device,{scene_ref});
+        report({event:'obs-cut-packet',target:target.obs_scene_uuid,packet_hex:packet.toString('hex'),
+          stale:rejected(()=>business.workerLaunches.prepareObsCutPacket(device,{scene_ref:{...scene_ref,binding_revision:'1'}}))});
         report({event:'obs-module-samples',connected,first,second,accepted});
-        const until=performance.now()+5000;
+        const until=performance.now()+20000;
         while(!fs.existsSync(options['--fixture']+'.obs-stopped')){
           if(performance.now()>=until)throw new Error('fixture_obs_stop_timeout');
           await delay(20);

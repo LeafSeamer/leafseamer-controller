@@ -10,6 +10,7 @@ import {authorizationRevoked} from '../dist/device-authorization-fence.mjs';
 import {createDeviceModule} from '../dist/simulator-control-module.mjs';
 import {decodeExecutionPayload} from '../dist/device-execution-channel.mjs';
 import {openObsCutWriterSession,ObsCutEntryRejected} from '../dist/obs-discovery.mjs';
+import {encodeObsCutPacket,readObsCutPacket,obsCutPrimitive,obsCutPacketBytes} from '../dist/obs-cut-packet.mjs';
 import {deviceExecutionVersion} from '../dist/sdk/device-execution.mjs';
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(typeof value==='string'?value:canonicalize(value)).digest('hex');
 const raw=value=>Buffer.from(JSON.stringify(value));
@@ -25,16 +26,18 @@ function automationOrigin(generation='2'){
 function signCut(frame){const {barrier_id,attempt_binding,...body}=frame.body;
  frame.body.attempt_binding.cut_digest=hash({type:frame.type,target_exit_id:attempt_binding.target_exit_id,body});return frame;}
 async function fixture(options={}){
- const abort=new AbortController(),module=createDeviceModule({configuration:{},device_ids:['device'],signal:abort.signal});
- const device={device_id:'device',device_session_id:'device_session',signal:abort.signal};await module.connectReadOnly(device);
+ const {deviceId='device',sessionId='device_session'}=options;
+ const abort=new AbortController(),module=createDeviceModule({configuration:{},device_ids:[deviceId],signal:abort.signal});
+ const device={device_id:deviceId,device_session_id:sessionId,signal:abort.signal};await module.connectReadOnly(device);
  const binding={scope:{authority_service_id:'controller',database_instance_id:'database'},controller_boot_id:'core.boot',worker_boot_id:'worker.boot',
-  writer_exit_id:'exit',ipc_session_id:'ipc',device_id:'device',device_session_id:'device_session',clock_domain_id:'clock_'+'1'.repeat(64),descriptor_digest:'sha256:'+'2'.repeat(64)};
+  writer_exit_id:'exit',ipc_session_id:'ipc',device_id:deviceId,device_session_id:sessionId,clock_domain_id:'clock_'+'1'.repeat(64),descriptor_digest:'sha256:'+'2'.repeat(64)};
  const profile=ref('profile'),plan=ref('plan'),capability=ref('capability'),errors=[];let tick=10n,calls=0;
  const executor={api_version:'leafseamer-device-primitives/1',async encodePrimitive(input){calls++;return options.encode?options.encode(input,module):module.execution.encodePrimitive(input);}};
  const cache=devicePacketPreparation({binding,profile,plan,capability,exit:{socket_instance_id:'socket',protocol_session:null},executor,tick:()=>tick,signal:abort.signal,failed:error=>errors.push(error),
   limits:options.limits??{max_entries:256,max_cached_bytes:1048576,max_metadata_bytes:16777216,max_encoders:4}});
  function encode(id='prepare',value=42,origin=null){
-  const request={context_id:'context',idempotency_key:'key.'+id,device_id:'device',action_id:'leafseamer.simulator.value.set',capability_version:'1.0.0',parameters:{value},
+  const request={context_id:'context',idempotency_key:'key.'+id,device_id:deviceId,action_id:options.action?.action_id??'leafseamer.simulator.value.set',
+   capability_version:options.action?.capability_version??'1.0.0',parameters:options.parameters??{value},
    expected_control:{epoch:'epoch',version:'1'},origin:'manual',automation_binding:null,required_completion:'effect_verified',preconditions:[],dispatch:{mode:'immediate',max_queue_ms:1000},evidence_timeout_ms:1000};
   if(origin){const {run_id,definition_version,arm_generation,step_id,logical_action_id}=origin;
    Object.assign(request,{origin:'automation',automation_binding:origin,run_binding:{run_id,definition_version,arm_generation,step_id,logical_action_id,grant_id:'grant',grant_revision:'1'}});
@@ -43,14 +46,14 @@ async function fixture(options={}){
   const authority={format_version:'encoding-authorization/0.1.0-draft.1',authorization_id:'authorization.'+id,revision:'1',binding,
    target:{kind:'ordinary',command_ref:ref('command_'+id),proposed_attempt_id:'attempt_'+id,cancellation_ref:null,execution_ref:null},
    requester:{kind:origin?'service':'human',issuer_id:'issuer',issuer_epoch:'issuer.1',principal_id:origin?'service':'person'},admission_source_ref:ref('admission.'+id),authorization_snapshot_ref:ref('authorization.snapshot'),
-   capability_ref:capability,primitive_id:'simulator_value_set',primitive_plan_ref:plan,transport_profile_ref:profile,content_digest:hash(content),
-   encoding_reservation_ref:ref('reservation.'+id),max_bytes:8,created_tick_ns:'1',expires_tick_ns:'100'};
+   capability_ref:capability,primitive_id:options.primitiveId??'simulator_value_set',primitive_plan_ref:plan,transport_profile_ref:profile,content_digest:hash(content),
+   encoding_reservation_ref:ref('reservation.'+id),max_bytes:options.maxBytes??8,created_tick_ns:'1',expires_tick_ns:'100'};
   return envelope('ENCODE_PACKET','encode.'+id,{prepare_id:id,command_id:authority.target.command_ref.id,attempt_id:authority.target.proposed_attempt_id,primitive_id:authority.primitive_id,
-   device_session_id:'device_session',request,primitive_plan_ref:{object_id:plan.id,digest:plan.digest},transport_profile_ref:{object_id:profile.id,digest:profile.digest},expires_tick_ns:'100',
+   device_session_id:sessionId,request,primitive_plan_ref:{object_id:plan.id,digest:plan.digest},transport_profile_ref:{object_id:profile.id,digest:profile.digest},expires_tick_ns:'100',
    encoding_authorization:{...authority,authorization_digest:hash(authority)}});
  }
  function envelope(type,id,body){return {ipc_version:deviceExecutionVersion,type,message_id:id,reply_to:null,
-  ipc_session_id:binding.ipc_session_id,controller_boot_id:binding.controller_boot_id,worker_boot_id:binding.worker_boot_id,seq:'1',device_id:'device',body,
+  ipc_session_id:binding.ipc_session_id,controller_boot_id:binding.controller_boot_id,worker_boot_id:binding.worker_boot_id,seq:'1',device_id:deviceId,body,
   clock_domain_id:binding.clock_domain_id,descriptor_digest:binding.descriptor_digest,journal_mode:'durable'};}
  function cleanup(frame,type='RELEASE_ENCODING'){
   const a=frame.body.encoding_authorization,id=type==='RELEASE_ENCODING'?'release_id':'deny_id';
@@ -63,7 +66,7 @@ async function fixture(options={}){
 }
 
 async function sending(options={}){
- const origin=options.origin??null,f=await fixture(),encoded=f.encode('prepare',42,origin);await f.cache.prepare(raw(encoded));await f.cache.whenPrepared('prepare');
+ const origin=options.origin??null,f=await fixture(options),encoded=f.encode('prepare',42,origin);await f.cache.prepare(raw(encoded));await f.cache.whenPrepared('prepare');
  const accessBody={format_version:'gate-access/0.1.0-draft.1',access_id:'access',revision:'1',purpose:'ordinary',binding:f.binding,
   control_authority_ref:ref('control'),control_epoch:'epoch',effective_version:'1',authorization_ref:ref('authorization'),resource_safety_ref:ref('resource'),gate_safety_ref:ref('gate'),
   protection:null,initial_assessment_ref:null,selected_tick_ns:'1',expires_tick_ns:'100'};
@@ -73,7 +76,7 @@ async function sending(options={}){
   ledger_digest:hash([]),open_intents:[],attempt_binding:{cut_id:'cut',cut_digest:hash('cut'),target_exit_id:f.binding.writer_exit_id,attempt_ordinal:'1',previous_barrier_id:null},
   transmission_ledger_digest:hash([]),open_transmission_intents:[],cancel_transmissions:[],cancel_ledger_digest:hash([])});
  signCut(fence);
- const run={controller_scope:f.binding.scope,snapshot_revision:'0',entries:[]},commands={scope:f.binding.scope,device_id:'device',snapshot_revision:'0',entries:[]};
+ const run={controller_scope:f.binding.scope,snapshot_revision:'0',entries:[]},commands={scope:f.binding.scope,device_id:f.binding.device_id,snapshot_revision:'0',entries:[]};
  const time={snapshot_id:'time_snapshot',domain:{...f.binding.scope,provider_id:'provider',provider_boot_id:'provider_boot',runtime_binding_ref:ref('runtime'),
   clock_domain_id:f.binding.clock_domain_id,descriptor_digest:f.binding.descriptor_digest,clock_generation:'1'},snapshot_revision:'1',minimum_time_generation:'1',state_ref:ref('time_state')};
  const open=f.envelope('OPEN_GATE','open_message',{barrier_id:'barrier',gate_token:'token',device_session_id:f.binding.device_session_id,control_epoch:'epoch',control_version:'1',gate_revision:'1',
@@ -88,7 +91,7 @@ async function sending(options={}){
   subject_revision:'1',session_revision:'1',policy_revision:'1',scope_digest:hash('scope'),grant_id:null,grant_revision:null,arm_generation:null,extension_instance_id:null,extension_approval_revision:null};
  if(origin)Object.assign(authorization,{principal_kind:'service',principal_id:'service',origin:'automation',session_id:null,session_revision:null,
   grant_id:'grant',grant_revision:'1',arm_generation:origin.arm_generation});
- const guardBody={guard_id:'guard',permit_id:'permit',command_id:encoded.body.command_id,device_id:'device',controller_boot_id:f.binding.controller_boot_id,
+ const guardBody={guard_id:'guard',permit_id:'permit',command_id:encoded.body.command_id,device_id:f.binding.device_id,controller_boot_id:f.binding.controller_boot_id,
   worker_boot_id:f.binding.worker_boot_id,ipc_session_id:f.binding.ipc_session_id,binding:authorization,authorization_revision:'1',authorization_deadline_tick_ns:'90',
   clock_domain_id:f.binding.clock_domain_id,time_required:false,capacity_reservation_id:'reservation',descriptor_digest:f.binding.descriptor_digest,
   admission_origin:'non_panel',panel_binding:null,automation_binding:origin,reference_time:null,gate_access_ref:accessRef,ownership_ref:ownership};
@@ -98,7 +101,7 @@ async function sending(options={}){
  const window={clock_domain_id:f.binding.clock_domain_id,descriptor_digest:f.binding.descriptor_digest,earliest_tick_ns:'1',latest_tick_ns:'80'};
  const intent={permit_id:'permit',command_id:packet.command_id,attempt_id:packet.attempt_id,dispatch_intent_id:'dispatch_intent',worker_boot_id:f.binding.worker_boot_id,
   device_session_id:f.binding.device_session_id,guard_id:guard.guard_id,guard_digest:guard.guard_digest,clock_domain_id:f.binding.clock_domain_id,descriptor_digest:f.binding.descriptor_digest,
-  controller_boot_id:f.binding.controller_boot_id,ipc_session_id:f.binding.ipc_session_id,device_id:'device',admission_origin:'non_panel',panel_binding_digest:null,origin:'manual',automation_binding:null,automation_binding_digest:null};
+  controller_boot_id:f.binding.controller_boot_id,ipc_session_id:f.binding.ipc_session_id,device_id:f.binding.device_id,admission_origin:'non_panel',panel_binding_digest:null,origin:'manual',automation_binding:null,automation_binding_digest:null};
  if(origin)Object.assign(intent,{origin:'automation',automation_binding:origin,automation_binding_digest:hash(origin)});
  const permit={permit_id:'permit',command_id:packet.command_id,attempt_id:packet.attempt_id,dispatch_intent_id:'dispatch_intent',controller_boot_id:f.binding.controller_boot_id,
   worker_boot_id:f.binding.worker_boot_id,device_session_id:f.binding.device_session_id,control_epoch:'epoch',control_version:'1',authorization_revision:'1',origin:'manual',grant_revision:null,arm_generation:null,
@@ -107,7 +110,7 @@ async function sending(options={}){
   transmission:{transmission_id:'transmission',packet_ref:packetRef,primitive_id:packet.primitive_id,intent,ordinal:'0',kind:'initial',cause:'dispatch',trigger_observation_ref:null,
    parent_dispatch_intent_id:'dispatch_intent',initial_permit_id:'permit',issued_revision:'1',send_window:window},budget_revision:'1',gate_access_ref:accessRef,ownership_ref:ownership};
  if(origin)Object.assign(permit,{origin:'automation',automation_binding:origin,grant_revision:'1',arm_generation:origin.arm_generation});
- const template=JSON.parse(fs.readFileSync(new URL('../dist/simulator-control-capability.json',import.meta.url))),a=template.actions[0];
+ const template=JSON.parse(fs.readFileSync(new URL('../dist/simulator-control-capability.json',import.meta.url))),a=options.action??template.actions[0];
  const dispatch=f.envelope('DISPATCH','dispatch_message',{permit,gate_token:'token',send_window:window,request:encoded.body.request,parameters_schema_digest:a.parameters_schema.digest,
   guard_id:guard.guard_id,guard_digest:guard.guard_digest,prepare_id:'prepare',packet,resend_request_id:null});
  const executor={api_version:'leafseamer-device-primitives/1',async writePrimitive(input){writes++;return options.write?options.write(input,f.module):f.module.execution.writePrimitive(input);}};
@@ -558,20 +561,33 @@ test('异步传输预检结束后的实际许可仅能消费一次，已进入�
 });
 
 test('obs_cut_final_guard',{skip:process.env.LEAFSEAMER_OBS_GUARD_TEST!=='1',timeout:20000},async t=>{
- const {port,password,initial,target}=JSON.parse(fs.readFileSync(0,'utf8'));
+ const {port,password,initial,target,catalog:confirmed,packet_hex}=JSON.parse(fs.readFileSync(0,'utf8'));
  const controller=new AbortController();
  const obs=await openObsCutWriterSession({port,password},controller.signal);
  t.after(()=>controller.abort());
+ const catalog=confirmed??{device_id:'device',device_session_id:'device_session',collection_ref:'collection',
+  collection_generation:'1',catalog_revision:'1',binding_revision:'2',status:'ready',
+  entries:obs.initial.scenes.map((scene,index)=>({...scene,scene_id:'scene_'+index}))};
+ const {device_id,device_session_id,collection_ref,collection_generation,binding_revision,catalog_revision}=catalog;
+ const scene_id=catalog.entries.find(scene=>scene.obs_scene_uuid===target).scene_id;
+ const parameters={scene_ref:{scene_id,collection_ref,collection_generation,binding_revision,catalog_revision}};
+ const binding={device_id,device_session_id},prepared=encodeObsCutPacket(catalog,binding,parameters);
+ if(packet_hex)assert.equal(prepared.toString('hex'),packet_hex);
+ assert.equal(readObsCutPacket(prepared,catalog,binding),target);
+ assert.throws(()=>encodeObsCutPacket(catalog,binding,{scene_ref:{...parameters.scene_ref,binding_revision:'1'}}),{code:'obs_cut_packet_stale_reference'});
+ assert.throws(()=>readObsCutPacket(prepared,{...catalog,collection_ref:'reconnected'},binding),{code:'obs_cut_packet_stale_reference'});
+ const action={action_id:'obs.program_scene.set',capability_version:'1.0.0',parameters_schema:{digest:hash('obs.scene-ref.1')}};
  for(const allowed of [false,true]){
   let f;
-  f=await sending({entryAtTransport:true,async write(input){
-   const response=await obs.cutScene({sceneUuid:target,tick:process.hrtime.bigint,nextIoSequence:f.gateOwner.nextIoSequence,
+  f=await sending({deviceId:device_id,sessionId:device_session_id,action,parameters,primitiveId:obsCutPrimitive,maxBytes:obsCutPacketBytes,
+   entryAtTransport:true,encode(input){return encodeObsCutPacket(catalog,input,input.parameters);},async write(input){
+   assert.deepEqual(Buffer.from(input.bytes),prepared);
+   return obs.writePreparedCut({...input,catalog,tick:process.hrtime.bigint,nextIoSequence:f.gateOwner.nextIoSequence,
     evidenceDeadline:process.hrtime.bigint()+5000000000n,signal:input.signal,enterTransmission(){
      if(!allowed)f.gate(null);
      try{input.enterTransmission();}
      catch(error){if(error.code==='transmission_gate_closed')throw new ObsCutEntryRejected();throw error;}
     }});
-   return {bytes_written:input.bytes.length,response};
   }});
   await f.writer.installGuard(raw(f.install));
   const report=await f.writer.dispatch(raw(f.dispatch));await f.response(report);

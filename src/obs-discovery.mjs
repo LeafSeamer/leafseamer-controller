@@ -1,5 +1,6 @@
 import {createHash,randomUUID} from 'node:crypto';
 import WebSocket from 'ws';
+import {obsCutDirectoryMatches,readObsCutPacket} from './obs-cut-packet.mjs';
 
 const protocol='obswebsocket.json';
 const budgetMs=5000;
@@ -178,11 +179,12 @@ async function inspectObs(input,cut,signal,onInvalidated,writable=false){
   }
   if(!writable)return Object.freeze({initial,assertCurrent,close,sample});
   const initialIds=initial.scenes.map(scene=>scene.obs_scene_uuid).sort();
-  function sameCut(value){
+  function sameCut(value,expectedDirectory){
    requireValue(value.collection_name===initial.collection_name&&
     JSON.stringify(value.scenes.map(scene=>scene.obs_scene_uuid).sort())===JSON.stringify(initialIds),'resource_catalog_changed');
+   if(expectedDirectory)requireValue(obsCutDirectoryMatches(expectedDirectory,value.scenes),'resource_catalog_changed');
   }
-  async function cutScene({sceneUuid,enterTransmission,tick,nextIoSequence,evidenceDeadline,signal:executionSignal}){
+  async function cutScene({sceneUuid,enterTransmission,tick,nextIoSequence,evidenceDeadline,signal:executionSignal},expectedDirectory=null){
    assertCurrent();
    requireValue(!sampling,'session_busy');
    requireValue(uuid(sceneUuid)&&initialIds.includes(sceneUuid),'cut_target');
@@ -204,7 +206,7 @@ async function inspectObs(input,cut,signal,onInvalidated,writable=false){
    timer=setTimeout(()=>fail(new ObsDiscoveryError('timeout')),budgetMs);
    executionSignal.addEventListener('abort',abortExecution,{once:true});
    try{
-    sameCut(await observe());
+    sameCut(await observe(),expectedDirectory);
     const setType='SetCurrentProgramScene',setId=randomUUID();
     const setReply=await receive(7,{op:6,d:{requestType:setType,requestId:setId,requestData:{sceneUuid}}},()=>{
      frame('set_send',setId,sceneUuid);
@@ -223,7 +225,7 @@ async function inspectObs(input,cut,signal,onInvalidated,writable=false){
     requireValue(uuid(observed)&&initialIds.includes(observed),'cut_evidence_scene');
     frame('query_result',queryId,observed);
     const verified=await observe();
-    sameCut(verified);
+    sameCut(verified,expectedDirectory);
     const evaluated=tick();
     requireValue(verified.program_scene_uuid===observed&&typeof evaluated==='bigint'&&
      evaluated>=BigInt(frames.at(-1).tick_ns)&&evaluated<evidenceDeadline,'cut_evidence_changed');
@@ -237,7 +239,14 @@ async function inspectObs(input,cut,signal,onInvalidated,writable=false){
     sampling=false;cutTarget=null;clearTimeout(timer);deadline=Infinity;
    }
   }
-  return Object.freeze({initial,assertCurrent,close,sample,cutScene});
+  async function writePreparedCut({bytes,catalog,device_id,device_session_id,...io}){
+   const directory=structuredClone(catalog);
+   const sceneUuid=readObsCutPacket(bytes,directory,{device_id,device_session_id});
+   sameCut(initial,directory);
+   const response=await cutScene({...io,sceneUuid},directory);
+   return {bytes_written:bytes.byteLength,response};
+  }
+  return Object.freeze({initial,assertCurrent,close,sample,cutScene:input=>cutScene(input),writePreparedCut});
  }finally{password=null;if(!retained)close();}
 }
 
