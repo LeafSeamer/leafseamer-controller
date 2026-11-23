@@ -267,6 +267,12 @@ schema 22的新worker准备必须匹配本次服务启动的人员受理、当�
 
 该批准明确 `write_eligible=false`、`automation_eligible=false`，只适用于包内固定模拟器，其他模块不会因自报相同型号取得资格。物理型号CatalogApproval、事件来源／年龄接纳、设备写出口和资源释放仍待接通。扩展是经过管理员批准的代码，进程监督不构成恶意代码沙箱；没有以模拟器结果批准实际设备。
 
+### 本机 OBS 场景发现
+
+在独立 OBS 实例启用有密码的 WebSocket 后，使用私有输入和输出管道运行 `node --disallow-code-generation-from-strings dist/cli.mjs inspect-obs`。输入为一个 JSON 对象，包含整数 `port` 和字符串 `password`。连接固定使用回环 IPv4 地址，凭据由调用进程传入。
+
+成功结果 `obs_discovered` 包含 OBS 与 WebSocket 报告的版本、协商 RPC 版本、可用请求摘要、当前场景集合名称、场景 UUID 和当前节目场景 UUID。发现期间集合或场景变化会使本次结果失效，重新读取需重新发起发现。控制批准、受监督派发和设备完成证据由各自流程提供。
+
 ### 执行会话与初始控制屏障
 
 schema42将人员执行来源改为实际挑战／响应：`beginManualExecutionChallenge`核验人员令牌、当前持有人、权限和运行装配，生成32字节随机nonce，将挑战与提交审计同事务保存；`completeManualExecutionChallenge`核验实际令牌秘密、完整挑战引用和nonce，响应关联与人员来源／审计同事务提交。挑战绑定实际token、会话、凭据、控制原件、完整执行Binding及原核心观察；截止不超过挑战开始后两秒和原观察期限。相同请求只返回仍有效的原件，不换nonce或续期；错误nonce、不同响应内容、过期及旧单步取证入口均拒绝。

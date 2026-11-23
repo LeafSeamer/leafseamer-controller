@@ -70,6 +70,7 @@ files.push(['device-execution-gate.mjs',await fs.readFile(path.join(root,'src/de
 files.push(['device-authorization-fence.mjs',await fs.readFile(path.join(root,'src/device-authorization-fence.mjs'))]);
 files.push(['device-worker-session.mjs',await fs.readFile(path.join(root,'src/device-worker-session.mjs'))]);
 for(const name of ['simulator-control-module.mjs','simulator-control-policy.json','simulator-control-capability.json'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
+files.push(['obs-discovery.mjs',await fs.readFile(path.join(root,'src','obs-discovery.mjs'))]);
 for(const name of ['device-module-channel.mjs','device-module-client.mjs','device-module-host.mjs','device-module-store.mjs','device-module.sql','device-catalog.sql','device-control.sql','device-control-value.mjs','device-control-repository.mjs','device-control-store.mjs','device-control-barrier.mjs','device-catalog-store.mjs','simulator-module.mjs','simulator-policy.json'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 files.push(['materialized-content.mjs', await fs.readFile(path.join(root, 'src/materialized-content.mjs'))]);
 files.push(['auth-http.mjs', await fs.readFile(path.join(root, 'src/auth-http.mjs'))]);

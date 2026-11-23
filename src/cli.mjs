@@ -12,6 +12,7 @@ import {BootstrapError, validateBootstrapPolicy, createCoreBootstrapChannel, ver
 import {connectCoreSupervisor, SupervisorError} from './supervisor-control.mjs';
 import {openTrustedPairingClock, readTrustedPairingProfile} from './trusted-pairing-profile.mjs';
 import {LocalPairingError, runLocalPairingAdmin} from './local-pairing-admin.mjs';
+import {discoverObsScenes,ObsDiscoveryError} from './obs-discovery.mjs';
 const authenticatedCore = process.argv[2] === 'contained-core-auth';
 const emit = value => (authenticatedCore ? process.stderr : process.stdout).write(JSON.stringify(value) + '\n');
 const pairingStartupError = code => /^pairing_(profile|clock)_[a-z_]+$/.test(code);
@@ -19,14 +20,17 @@ let app;
 try {
   const [command, ...args] = process.argv.slice(2);
   const allowed = command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile'] : [])] : [];
-  if (!allowed.length || args.length % 2) throw new Error('arguments');
+  if ((!allowed.length && command !== 'inspect-obs') || args.length % 2) throw new Error('arguments');
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
     if (!allowed.includes(args[i]) || Object.hasOwn(options, args[i])) throw new Error('arguments');
     options[args[i]] = args[i + 1];
   }
-  if (command !== 'pairing-admin' && (!options['--data-dir'] || !path.isAbsolute(options['--data-dir']))) throw new Error('arguments');
-  if (command === 'pairing-admin') {
+  if (command !== 'pairing-admin' && command !== 'inspect-obs' && (!options['--data-dir'] || !path.isAbsolute(options['--data-dir']))) throw new Error('arguments');
+  if (command === 'inspect-obs') {
+    requirePrivatePipes();
+    emit({event:'obs_discovered',...await discoverObsScenes(await readEnrollmentInput())});
+  } else if (command === 'pairing-admin') {
     requirePrivatePipes();
     const bytes = await runLocalPairingAdmin({origin: options['--origin'], caFile: options['--ca-file'], input: await readEnrollmentInput()});
     process.stdout.write(bytes);
@@ -154,7 +158,8 @@ try {
   if (app) await app.close().catch(() => {});
   const code = error.code ?? error.message;
   const known = error instanceof StorageError || error instanceof IdentityError || error instanceof ProcessHostError ||
-    error instanceof BootstrapError || error instanceof SupervisorError || error instanceof LocalPairingError || pairingStartupError(code);
+    error instanceof BootstrapError || error instanceof SupervisorError || error instanceof LocalPairingError ||
+    error instanceof ObsDiscoveryError || pairingStartupError(code);
   process.stderr.write(JSON.stringify({error: known ? code : 'startup_failed'}) + '\n');
   process.exitCode = 1;
 }
