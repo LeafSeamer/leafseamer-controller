@@ -5,7 +5,7 @@ import {once} from 'node:events';
 import test from 'node:test';
 import {fileURLToPath} from 'node:url';
 import {WebSocketServer} from 'ws';
-import {discoverObsScenes} from '../dist/obs-discovery.mjs';
+import {discoverObsScenes,inspectObsCut} from '../dist/obs-discovery.mjs';
 
 const scene1='ebc75716-e090-42b1-b9e5-ee8a1dd15879',scene2='c3a343d6-9f64-4862-a151-baf6201a5ae6';
 const salt=Buffer.alloc(32,1).toString('base64'),challenge=Buffer.alloc(32,2).toString('base64');
@@ -20,7 +20,7 @@ const results={
   scenes:[{sceneUuid:scene1,sceneName:'模拟 A'},{sceneUuid:scene2,sceneName:'模拟 B'}]},
  GetCurrentProgramScene:{sceneName:'模拟 A',sceneUuid:scene1}
 };
-async function peer(t,{first=hello,change=null}={}){
+async function peer(t,{first=hello,change=null,subscriptions=6}={}){
  const server=new WebSocketServer({port:0,host:'127.0.0.1'}),requests=[];
  await once(server,'listening');
  t.after(()=>new Promise(resolve=>{for(const socket of server.clients)socket.terminate();server.close(resolve);}));
@@ -31,7 +31,7 @@ async function peer(t,{first=hello,change=null}={}){
    const {op,d}=JSON.parse(bytes.toString());
    if(op===1){
     if(d.authentication!==hash(hash(password+salt)+challenge)){socket.close(4009);return;}
-    assert.deepEqual(d,{rpcVersion:1,eventSubscriptions:6,authentication:hash(hash(password+salt)+challenge)});
+    assert.deepEqual(d,{rpcVersion:1,eventSubscriptions:subscriptions,authentication:hash(hash(password+salt)+challenge)});
     send(2,{negotiatedRpcVersion:1});return;
    }
    assert.equal(op,6);assert.deepEqual(Object.keys(d).sort(),['requestId','requestType']);requests.push(d.requestType);
@@ -84,4 +84,17 @@ test('连接内集合切换、响应串线或目录重复时拒绝采用',async 
   const {port}=await peer(t,{change});
   await assert.rejects(discoverObsScenes({port,password}),{code});
  }
+});
+
+test('Cut 检查拒绝未经选择的请求表，并在观察期间发现 Studio Mode 切换时失效',async t=>{
+ const subscriptions=1|2|4|16|64|128|1024;
+ const unexpected=await peer(t,{subscriptions});
+ await assert.rejects(inspectObsCut({port:unexpected.port,password}),{code:'obs_cut_profile_version'});
+ assert.deepEqual(unexpected.requests,['GetVersion']);
+
+ const changed=await peer(t,{subscriptions,change({send}){
+  send(5,{eventType:'StudioModeStateChanged',eventIntent:1024,eventData:{studioModeEnabled:true}});
+ }});
+ await assert.rejects(inspectObsCut({port:changed.port,password}),{code:'obs_observation_changed'});
+ assert.deepEqual(changed.requests,['GetVersion']);
 });

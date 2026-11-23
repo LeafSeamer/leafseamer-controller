@@ -273,6 +273,8 @@ schema 22的新worker准备必须匹配本次服务启动的人员受理、当�
 
 成功结果 `obs_discovered` 包含 OBS 与 WebSocket 报告的版本、协商 RPC 版本、可用请求摘要、当前场景集合名称、场景 UUID 和当前节目场景 UUID。发现期间集合或场景变化会使本次结果失效，重新读取需重新发起发现。控制批准、受监督派发和设备完成证据由各自流程提供。
 
+隔离验收夹具可用同样的私有管道运行 `node --disallow-code-generation-from-strings dist/cli.mjs inspect-obs-cut`。它核对 OBS 32.0.4、obs-websocket 5.6.3、RPC 1 和已测请求表，并在同一连接读取两个空场景、Studio Mode、当前 Cut 转场、场景转场覆盖及推流状态。`obs_cut_checked` 只表示本次只读检查通过。单画布与无其他写入方由隔离夹具保证，连接关闭后需重新检查。
+
 ### 执行会话与初始控制屏障
 
 schema42将人员执行来源改为实际挑战／响应：`beginManualExecutionChallenge`核验人员令牌、当前持有人、权限和运行装配，生成32字节随机nonce，将挑战与提交审计同事务保存；`completeManualExecutionChallenge`核验实际令牌秘密、完整挑战引用和nonce，响应关联与人员来源／审计同事务提交。挑战绑定实际token、会话、凭据、控制原件、完整执行Binding及原核心观察；截止不超过挑战开始后两秒和原观察期限。相同请求只返回仍有效的原件，不换nonce或续期；错误nonce、不同响应内容、过期及旧单步取证入口均拒绝。
