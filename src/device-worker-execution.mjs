@@ -42,7 +42,7 @@ export function deviceWorkerExecution({execution,binding,runtimeRef,approvalRef,
  need(!signal.aborted,'module_execution_disconnected');
  const preparation=devicePacketPreparation({binding,profile:value.transport_profile_ref,plan:value.primitive_plan_ref,capability:value.capability_ref,
   exit:value.exit,executor,tick,signal:lifetime.signal,failed:failure,limits:{max_entries:32,max_cached_bytes:1048576,max_metadata_bytes:16777216,max_encoders:4}});
- const writer=deviceTransmissionWriter({binding,preparation,executor,action:value.action,currentGate:gate.currentGate,nextIoSequence:gate.nextIoSequence,
+ const writer=deviceTransmissionWriter({binding,preparation,executor,action:value.action,currentGate:gate.currentGate,nextIoSequence:gate.nextIoSequence,nextReportSequence:gate.nextReportSequence,
   tick,signal:lifetime.signal,failed:failure,limits:{max_guards:128,max_transmissions:128,max_metadata_bytes:16777216}});
  const later=job=>{void Promise.resolve(job).catch(failure);};
  return Object.freeze({

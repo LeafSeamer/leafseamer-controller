@@ -9,6 +9,7 @@ import {deviceExecutionGate} from '../dist/device-execution-gate.mjs';
 import {authorizationRevoked} from '../dist/device-authorization-fence.mjs';
 import {createDeviceModule} from '../dist/simulator-control-module.mjs';
 import {decodeExecutionPayload} from '../dist/device-execution-channel.mjs';
+import {openObsCutWriterSession,ObsCutEntryRejected} from '../dist/obs-discovery.mjs';
 import {deviceExecutionVersion} from '../dist/sdk/device-execution.mjs';
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(typeof value==='string'?value:canonicalize(value)).digest('hex');
 const raw=value=>Buffer.from(JSON.stringify(value));
@@ -112,8 +113,9 @@ async function sending(options={}){
  const executor={api_version:'leafseamer-device-primitives/1',async writePrimitive(input){writes++;return options.write?options.write(input,f.module):f.module.execution.writePrimitive(input);}};
  // 控制/授权输入仍为合成原件；门控状态、共用I/O序列及实际模块写入均使用交付实现。
  writer=deviceTransmissionWriter({binding:f.binding,preparation:options.preparation?options.preparation(f.cache):f.cache,executor,action:{action_id:a.action_id,capability_version:a.capability_version,parameters_schema_digest:a.parameters_schema.digest},
-  currentGate:()=>{const value=gateOverride===undefined?gateOwner.currentGate():gateOverride;return options.gate?options.gate(value):value;},nextIoSequence:gateOwner.nextIoSequence,tick:f.clock,signal:f.abort.signal,failed:error=>{gateOwner.close(error);f.errors.push(error);},
-  limits:{max_guards:16,max_transmissions:16,max_metadata_bytes:1048576}});
+  currentGate:()=>{const value=gateOverride===undefined?gateOwner.currentGate():gateOverride;return options.gate?options.gate(value):value;},
+  nextIoSequence:gateOwner.nextIoSequence,nextReportSequence:gateOwner.nextReportSequence,tick:f.clock,signal:f.abort.signal,failed:error=>{gateOwner.close(error);f.errors.push(error);},
+  limits:{max_guards:16,max_transmissions:16,max_metadata_bytes:1048576},entryAtTransport:options.entryAtTransport??false});
  return {...f,encoded,install,dispatch,writer,gateOwner,fence,open,writes:()=>writes,gate:value=>{if(value===null)gateOwner.protect();else gateOverride=value;},gateValue:()=>structuredClone(gateOwner.currentGate())};
 }
 
@@ -511,6 +513,76 @@ test('许可已登记但最终字节出口尚未进入时，AUTH_FENCE仍阻止�
  const ack=await f.gateOwner.receive(raw(authFence(f)));await f.response(ack);assert.equal(ack.body.coverage[0].proof,'discarded_unconsumed');
  release.resolve();const report=await pending;await f.response(report);assert.equal(report.body.disposition,'not_sent');assert.equal(f.writes(),0);
  assert.equal(f.writer.query('permit').consumed,false);assert.equal(f.writer.state.closed,false);assert.equal(f.gateOwner.state.open,true);
+});
+
+test('异步传输预检期间撤权、封闸或到达原期限时，实际出口拒绝消费旧许可',async()=>{
+ for(const mode of ['revoked','run','expired','protected']){
+  const started=deferred(),continueWrite=deferred();
+  const f=await sending({entryAtTransport:true,origin:mode==='run'?automationOrigin():null,async write(input,module){
+   started.resolve();await continueWrite.promise;
+   input.enterTransmission();return module.execution.writePrimitive(input);
+  }});
+  await f.writer.installGuard(raw(f.install));
+  const pending=f.writer.dispatch(raw(f.dispatch));await started.promise;
+  assert.equal(f.writer.query('permit').pending,true);
+  assert.equal(f.writer.query('permit').consumed,false);
+  if(mode==='revoked'||mode==='run'){
+   const cut=mode==='run'?runFence(f,[f.dispatch.body.permit.transmission]):authFence(f);
+   const ack=await f.gateOwner.receive(raw(cut));await f.response(ack);
+   assert.equal(ack.body.coverage[0].proof,'discarded_unconsumed');
+  }else if(mode==='expired')f.tick(80n);
+  else f.gate(null);
+  continueWrite.resolve();
+  const report=await pending;await f.response(report);
+  assert.equal(report.body.proof,'discarded_unconsumed');
+  assert.equal(f.writer.query('permit').evidence,null);
+  assert.deepEqual(await f.writer.dispatch(raw(f.dispatch)),report);
+  assert.equal((await f.module.captureBaseline(f.device)).write_sequence,'0');
+ }
+});
+
+test('异步传输预检结束后的实际许可仅能消费一次，已进入出口的故障保留未知',async()=>{
+ let repeat;
+ const f=await sending({entryAtTransport:true,async write(input,module){
+  await turn();
+  input.enterTransmission();repeat=input.enterTransmission;
+  await module.execution.writePrimitive(input);
+  throw new Error('synthetic_lost_response');
+ }});
+ await f.writer.installGuard(raw(f.install));
+ const report=await f.writer.dispatch(raw(f.dispatch));await f.response(report);
+ assert.equal(report.body.proof,'send_uncertain');
+ assert.equal(f.writer.query('permit').consumed,true);
+ assert.throws(repeat,{code:'transmission_entry_closed'});
+ assert.equal((await f.module.captureBaseline(f.device)).write_sequence,'1');
+});
+
+test('obs_cut_final_guard',{skip:process.env.LEAFSEAMER_OBS_GUARD_TEST!=='1',timeout:20000},async t=>{
+ const {port,password,initial,target}=JSON.parse(fs.readFileSync(0,'utf8'));
+ const controller=new AbortController();
+ const obs=await openObsCutWriterSession({port,password},controller.signal);
+ t.after(()=>controller.abort());
+ for(const allowed of [false,true]){
+  let f;
+  f=await sending({entryAtTransport:true,async write(input){
+   const response=await obs.cutScene({sceneUuid:target,tick:process.hrtime.bigint,nextIoSequence:f.gateOwner.nextIoSequence,
+    evidenceDeadline:process.hrtime.bigint()+5000000000n,signal:input.signal,enterTransmission(){
+     if(!allowed)f.gate(null);
+     try{input.enterTransmission();}
+     catch(error){if(error.code==='transmission_gate_closed')throw new ObsCutEntryRejected();throw error;}
+    }});
+   return {bytes_written:input.bytes.length,response};
+  }});
+  await f.writer.installGuard(raw(f.install));
+  const report=await f.writer.dispatch(raw(f.dispatch));await f.response(report);
+  assert.equal(f.writer.query('permit').consumed,allowed);
+  assert.equal((await obs.sample()).program_scene_uuid,allowed?target:initial);
+  if(!allowed){assert.equal(report.body.proof,'discarded_unconsumed');continue;}
+  const {evidence}=f.writer.query('permit');await f.response(evidence);
+  assert.equal(report.body.proof,'transport_entered');
+  assert.deepEqual(evidence.body.payload.observation.response.frames.map(frame=>frame.kind),['set_send','set_ack','query_send','query_result']);
+  assert.equal(evidence.body.payload.observation.response.frames.at(-1).scene_uuid,target);
+ }
 });
 
 test('撤回清单中的许可不能改签发修订或业务意图后换取not_sent报告',async()=>{

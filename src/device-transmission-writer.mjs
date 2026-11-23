@@ -13,9 +13,10 @@ const max=99999999999999999999n;
 // 普通、非面板、无需参考时间的首次发送路径。其余路径须由各自完整处理器接入。
 // currentGate由同设备闸所有者同步提供已采用OPEN投影；该所有者负责FENCE/DENY/保护时立即撤下投影。
 // nextIoSequence与该所有者共用同一设备序列，不能由请求指定；不接收trusted/passed等布尔许可。
-export function deviceTransmissionWriter({binding,preparation,executor,action,currentGate,nextIoSequence,tick,signal,failed,limits}){
+export function deviceTransmissionWriter({binding,preparation,executor,action,currentGate,nextIoSequence,nextReportSequence,tick,signal,failed,limits,entryAtTransport=false}){
  need(executor?.api_version==='leafseamer-device-primitives/1'&&typeof executor.writePrimitive==='function'&&typeof currentGate==='function'&&
-  typeof nextIoSequence==='function'&&typeof tick==='function'&&signal instanceof AbortSignal&&typeof failed==='function','transmission_configuration');
+  typeof nextIoSequence==='function'&&typeof nextReportSequence==='function'&&typeof tick==='function'&&signal instanceof AbortSignal&&typeof failed==='function'&&
+  typeof entryAtTransport==='boolean','transmission_configuration');
  need(limits&&Number.isSafeInteger(limits.max_guards)&&limits.max_guards>0&&limits.max_guards<=4096&&
   Number.isSafeInteger(limits.max_transmissions)&&limits.max_transmissions>0&&limits.max_transmissions<=4096&&
   Number.isSafeInteger(limits.max_metadata_bytes)&&limits.max_metadata_bytes>0&&limits.max_metadata_bytes<=67108864,'transmission_capacity_profile');
@@ -114,25 +115,44 @@ export function deviceTransmissionWriter({binding,preparation,executor,action,cu
  }
  async function write(entry,installed){
   const body=entry.frame.body,packetRef={object_id:body.packet.packet_id,digest:body.packet.packet_digest};
-  function discard(){entry.order=String(nextIoSequence());entry.result=report(entry,'not_sent','discarded_unconsumed');return entry.result;}
+  function discard(){entry.order=String(nextReportSequence());entry.result=report(entry,'not_sent','discarded_unconsumed');return entry.result;}
   try{
    if(checkDispatch(entry.frame,installed).revoked)return discard();
    return await preparation.withPacket(body.prepare_id,packetRef,async bytes=>{
-    const {live,packet,revoked}=checkDispatch(entry.frame,installed);if(revoked)return discard();need(!writing,'transmission_busy');
+    const {packet,revoked}=checkDispatch(entry.frame,installed);if(revoked)return discard();need(!writing,'transmission_busy');
     need(bytes.length===packet.byte_length&&'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex')===packet.sha256,'transmission_packet_bytes');
-    const order=nextIoSequence();need(typeof order==='bigint'&&order>lastOrder&&order<=max,'transmission_order');lastOrder=order;
-    // 最后复核至许可消费和进入传输之间不await；消费后的任何异常均保留unknown。
-    entry.order=String(order);entry.enteredTick=String(live.t);entry.consumed=true;writing=true;
+    let callbackOpen=true,refused=false;
+    // 固定传输适配器可先异步预检。实际出口须同步调用一次；封闸读账本不等待预检。
+    function enterTransmission(){
+     need(callbackOpen&&!entry.consumed,'transmission_entry_closed');
+     callbackOpen=false;
+     let live;
+     try{
+      const checked=checkDispatch(entry.frame,installed);
+      need(!checked.revoked,'transmission_authorization_revoked');
+      live=checked.live;
+     }catch(error){refused=true;throw error;}
+     const order=nextIoSequence();need(typeof order==='bigint'&&order>lastOrder&&order<=max,'transmission_order');lastOrder=order;
+     entry.order=String(order);entry.enteredTick=String(live.t);entry.consumed=true;
+    }
+    writing=true;
     try{
-     const result=await executor.writePrimitive({device_id:bound.device_id,device_session_id:bound.device_session_id,bytes,signal:abort.signal});
+     if(!entryAtTransport)enterTransmission();
+     const result=await executor.writePrimitive({device_id:bound.device_id,device_session_id:bound.device_session_id,bytes,signal:abort.signal,
+      ...(entryAtTransport&&{enterTransmission})});
+     need(entry.consumed,'transmission_entry_missing');
      if(closed||signal.aborted)throw new DeviceExecutionError('transmission_closed');
      need(result&&Number.isInteger(result.bytes_written)&&result.bytes_written===packet.byte_length,'transmission_write_uncertain');
      const observation={observation_id:crypto.randomUUID(),permit_id:body.permit.permit_id,transmission_id:body.permit.transmission.transmission_id,
       packet_ref:body.permit.transmission.packet_ref,bytes_written:result.bytes_written,response:structuredClone(result.response),observed_tick_ns:String(now())};
      need(Buffer.byteLength(canonicalize(observation))<=16384,'transmission_observation_capacity');
      entry.observation=frozen(observation);entry.result=report(entry,'in_flight','transport_entered',entry.observation);entry.evidence=evidence(entry);return entry.result;
-    }catch(error){entry.evidence=null;entry.result=report(entry,'unknown','send_uncertain');stop(error);return entry.result;}
-    finally{writing=false;}
+    }catch(error){
+     if(refused&&!entry.consumed)return discard();
+     entry.order??=String(nextReportSequence());
+     entry.evidence=null;entry.result=report(entry,'unknown','send_uncertain');stop(error);return entry.result;
+    }
+    finally{callbackOpen=false;writing=false;}
    });
   }catch(error){stop(error);throw error;}finally{entry.finished=true;}
  }

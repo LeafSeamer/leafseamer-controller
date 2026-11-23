@@ -246,6 +246,8 @@ export function deviceExecutionGate({binding,transmissions,tick,signal,failed,li
    return close(frame);
   }catch(error){stop(error);throw error;}},
   nextIoSequence(){try{need(live(),'gate_not_open');return next();}catch(error){stop(error);throw error;}},
+  // 拒发报告沿用同一序列；关闭的闸仍可记录事实，终端会话不得再报告。
+  nextReportSequence(){try{current();return next();}catch(error){stop(error);throw error;}},
   // 本地保护撤下开放与屏障；不生成远端ACK，不宣称传输已排空。
   protect(){try{current();withdraw();next();}catch(error){stop(error);throw error;}},
   // 会话所有者已进入终端保护时只撤资格；不以故障回调递归断开待发送的关闭ACK。
