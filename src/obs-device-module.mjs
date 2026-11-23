@@ -1,7 +1,7 @@
 import {canonical, digest} from './auth-clock-value.mjs';
 import {ObsDiscoveryError, openObsCutSession} from './obs-discovery.mjs';
 
-const identity = Object.freeze({kind: 'physical', model: 'obs.studio', revision: '1'});
+export const obsDeviceIdentity = Object.freeze({kind: 'physical', model: 'obs.studio', revision: '1'});
 const document = {
   type: 'object', additionalProperties: false, required: ['sample_sequence', 'program_scene_uuid'],
   properties: {
@@ -14,6 +14,7 @@ const catalog = {
   state_schema: {schema_id: 'leafseamer.obs.program-scene.1', dialect: 'https://json-schema.org/draft/2020-12/schema',
     document, digest: digest(document)}
 };
+export const obsDeviceCatalog = () => structuredClone(catalog);
 const need = (ok, code) => { if (!ok) throw new ObsDiscoveryError(code); };
 
 // 凭据由固定装配在内存中提供；只读模块接口不包含任意 RPC 或发送出口。
@@ -50,7 +51,7 @@ export function createObsDeviceModule({resource, password, signal}) {
         connection.assertCurrent();
         matches(connection.initial);
         session = input.device_session_id;
-        return {...identity};
+        return {...obsDeviceIdentity};
       } catch (error) {
         retire();
         throw error;
@@ -58,8 +59,8 @@ export function createObsDeviceModule({resource, password, signal}) {
     },
     async proposeCatalog(input) {
       current(input);
-      need(canonical(input.identity) === canonical(identity), 'device_identity');
-      return structuredClone(catalog);
+      need(canonical(input.identity) === canonical(obsDeviceIdentity), 'device_identity');
+      return obsDeviceCatalog();
     },
     async captureBaseline(input) {
       const active = current(input);

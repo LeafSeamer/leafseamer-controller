@@ -1,6 +1,7 @@
 import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
+import {selectObsWorkerResource} from './obs-module-profile.mjs';
 
 export class WorkerDependencyError extends Error {constructor(code){super(code);this.name='WorkerDependencyError';this.code=code;}}
 const need=(ok,code)=>{if(!ok)throw new WorkerDependencyError('worker_dependency_'+code);};
@@ -14,9 +15,9 @@ function device(db,service,deviceId){
  const row=db.prepare('SELECT descriptor_body,descriptor_digest FROM device_record WHERE device_id=?').raw().get(deviceId);need(row,'device_missing');
  const body=read(row[0].toString('utf8'),row[1]);return {body,ref:reference(service,'device',deviceId,body)};
 }
-function resource(db,service,deviceId){
+function resource(db,service,deviceId,current=device(db,service,deviceId)){
  const row=db.prepare('SELECT body_jcs,body_digest FROM virtual_device_resource WHERE device_id=?').raw().get(deviceId);need(row,'resource_provider_unavailable');
- const body=read(row[0],row[1]),current=device(db,service,deviceId);
+ const body=read(row[0],row[1]);
  need(body.backend==='core_virtual_device/1'&&same(body.device_ref,current.ref)&&current.body.device_kind==='simulator'&&
   same(body.external_resources,[])&&body.resource_id&&body.device_id===deviceId,'resource_binding');
  return {body,ref:reference(service,'resource',body.resource_id,body),device:current.ref};
@@ -56,19 +57,28 @@ export function installationDependencies(db,service,selected){
  const byDevice=new Map(),links=[];
  for(const role of selected.resolution.bindings){
   for(const ref of role.values){
-   const target=resource(db,service,ref.object_id);need(same(target.device,ref),'device_stale');byDevice.set(ref.object_id,target);
-   const matches=evidence.documents.filter(value=>value.template.device_role===role.role_id&&value.template.device_kind==='simulator');
+   const current=device(db,service,ref.object_id),kind=current.body.device_kind;
+   need(same(current.ref,ref),'device_stale');
+   need(kind==='simulator'||kind==='obs','resource_provider_unavailable');
+   const matches=evidence.documents.filter(value=>value.template.device_role===role.role_id&&value.template.device_kind===kind);
    need(matches.length===1,'footprint_unavailable');const template=matches[0].template;
+   const obs=kind==='obs'?selectObsWorkerResource(db,service,selected,ref,template):null;
+   const target=obs?{ref:obs.resource_ref,device:current.ref}:resource(db,service,ref.object_id,current);
+   byDevice.set(ref.object_id,target);
    // 全部动作均进入最坏足迹，包括本次未批准/未选择的动作。未知资源或依赖不能当空集合。
    for(const action of template.actions){
     need(action.dependencies.length===0,'dependency_provider_unavailable');
     need([...action.resources,...action.read_set,...action.write_set].every(value=>value==='device'),'resource_alias_unavailable');
    }
    links.push({role_id:role.role_id,device_ref:target.device,resource_ref:target.ref,
-    action_ids:template.actions.map(value=>value.action_id).sort(),trigger_ids:template.triggers.map(value=>value.trigger_id).sort(),template_digest:hash(template)});
+    action_ids:template.actions.map(value=>value.action_id).sort(),trigger_ids:template.triggers.map(value=>value.trigger_id).sort(),template_digest:hash(template),
+    ...(obs&&{obs_binding:obs})});
   }
  }
  const devices=[...byDevice.keys()].sort();need(devices.length>=1&&devices.length<=64&&links.length<=256,'capacity');
+ if(links.some(link=>link.obs_binding))need(links.length===1&&devices.length===1&&
+  selected.permissions.every(permission=>Array.isArray(permission.scope?.action_ids)&&permission.scope.action_ids.length===0&&
+   Array.isArray(permission.scope?.trigger_ids)&&permission.scope.trigger_ids.length===0),'obs_scope');
  const ordered=devices.map(key=>byDevice.get(key));
  return freeze({capability_evidence_digest:raw[1],devices:ordered.map(value=>value.device),resources:ordered.map(value=>value.ref),links:links.sort((a,b)=>canonicalize(a)<canonicalize(b)?-1:1)});
 }

@@ -21,7 +21,8 @@ const auditFor = (transaction_id, device_id, resource_ref) => ({
   kind: 'obs_local_resource_registered', transaction_id, device_id, resource_ref
 });
 
-function currentResource(db, service, deviceId) {
+export function readRegisteredObsResource(db, service, deviceId) {
+  need(db.inTransaction && Number(service.schema_revision) >= 98, 'writer');
   const row = db.prepare(`SELECT r.body_jcs,r.body_digest,d.descriptor_digest,c.transaction_id,c.audit_jcs
     FROM obs_local_resource r JOIN obs_local_resource_commit c USING(transaction_id,device_id)
     JOIN device_record d USING(device_id) WHERE r.device_id=?`).raw().get(deviceId);
@@ -51,7 +52,7 @@ export async function registerObsResource(db, service, input) {
     const prior = db.prepare('SELECT device_id,input_digest FROM obs_local_resource WHERE request_id=?').raw().get(request_id);
     if (prior) {
       need(prior[0] === device_id && prior[1] === inputDigest, 'request_conflict');
-      return {prior: currentResource(db, service, device_id)};
+      return {prior: readRegisteredObsResource(db, service, device_id)};
     }
     const row = db.prepare('SELECT descriptor_body,descriptor_digest FROM device_record WHERE device_id=?').raw().get(device_id);
     need(row, 'device_required');
@@ -97,7 +98,7 @@ export async function observeObsResource(db, service, input, secrets) {
   need((fields === 'device_id,password,samples' || (fields === 'device_id,samples,secret_ref' && secrets)) &&
     id(input.device_id) && Number.isInteger(input.samples) && input.samples >= 1 && input.samples <= 8, 'input');
   const {device_id, samples, secret_ref} = input;
-  const current = db.transaction(() => currentResource(db, service, device_id)).immediate;
+  const current = db.transaction(() => readRegisteredObsResource(db, service, device_id)).immediate;
   const resource = current();
   const lifetime = new AbortController();
   const binding = {device_id, device_session_id: randomUUID(), signal: lifetime.signal};

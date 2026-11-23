@@ -1,6 +1,7 @@
 import {canonical,digest} from './auth-clock-value.mjs';
 import {IdentityError} from './identity-error.mjs';
 import {readDeviceFootprint} from './device-footprint-qualification.mjs';
+import {isObsModuleEntry,obsModuleDefinition} from './obs-module-profile.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('device_capabilities_'+code);};
 const same=(a,b)=>canonical(a)===canonical(b);
 const read=(text,expected)=>{const value=JSON.parse(text);need(canonical(value)===text&&digest(value)===expected,'integrity');return value;};
@@ -23,6 +24,10 @@ export function readCurrentDeviceCatalog(db,{service,device,runtime,selected,dep
   same(q.approval_ref,intent.extension_binding.approval_ref)&&same(q.installation_ref,intent.extension_binding.installation_ref)&&same(q.platform_profile_ref,intent.extension_binding.platform_profile_ref),'binding');
  const links=dependencies.links.filter(link=>link.device_ref.object_id===device);
  need(links.length===1&&same(links[0].device_ref,q.device_ref)&&same(links[0].resource_ref,q.resource_ref)&&links[0].template_digest===q.template_digest,'binding');
+ if(descriptor.device_kind==='obs')need(isObsModuleEntry(content,selected.entry)&&links[0].obs_binding&&q.obs_binding&&
+  same(links[0].obs_binding,q.obs_binding)&&
+  q.qualification===obsModuleDefinition.qualification&&q.module_digest===obsModuleDefinition.module&&
+  q.protocol_io_policy_digest===obsModuleDefinition.policy,'binding');
  const evidenceRow=db.prepare('SELECT body_jcs,body_digest FROM extension_approval_capabilities WHERE approval_id=?').raw().get(q.approval_ref.object_id);
  need(evidenceRow&&evidenceRow[1]===dependencies.capability_evidence_digest,'binding');const evidence=read(...evidenceRow);
  need(same(evidence.intake_ref,content.intake_ref)&&evidence.manifest_digest===q.manifest_digest&&evidence.artifact_set_digest===q.artifact_set_digest,'binding');

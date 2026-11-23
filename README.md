@@ -291,6 +291,8 @@ schema 22的新worker准备必须匹配本次服务启动的人员受理、当�
 
 随后用 `observe-obs-resource --data-dir ABSOLUTE_PATH --secret-dir SECRET_PATH`，私有管道传入 `device_id`、`samples` 和 `secret_ref`。资源、所属 Controller、版本或用途不匹配时拒绝。nonce 账本遗失或恢复了旧备份后，先在维护状态生成新的主密钥和账本，再重新封存凭据。该入口当前用于 Linux 本机观察。
 
+Controller 的 OBS 只读目录资格绑定安装包内的 `obs-device-module.mjs`、`obs-module-policy.json` 和 `obs-module-capability.json`。批准的扩展配置只含当前 `resource_ref` 与该资源的 `secret_ref`。Worker 依赖与目录核验拒绝其他模块或策略、跨资源引用及任何动作或触发范围。通过只读目录核验的样本也必须使用登记的场景 UUID，且序号在同一设备会话内连续。原生 Worker 的秘密装载仍需接入。
+
 ### 执行会话与初始控制屏障
 
 schema42将人员执行来源改为实际挑战／响应：`beginManualExecutionChallenge`核验人员令牌、当前持有人、权限和运行装配，生成32字节随机nonce，将挑战与提交审计同事务保存；`completeManualExecutionChallenge`核验实际令牌秘密、完整挑战引用和nonce，响应关联与人员来源／审计同事务提交。挑战绑定实际token、会话、凭据、控制原件、完整执行Binding及原核心观察；截止不超过挑战开始后两秒和原观察期限。相同请求只返回仍有效的原件，不换nonce或续期；错误nonce、不同响应内容、过期及旧单步取证入口均拒绝。

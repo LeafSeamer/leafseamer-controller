@@ -9,6 +9,7 @@ import {bindDeviceExecution} from './device-execution-binding.mjs';
 import {qualifyDeviceFootprint,readDeviceFootprint} from './device-footprint-qualification.mjs';
 import {registerDeviceAutomation,readDeviceAutomationRegistration} from './device-automation-binding.mjs';
 import {qualifyDeviceEventFrame} from './device-event-qualification.mjs';
+import {obsModuleDefinition} from './obs-module-profile.mjs';
 
 const digest=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
 const hash=value=>digest(canonicalize(value));
@@ -23,11 +24,12 @@ const controlTemplate=JSON.parse(fs.readFileSync(new URL('./simulator-control-ca
 const definitions=Object.freeze([
  frozen({module:moduleDigest,policy:policyDigest,identity,catalog:simulatorCatalog(),qualification:'fixed_memory_read_only/1'}),
  frozen({module:controlModuleDigest,policy:controlPolicyDigest,identity:{kind:'virtual',model:'leafseamer.simulator.control',revision:'1'},
-  catalog:simulatorControlCatalog(),template:controlTemplate,qualification:'fixed_memory_control_catalog/1'})
+  catalog:simulatorControlCatalog(),template:controlTemplate,qualification:'fixed_memory_control_catalog/1'}),
+ frozen(obsModuleDefinition)
 ]);
 function read(body,digest){const value=JSON.parse(body);need(canonicalize(value)===body&&hash(value)===digest,'module_catalog_integrity');return value;}
 
-// 固定内存模拟器的目录/基线资格提供者。可写模块也须独立匹配完整模板与制品，
+// 固定设备模块的目录/基线资格提供者。可写模块也须独立匹配完整模板与制品，
 // 此处采样资格不授发送许可或完成证明，其他模块/型号不能凭自报身份取得资格。
 // current/select由核心闭包装配；调用方不提交批准、静态模板、资源或制品摘要。
 export function deviceCatalogStore({db,current,select}){
@@ -39,17 +41,21 @@ export function deviceCatalogStore({db,current,select}){
   const module=content.inventory.files.find(f=>f.file_id===entry.file_id),policy=content.inventory.files.find(f=>f.file_id===entry.io_policy_file_id);
   const definition=definitions.find(value=>value.module===module?.digest&&value.policy===policy?.digest);
   need(definition,'module_catalog_qualification');
-  if(definition.template)need(content.manifest.api_versions.includes('leafseamer-device-primitives/1'),'module_catalog_qualification');
+  if(definition.qualification==='fixed_memory_control_catalog/1')
+   need(content.manifest.api_versions.includes('leafseamer-device-primitives/1'),'module_catalog_qualification');
   const links=dependencies.links.filter(link=>link.device_ref.object_id===device);need(links.length===1,'module_catalog_scope');
+  const link=links[0],obs=definition===obsModuleDefinition;
+  need(obs===Boolean(link.obs_binding)&&(!obs||same(link.resource_ref,link.obs_binding.resource_ref)),'module_catalog_scope');
   const evidenceRow=db.prepare('SELECT body_jcs,body_digest FROM extension_approval_capabilities WHERE approval_id=?').raw().get(runtime.binding.launch_intent.extension_binding.approval_ref.object_id);
   need(evidenceRow&&evidenceRow[1]===dependencies.capability_evidence_digest,'module_catalog_template');
-  const evidence=read(...evidenceRow),templates=evidence.documents.filter(value=>hash(value.template)===links[0].template_digest);
+  const evidence=read(...evidenceRow),templates=evidence.documents.filter(value=>hash(value.template)===link.template_digest);
   need(templates.length===1&&(definition.template?same(templates[0].template,definition.template):same(templates[0].template.state_schema,definition.catalog.state_schema)),'module_catalog_template');
   return {installation_ref:runtime.binding.launch_intent.extension_binding.installation_ref,
    approval_ref:runtime.binding.launch_intent.extension_binding.approval_ref,platform_profile_ref:runtime.binding.launch_intent.extension_binding.platform_profile_ref,
-   device_ref:links[0].device_ref,resource_ref:links[0].resource_ref,template_digest:links[0].template_digest,
+   device_ref:link.device_ref,resource_ref:link.resource_ref,template_digest:link.template_digest,
    manifest_digest:content.receipt.manifest_digest,artifact_set_digest:content.receipt.artifact_set_digest,
-   module_digest:definition.module,protocol_io_policy_digest:definition.policy,qualification:definition.qualification};
+   module_digest:definition.module,protocol_io_policy_digest:definition.policy,qualification:definition.qualification,
+   ...(obs&&{obs_binding:link.obs_binding})};
  }
  function active(frame,runtime){
   need(frame.binding.runtime_binding_ref.digest===runtime.ref.digest&&frame.binding.runtime_binding_ref.object_id===runtime.ref.object_id,'module_catalog_runtime');
@@ -61,8 +67,8 @@ export function deviceCatalogStore({db,current,select}){
  }
  function checkSession(channel,device,session){
   // 持久会话终态也参与检查，历史批准不能在断开或新连接后复活。
-  const last=db.prepare("SELECT frame_jcs,message_type FROM device_module_frame WHERE channel_id=? AND direction='w2c' AND message_type IN ('CONNECTED','DISCONNECTED') AND json_extract(frame_jcs,'$.body.device_id')=? ORDER BY length(sequence) DESC,sequence DESC LIMIT 1").raw().get(channel,device);
-  need(last&&last[1]==='CONNECTED'&&JSON.parse(last[0]).body.device_session_id===session,'module_session');
+  const last=db.prepare("SELECT frame_jcs,frame_digest,message_type FROM device_module_frame WHERE channel_id=? AND direction='w2c' AND message_type IN ('CONNECTED','DISCONNECTED') AND json_extract(frame_jcs,'$.body.device_id')=? ORDER BY length(sequence) DESC,sequence DESC LIMIT 1").raw().get(channel,device);
+  need(last&&last[2]==='CONNECTED'&&read(last[0],last[1]).body.device_session_id===session,'module_session');
  }
  function currentCatalog(channel,device,session){
   const runtime=current();return db.transaction(()=>{
@@ -100,11 +106,14 @@ export function deviceCatalogStore({db,current,select}){
     }else{
      const approved=catalog(channel,body.device_id,body.device_session_id);need(same(approved.body.qualification,qualification),'module_catalog_stale');
      const value=body.value;
-     need(value&&Object.keys(value).sort().join(',')===(definition.template?'sample_sequence,value,write_sequence':'sample_sequence,value')&&
+     const obs=definition===obsModuleDefinition;
+     const shape=obs?'program_scene_uuid,sample_sequence':definition.template?'sample_sequence,value,write_sequence':'sample_sequence,value';
+     need(value&&Object.keys(value).sort().join(',')===shape&&
       typeof value.sample_sequence==='string'&&/^[1-9][0-9]{0,19}$(?![\s\S])/.test(value.sample_sequence),'module_sample_schema');
      const previous=db.prepare('SELECT sample_sequence,body_jcs,body_digest FROM device_baseline_sample WHERE approval_id=? ORDER BY length(sample_sequence) DESC,sample_sequence DESC LIMIT 1').raw().get(approved.id);
      need(BigInt(value.sample_sequence)===BigInt(previous?.[0]??'0')+1n,'module_sample_sequence');
-     if(definition.template){
+     if(obs)need(qualification.obs_binding.scene_uuids.includes(value.program_scene_uuid),'module_sample_schema');
+     else if(definition.template){
       need(Number.isInteger(value.value)&&!Object.is(value.value,-0)&&value.value>=-2147483648&&value.value<=2147483647&&
        typeof value.write_sequence==='string'&&/^(?:0|[1-9][0-9]{0,19})$(?![\s\S])/.test(value.write_sequence)&&
        (value.write_sequence!=='0'||value.value===0),'module_sample_schema');

@@ -1,0 +1,14 @@
+{
+  "format": "leafseamer-obs-io-policy/1",
+  "transport": "local_authenticated_obs_websocket",
+  "address": "127.0.0.1",
+  "profile": "obs_isolated_empty_cut/1",
+  "scope": "registered_resource",
+  "operations": {
+    "connect": "read_only",
+    "catalog": "read_only",
+    "capture": "read_only",
+    "disconnect": "read_only"
+  },
+  "writes": []
+}

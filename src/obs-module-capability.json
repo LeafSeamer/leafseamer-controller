@@ -1,0 +1,31 @@
+{
+  "template_version": "extension-capability-template/1",
+  "template_id": "leafseamer.obs.read-only",
+  "device_role": "device",
+  "device_kind": "obs",
+  "actions": [],
+  "triggers": [],
+  "state_schema": {
+    "schema_id": "leafseamer.obs.program-scene.1",
+    "dialect": "https://json-schema.org/draft/2020-12/schema",
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sample_sequence",
+        "program_scene_uuid"
+      ],
+      "properties": {
+        "sample_sequence": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,19}(?![\\s\\S])"
+        },
+        "program_scene_uuid": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}(?![\\s\\S])"
+        }
+      }
+    },
+    "digest": "sha256:b32d09ac372e363e6cc0fa41ee8c8c49c87d70df12b3e2518553eb9538705ad8"
+  }
+}
