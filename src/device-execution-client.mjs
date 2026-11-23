@@ -36,6 +36,9 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
     if(frame.type==='GUARD_ACK'&&negotiation){const result=await journal.receiveCommandGuard(payload);check();
      if(pending){if(pending.type!=='GUARD_ACK'||pending.message!==frame.reply_to)throw new DeviceExecutionError('execution_guard_reply');pending.resolve(result);}return;
     }
+    if(frame.type==='RUN_FENCE_ACK'&&negotiation){const result=await journal.receiveRunFence(payload);check();
+     if(pending){if(pending.type!==frame.type||pending.message!==frame.reply_to)throw new DeviceExecutionError('execution_run_fence_reply');pending.resolve(result);}return;
+    }
     if(['SEND_REPORT','EVIDENCE_CANDIDATE'].includes(frame.type)&&negotiation){const result=await journal.receiveCommandDispatch(payload);
      if(pending){if(pending.type!=='DISPATCH_RESULT'||pending.permit_id!==result.value.permit_id)throw new DeviceExecutionError('execution_dispatch_reply');
       if(result.evidence||result.report?.frame.body.socket_callback_observation_ref===null)pending.resolve(result);}return;
@@ -87,8 +90,8 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
      if(selected.replay){if(!selected.ack)throw new DeviceExecutionError('execution_guard_result_unknown');return journal.commandGuardHistory(selected.value.guard_id);}
      let resolve,reject;const response=new Promise((yes,no)=>{resolve=yes;reject=no;});response.catch(()=>{});
      call={type:'GUARD_ACK',message:selected.request.frame.message_id,resolve,reject,timer:setTimeout(()=>close(new DeviceExecutionError('execution_guard_timeout')),5000)};pending=call;
-     await Promise.all([journal.sendCommandGuard(transport,selected.value.guard_id),response]);check();
-     return qualify?journal.currentCommandGuard(selected.value.guard_id):journal.commandGuardHistory(selected.value.guard_id);
+     const [,history]=await Promise.all([journal.sendCommandGuard(transport,selected.value.guard_id),response]);check();
+     return qualify?journal.currentCommandGuard(selected.value.guard_id):history;
     }catch(error){close(error);throw error;}finally{if(call){clearTimeout(call.timer);if(pending===call)pending=null;}encoding=false;}
    },
    async dispatchCommand(id){
@@ -97,7 +100,7 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
      if(selected.replay){if(!selected.report)throw new DeviceExecutionError('execution_dispatch_result_unknown');return journal.commandDispatchHistory(selected.value.permit_id);}
      let resolve,reject;const response=new Promise((yes,no)=>{resolve=yes;reject=no;});response.catch(()=>{});
      call={type:'DISPATCH_RESULT',permit_id:selected.value.permit_id,resolve,reject,timer:setTimeout(()=>close(new DeviceExecutionError('execution_dispatch_timeout')),5000)};pending=call;
-     const [,result]=await Promise.all([journal.sendCommandDispatch(transport,selected.value.permit_id),response]);return result;
+     const [,result]=await Promise.all([journal.sendCommandDispatch(transport,selected),response]);return result;
     }catch(error){close(error);throw error;}finally{if(call){clearTimeout(call.timer);if(pending===call)pending=null;}encoding=false;}
    },
    async closeCommand(id){
@@ -110,6 +113,16 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
      let resolve,reject;const response=new Promise((yes,no)=>{resolve=yes;reject=no;});response.catch(()=>{});
      call={type:'FENCE_ACK',closure:true,message:selected.request.frame.message_id,resolve,reject,timer:setTimeout(()=>close(new DeviceExecutionError('execution_closure_timeout')),5000)};pending=call;
      const [,result]=await Promise.all([journal.sendCommandClosure(transport,id),response]);return {...result,settlement:journal.settleCommand(id)};
+    }catch(error){close(error);throw error;}finally{if(call){clearTimeout(call.timer);if(pending===call)pending=null;}encoding=false;}
+   },
+   async applyRunFence(input){
+    check();if(pending||encoding)throw new DeviceExecutionError('execution_control_busy');encoding=true;let call;
+    try{const selected=await journal.prepareRunFence(input);check();
+     if(selected.replay){if(!selected.ack)throw new DeviceExecutionError('execution_run_fence_result_unknown');return selected;}
+     let resolve,reject;const response=new Promise((yes,no)=>{resolve=yes;reject=no;});response.catch(()=>{});
+     call={type:'RUN_FENCE_ACK',message:selected.request.frame.message_id,resolve,reject,
+      timer:setTimeout(()=>close(new DeviceExecutionError('execution_run_fence_timeout')),5000)};pending=call;
+     const [,result]=await Promise.all([journal.sendRunFence(transport,selected.request.ref.id),response]);return result;
     }catch(error){close(error);throw error;}finally{if(call){clearTimeout(call.timer);if(pending===call)pending=null;}encoding=false;}
    },
    async cleanupCommand(id){

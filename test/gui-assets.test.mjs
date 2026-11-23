@@ -43,6 +43,19 @@ test('摘要漂移、跨库站点、未知资源与SDK版本均拒绝启动', t 
 test('GUI不允许装配到明文HTTP服务', async () => {
   await assert.rejects(startController({guiDirectory: path.resolve('dist')}), /gui_requires_https/);
 });
+test('受信部署固定 GUI 清单和配对 Seamer 身份', t => {
+  const f = fixture(t);
+  const seamer = {service_id: crypto.randomUUID(), database_instance_id: crypto.randomUUID(), base_url: 'https://127.0.0.1:4443', service_label: 'Seamer'};
+  f.files['site.json'] = JSON.stringify({...f.site, format: 'leafseamer.gui.site/2', seamer}); f.save();
+  const pin = () => 'sha256:' + hash(fs.readFileSync(path.join(f.root, 'gui-manifest.json')));
+  const manifestSha256 = pin();
+  const load = (sha = manifestSha256, peer = seamer) => loadGuiAssets(f.root, f.identity, 'https://127.0.0.1:3443', {manifestSha256: sha, seamerIdentity: peer});
+  assert.equal(send(load(), '/site.json').status, 200);
+  assert.throws(() => load(manifestSha256, {...seamer, database_instance_id: crypto.randomUUID()}), /gui_seamer_scope/);
+  f.files['index.html'] = '<!doctype html><title>Changed</title>'; f.save();
+  assert.throws(() => load(), /gui_manifest_drift/);
+  assert.equal(send(load(pin())).status, 200);
+});
 test('新版固定Seamer配置只扩展connect-src，拒绝通配和配置混用',t=>{
  const f=fixture(t),seamer={service_id:crypto.randomUUID(),database_instance_id:crypto.randomUUID(),service_label:'Seamer',base_url:'https://127.0.0.1:4443'};
  f.files['site.json']=JSON.stringify({...f.site,format:'leafseamer.gui.site/2',seamer});f.save();

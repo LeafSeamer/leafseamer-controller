@@ -24,9 +24,10 @@ const output = path.join(root, 'logs/native-clock/build', process.platform + '-'
 const artifact = path.join(root, 'logs/native-clock/artifacts', process.platform + '-' + process.arch);
 function run(args) {
   const result = spawnSync('cmake', args, {cwd: root, stdio: 'inherit', windowsHide: true});
-  if (result.error || result.status !== 0) throw new Error('native_build_failed');
+  if (result.error) throw new Error('native_cmake_unavailable', {cause: result.error});
+  if (result.status !== 0) throw new Error('native_build_failed');
 }
-const configure = ['-S', path.join(root, 'native'), '-B', output, '-DCMAKE_BUILD_TYPE=Release', '-DNODE_INCLUDE_DIR=' + options['--headers']];
+const configure = ['--fresh', '-S', path.join(root, 'native'), '-B', output, '-DCMAKE_BUILD_TYPE=Release', '-DNODE_INCLUDE_DIR=' + options['--headers']];
 if (process.platform === 'win32') configure.push('-G', 'Visual Studio 17 2022', '-A', 'x64', '-DNODE_LIBRARY=' + options['--node-library'], '-DSQLITE_SOURCE_DIR=' + sqliteSource);
 run(configure); run(['--build', output, '--config', 'Release']);
 const binary = fs.readFileSync(path.join(output, process.platform === 'win32' ? 'Release' : '', 'leafseamer_clock.node'));
@@ -53,6 +54,8 @@ if (process.platform === 'win32') {
   fs.writeFileSync(path.join(artifact, 'process-host-manifest.json'), JSON.stringify({format: 'leafseamer-process-host/1',
     platform: process.platform, arch: process.arch, binary_sha256: hash(host),
     source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-host.cc'))),
+    time_provider_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-time-provider.h'))),
+    journal_time_provider_sha256: hash(fs.readFileSync(path.join(root, 'native/process-journal-time-provider.sql'))),
     worker_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-worker.h'))),
     creation_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-creation.h'))),
     module_link_source_sha256: hash(fs.readFileSync(path.join(root, 'native/process-module-link.h'))),

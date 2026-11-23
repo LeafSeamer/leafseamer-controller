@@ -55,7 +55,19 @@ static DWORD active(HANDLE job) {
   require(QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &info, sizeof(info), nullptr) != 0, "group_observation_failed");
   return info.ActiveProcesses;
 }
+static void verifyProcessImage(HANDLE process,const std::wstring& executable,Handle& loaded){
+  std::vector<wchar_t> image(32768);DWORD imageSize=static_cast<DWORD>(image.size());
+  require(QueryFullProcessImageNameW(process,0,image.data(),&imageSize)!=0,"process_image_failed");
+  Handle expected(CreateFileW(executable.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr));
+  loaded.value=CreateFileW(image.data(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
+  BY_HANDLE_FILE_INFORMATION a{},b{};
+  require(expected.value!=INVALID_HANDLE_VALUE&&loaded.value!=INVALID_HANDLE_VALUE&&
+    GetFileInformationByHandle(expected.value,&a)&&GetFileInformationByHandle(loaded.value,&b)&&
+    a.dwVolumeSerialNumber==b.dwVolumeSerialNumber&&a.nFileIndexHigh==b.nFileIndexHigh&&a.nFileIndexLow==b.nFileIndexLow,
+    "process_image_mismatch");
+}
 #include "process-module-link.h"
+#include "process-time-provider.h"
 #include "process-creation.h"
 #include "process-control.h"
 int wmain(int argc, wchar_t** argv) {
@@ -63,12 +75,14 @@ int wmain(int argc, wchar_t** argv) {
     // 低层入口只由本机可信装配使用，不接受 shell 命令或环境指定的解释器。
     const bool initialize = argc == 3 && std::wstring(argv[1]) == L"--initialize";
     const bool upgrade = argc == 3 && std::wstring(argv[1]) == L"--upgrade";
-    require(initialize || upgrade ? absolute(argv[2]) : (argc >= 4 && absolute(argv[1]) && absolute(argv[2]) && absolute(argv[3])), "process_arguments");
+    const bool upgradeTimeProvider=argc==3&&std::wstring(argv[1])==L"--upgrade-time-provider";
+    const bool journalCommand=initialize||upgrade||upgradeTimeProvider;
+    require(journalCommand ? absolute(argv[2]) : (argc >= 4 && absolute(argv[1]) && absolute(argv[2]) && absolute(argv[3])), "process_arguments");
     require(GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_PIPE, "control_pipe_required");
     require(GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_PIPE, "status_pipe_required");
-    Instance instance(initialize || upgrade ? argv[2] : argv[1]); ProcessJournal journal(instance, initialize, upgrade);
+    Instance instance(journalCommand ? argv[2] : argv[1]); ProcessJournal journal(instance, initialize, upgrade,upgradeTimeProvider);
     if (initialize) { printf("{\"event\":\"process_journal_initialized\",\"runtime_admitted\":false}\n"); fflush(stdout); return 0; }
-    if (upgrade) { printf("{\"event\":\"process_journal_upgraded\",\"changed\":%s,\"schema_revision\":\"5\",\"runtime_admitted\":false}\n", journal.upgraded ? "true" : "false"); fflush(stdout); return 0; }
+    if (upgrade||upgradeTimeProvider) { printf("{\"event\":\"process_journal_upgraded\",\"changed\":%s,\"schema_revision\":\"%s\",\"runtime_admitted\":false}\n", journal.upgraded ? "true" : "false",journal.timeProviderEnabled?"6":"5"); fflush(stdout); return 0; }
     const std::string id = identifier(); const std::wstring jobName = L"Global\\LeafSeamer.Core." + std::wstring(id.begin(), id.end());
     std::unique_ptr<bootstrap::Policy> policy;
     if (argc >= 7 && std::wstring(argv[4]) == L"contained-core-auth") {
@@ -77,8 +91,23 @@ int wmain(int argc, wchar_t** argv) {
     }
     std::unique_ptr<runtime::Protected> protectedRuntime;
     if(policy)protectedRuntime=std::make_unique<runtime::Protected>(policy->manifest);
+    std::unique_ptr<bootstrap::Policy> providerPolicy;
+    for(int i=5;i+1<argc;i+=2)if(std::wstring(argv[i])==L"--time-provider-policy"){
+      require(policy&&!providerPolicy,"time_provider_policy");
+      require(journal.timeProviderEnabled,"time_provider_journal_required");
+      providerPolicy=std::make_unique<bootstrap::Policy>(utf8(argv[i+1]),"leafseamer-time-provider-bootstrap-policy/1");
+      require(providerPolicy->service==policy->service&&providerPolicy->database==policy->database&&
+        providerPolicy->profile==policy->profile&&providerPolicy->clockRevision==policy->clockRevision,"time_provider_scope");
+      require(!protectedRuntime->timeProviderDigest.empty()&&protectedRuntime->timeProviderDigest==providerPolicy->manifestDigest,"time_provider_artifact");
+    }
     std::unique_ptr<bootstrap::Exchange> exchange;
     if (policy) exchange = std::make_unique<bootstrap::Exchange>(*policy, id);
+    std::unique_ptr<bootstrap::Exchange> providerExchange;
+    const auto providerLaunch=providerPolicy?identifier():"";
+    if(providerPolicy){
+      const bootstrap::Domain domain(*policy,exchange->supervisor,exchange->generation,exchange->descriptor,exchange->domainId,exchange->descriptorDigest);
+      providerExchange=std::make_unique<bootstrap::Exchange>(domain,*providerPolicy,providerLaunch);
+    }
     std::unique_ptr<installation::Client> installer;
     for(int i=5;i+1<argc;i+=2)if(std::wstring(argv[i])==L"--installation-peer"){
       require(exchange&&!installer,"installation_config");installer=std::make_unique<installation::Client>(utf8(argv[i+1]));
@@ -112,9 +141,10 @@ int wmain(int argc, wchar_t** argv) {
     const std::wstring executable=protectedRuntime?protectedRuntime->node:argv[2];
     auto childEnvironment=runtime::environment();
     std::wstring command = quote(executable) + L" --disallow-code-generation-from-strings " + quote(argv[3]);
-    for (int i = 4; i < argc; ++i) { if(std::wstring(argv[i])==L"--installation-peer"){require(i+1<argc,"installation_config");++i;continue;}require(wcslen(argv[i]) <= 32768, "argument_capacity"); command += L" " + quote(argv[i]); }
+    for (int i = 4; i < argc; ++i) { const std::wstring argument(argv[i]);if(argument==L"--installation-peer"||argument==L"--time-provider-policy"){require(i+1<argc,"process_arguments");++i;continue;}require(argument!=L"--time-provider-intent","process_arguments");require(wcslen(argv[i]) <= 32768, "argument_capacity"); command += L" " + quote(argv[i]); }
     command += L" --data-dir " + quote(instance.path);
     if (control) command += L" --supervisor-pipe " + quote(control->name) + L" --supervisor-channel " + quote(std::wstring(control->channel.begin(), control->channel.end()));
+    if(providerExchange)command+=L" --time-provider-intent "+quote(loading::wide(providerExchange->intent));
     require(command.size() < 32767, "command_capacity"); PROCESS_INFORMATION pi{};
     journal.begin(id, jobName, exchange ? policy->body : "", exchange ? exchange->descriptor : "", exchange ? exchange->intent : "");
     require(CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, TRUE,
@@ -122,16 +152,10 @@ int wmain(int argc, wchar_t** argv) {
     Handle process(pi.hProcess), thread(pi.hThread); coreInput.reset(); coreOutput.reset(); proofWriter.reset();
     BOOL belongs = FALSE;
     require(IsProcessInJob(process.value, job.value, &belongs) != 0 && belongs && active(job.value) == 1, "process_containment_failed");
-    std::vector<wchar_t> image(32768); DWORD imageSize = static_cast<DWORD>(image.size());
-    require(QueryFullProcessImageNameW(process.value, 0, image.data(), &imageSize) != 0, "process_image_failed");
-    Handle expected(CreateFileW(executable.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr));
-    Handle loaded(CreateFileW(image.data(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr));
-    BY_HANDLE_FILE_INFORMATION a{}, b{};
-    require(expected.value != INVALID_HANDLE_VALUE && loaded.value != INVALID_HANDLE_VALUE &&
-      GetFileInformationByHandle(expected.value, &a) && GetFileInformationByHandle(loaded.value, &b) &&
-      a.dwVolumeSerialNumber == b.dwVolumeSerialNumber && a.nFileIndexHigh == b.nFileIndexHigh && a.nFileIndexLow == b.nFileIndexLow, "process_image_mismatch");
+    Handle loaded;verifyProcessImage(process.value,executable,loaded);
     journal.observed(id, process.value, pi.dwProcessId, loaded.value);
     require(ResumeThread(thread.value) == 1, "process_resume_failed"); thread.reset();
+    std::unique_ptr<TimeProviderProcess> provider;
     if (exchange) {
       bootstrap::write(inputWriter.value, exchange->assignment());
       const auto proof = bootstrap::read(proofReader.value, process.value, exchange->expires);
@@ -139,15 +163,26 @@ int wmain(int argc, wchar_t** argv) {
       require(IsProcessInJob(process.value, job.value, &belongs) != 0 && belongs, "bootstrap_containment");
       const auto receipt = exchange->receipt(id);
       journal.admitted(id, exchange->receiptId, bootstrap::object(receipt));
+      if(providerExchange){
+        provider=std::make_unique<TimeProviderProcess>(instance,journal,job.value,*protectedRuntime,*providerExchange,
+          providerLaunch,id,exchange->expires,pi.dwProcessId,exchange->receiptId);
+        providerExchange.reset();
+      }
       require(bootstrap::tick() < exchange->expires, "bootstrap_expired");
       bootstrap::write(inputWriter.value, bootstrap::Exchange::frame("ADMISSION", receipt));
-      control->activate(bootstrap::object(receipt));
+      control->activate(bootstrap::object(receipt),provider.get());
     }
-    printf("{\"event\":\"process_contained\",\"containment_id\":\"%s\",\"supervisor_pid\":%lu,\"core_pid\":%lu,\"bootstrap_authenticated\":%s,\"runtime_admitted\":false}\n",
-      id.c_str(), GetCurrentProcessId(), pi.dwProcessId, exchange ? "true" : "false"); fflush(stdout);
+    const auto providerStatus=provider?",\"time_provider_pid\":"+std::to_string(provider->pid):"";
+    printf("{\"event\":\"process_contained\",\"containment_id\":\"%s\",\"supervisor_pid\":%lu,\"core_pid\":%lu,\"bootstrap_authenticated\":%s,\"runtime_admitted\":false%s}\n",
+      id.c_str(), GetCurrentProcessId(), pi.dwProcessId, exchange ? "true" : "false",providerStatus.c_str()); fflush(stdout);
     exchange.reset(); // 挑战秘密不进入普通运行期或日志。
     bool requested = false, invalid = false; std::string input, controlFailure;
     while (WaitForSingleObject(process.value, 20) == WAIT_TIMEOUT) {
+      if(provider&&!provider->healthy()){controlFailure="time_provider_lost";invalid=true;break;}
+      if(provider){
+        try { provider->pollLink(); }
+        catch(const std::exception&){controlFailure="time_provider_link_lost";invalid=true;break;}
+      }
       if (control) {
         try { control->poll(process.value, pi.dwProcessId, job.value, journal); }
         catch (const std::exception& e) { controlFailure = e.what(); invalid = true;
@@ -167,6 +202,11 @@ int wmain(int argc, wchar_t** argv) {
     }
     // 不再创建任何进程；正常请求给核心两秒关闭库，随后终止全部残留后代。
     bool forced = false;
+    if(provider){
+      provider->retire();
+      forced=provider->forced;
+      if(provider->exitCode!=0){invalid=true;controlFailure="time_provider_exit";}
+    }
     if (requested) {
       DWORD written = 0; const char stop[] = "stop\n";
       if (WriteFile(inputWriter.value, stop, 5, &written, nullptr) && written == 5) {
@@ -184,8 +224,9 @@ int wmain(int argc, wchar_t** argv) {
     require(WaitForSingleObject(process.value, 5000) == WAIT_OBJECT_0, "core_exit_unproven");
     DWORD code = 1; require(GetExitCodeProcess(process.value, &code) != 0, "core_status_failed");
     journal.retired(id, code, forced);
-    printf("{\"event\":\"process_group_empty\",\"containment_id\":\"%s\",\"active_processes\":0,\"core_exit_code\":%lu,\"stop_requested\":%s,\"forced\":%s,\"control_failed\":%s,\"runtime_admitted\":false}\n",
-      id.c_str(), code, requested ? "true" : "false", forced ? "true" : "false", controlFailure.empty() ? "false" : "true"); fflush(stdout);
+    const auto retiredProvider=provider?",\"time_provider_exit_code\":"+std::to_string(provider->exitCode):"";
+    printf("{\"event\":\"process_group_empty\",\"containment_id\":\"%s\",\"active_processes\":0,\"core_exit_code\":%lu,\"stop_requested\":%s,\"forced\":%s,\"control_failed\":%s,\"runtime_admitted\":false%s}\n",
+      id.c_str(), code, requested ? "true" : "false", forced ? "true" : "false", controlFailure.empty() ? "false" : "true",retiredProvider.c_str()); fflush(stdout);
     return !invalid && code == 0 && !forced ? 0 : 1;
   } catch (const std::exception& e) {
     // 栈展开关闭唯一 Job 句柄；没有观察到空组时不产生 empty 成功帧。

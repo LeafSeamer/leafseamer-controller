@@ -13,7 +13,7 @@ const {qualifyDeviceFootprint}=await load('device-footprint-qualification.mjs'),
 const {readSourceProjectionCut}=await load('device-source-projection.mjs');
 const {createDeviceModule,simulatorControlCatalog}=await load('simulator-control-module.mjs');
 const review=JSON.parse(fs.readFileSync(path.join(root,'dist/simulator-event-review.json')));
-async function fixture(t,projection=false){
+async function fixture(t,projection=false,projectReferenceCapture){
  const directory=projection?fs.mkdtempSync(path.join(os.tmpdir(),'leafseamer-source-projection-')):null;
  const readers=[],db=new Database(directory?path.join(directory,'source.sqlite'):':memory:');t.after(()=>{for(const reader of readers)reader.close();db.close();if(directory){assert.equal(path.dirname(path.resolve(directory)),path.resolve(os.tmpdir()));fs.rmSync(directory,{recursive:true,force:true});}});db.pragma('foreign_keys=ON');
  // 使用实际领域SQL与writer；上游运行和目录在本测试中为可信投影，完整链由原生集成覆盖。
@@ -22,7 +22,8 @@ async function fixture(t,projection=false){
  if(projection){db.exec('CREATE TABLE device_source_notification ('+fs.readFileSync(path.join(root,'dist/device-source-projection.sql'),'utf8').split('CREATE TABLE device_source_notification (')[1]);db.pragma('user_version=67');db.pragma('journal_mode=WAL',{simple:true});}
  db.exec("INSERT INTO device_module_channel VALUES('channel'); INSERT INTO device_catalog_approval VALUES('approval','channel','device','session')");
  const runtime={current_boot:true,withdrawal:null,ref:{kind:'runtime_binding',authority_service_id:'service',database_instance_id:'database',object_id:'runtime',revision:'1',digest:digest('runtime')},
-  binding:{service_id:'service',database_instance_id:'database',launch_intent:{member_id:'member'},admission_receipt:{member_boot_id:'boot'},clock_domain_descriptor:{test:'synthetic-domain'}}};
+  binding:{service_id:'service',database_instance_id:'database',launch_intent:{member_id:'member'},admission_receipt:{member_boot_id:'boot'},
+   clock_domain_descriptor:{clock_domain_id:'clock_'+digest('capture-domain').slice(7),descriptor_digest:digest('capture-domain')}}};
  const qualification={qualification:'fixed_memory_control_catalog/1',module_digest:review.module_digest,protocol_io_policy_digest:review.protocol_io_policy_digest,template_digest:review.template_digest,manifest_digest:digest('manifest'),resource_ref:{object_id:'resource',digest:digest('resource')}};
  const approved={format:'leafseamer-catalog-approval/3',approval_id:'approval',runtime_binding_ref:runtime.ref,qualification,channel_id:'channel',device_id:'device',device_session_id:'session',catalog:simulatorControlCatalog()};
  approved.footprint_qualification=qualifyDeviceFootprint({...approved,runtime});
@@ -31,17 +32,55 @@ async function fixture(t,projection=false){
  const save=(frame,direction='w2c')=>db.prepare('INSERT INTO device_module_frame VALUES(?,?,?,?,?,?)').run(frame.request_id,'channel',frame.type,direction,canonical(frame),digest(frame));
  const started=envelope('EVENT_STARTED',{capture:module.events.start(input)});save(started);
  const catalog={current:()=>({approval:approved}),currentEventCapture:()=>qualifyDeviceEventFrame({approved,runtime,frame:started})};
- const store=deviceEventSourceStore({db,current:()=>runtime,catalog});
+ const store=deviceEventSourceStore({db,current:()=>runtime,catalog,projectReferenceCapture});
  const write=async value=>module.execution.writePrimitive({...input,bytes:await module.execution.encodePrimitive({...input,primitive_id:'simulator_value_set',parameters:{value}})});
  const batch=(after='0')=>{const frame=envelope('EVENT_BATCH',{result:module.events.read({...input,after_sequence:after,max_events:32})});save(frame);return frame;};
  const count=table=>db.prepare('SELECT count(*) FROM '+table).pluck().get();
- return {db,store,started,write,batch,envelope,save,count,runtime,openReader(){const reader=new Database(db.name,{readonly:true,fileMustExist:true});readers.push(reader);return reader;}};
+ const acknowledge=frame=>module.events.acknowledge({...input,batch_digest:frame.body.result.batch_digest,through_sequence:frame.body.result.batch.through_sequence});
+ return {db,store,started,write,batch,acknowledge,envelope,save,count,runtime,openReader(){const reader=new Database(db.name,{readonly:true,fileMustExist:true});readers.push(reader);return reader;}};
 }
 test('来源事件和outbox原子保存，重复批次复用原件，无时间证明如实为空',async t=>{
  const f=await fixture(t),registration=f.store.start(f.started);assert.deepEqual(f.store.start(f.started),registration);
  await f.write(7);await f.write(23);const batch=f.batch(),receipt=f.store.accept(batch);assert.equal(receipt.record_ids.length,2);assert.deepEqual(f.store.accept(batch),receipt);
  assert.deepEqual(f.store.accept(f.batch()).record_ids,receipt.record_ids);assert.equal(f.count('device_source_event'),2);assert.equal(f.count('device_source_event_outbox'),2);
  const records=f.store.read(f.started);assert.equal(records.highest_committed_sequence,'2');assert.equal(records.fault,null);assert.deepEqual(records.events.map(e=>e.origin.payload.value.value),[7,23]);assert.ok(records.events.every(e=>e.origin.source_time_ref===null&&digest(e.origin)===e.origin_digest));assert.equal(f.store.read(f.started,'1').events.length,1);assert.deepEqual(f.db.pragma('foreign_key_check'),[]);
+});
+test('首次记录固定参考时间捕获，重投沿用原件，outbox漏写时事件和捕获一起回滚',async t=>{
+ const attempts=[];let qualified=false;
+ const f=await fixture(t,false,capture=>{
+  attempts.push(capture);
+  if(!qualified)return null;
+  const {domain,before_tick_ns,after_tick_ns}=capture;
+  return {runtime_domain_ref:domain,before_tick_ns,after_tick_ns,
+   anchor_ref:{id:'anchor',revision:'1',digest:digest('anchor')},lower_utc_ns:'1000000',upper_utc_ns:'1000100'};
+ });
+ f.store.start(f.started);await f.write(7);const first=f.batch();f.store.accept(first);
+ const outbox=()=>f.db.prepare('SELECT body_jcs FROM device_source_event_outbox ORDER BY rowid').pluck().all().map(JSON.parse);
+ assert.equal(outbox()[0].reference_capture,undefined);assert.equal(attempts.length,1);
+
+ qualified=true;f.store.accept(f.batch());assert.equal(attempts.length,1);f.acknowledge(first);
+ await f.write(23);const second=f.batch('1');
+ const committedBatches=f.count('device_source_batch');
+ f.db.exec('CREATE TRIGGER omit_timed_outbox BEFORE INSERT ON device_source_event_outbox BEGIN SELECT RAISE(IGNORE); END');
+ assert.throws(()=>f.store.accept(second),{code:'source_storage'});
+ assert.equal(f.count('device_source_event'),1);assert.equal(f.count('device_source_batch'),committedBatches);assert.equal(outbox().length,1);
+ f.db.exec('DROP TRIGGER omit_timed_outbox');f.store.accept(second);
+ assert.equal(attempts.length,3);
+
+ const original=outbox(),saved=original[1].reference_capture;
+ assert.equal(original[0].reference_capture,undefined);
+ assert.equal(saved.digest,digest(saved.body));assert.equal(saved.body.origin_digest,original[1].origin_digest);
+ assert.deepEqual(saved.body.module_frame_ref,{id:second.request_id,revision:'1',digest:digest(second)});
+ assert.deepEqual(saved.body.worker_runtime_ref,f.runtime.ref);
+ assert.deepEqual(saved.body.projection.runtime_domain_ref,f.runtime.binding.clock_domain_descriptor);
+ const interval=second.body.result.batch.events[0].capture_interval;
+ assert.deepEqual(attempts[2],{domain:f.runtime.binding.clock_domain_descriptor,...interval});
+ assert.equal(saved.body.projection.before_tick_ns,interval.before_tick_ns);
+ assert.equal(saved.body.projection.after_tick_ns,interval.after_tick_ns);
+
+ qualified=false;f.store.accept(f.batch('1'));assert.deepEqual(outbox(),original);assert.equal(attempts.length,3);
+ assert.ok(f.store.read(f.started).events.every(({origin})=>origin.source_time_ref===null));
+ assert.deepEqual(f.db.pragma('foreign_key_check'),[]);
 });
 test('outbox故障回滚事件和批次，未提交ACK拒绝，重试提交后才允许ACK',async t=>{
  const f=await fixture(t);f.store.start(f.started);await f.write(7);const batch=f.batch();

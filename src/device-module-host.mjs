@@ -39,7 +39,7 @@ export function hostDeviceModule({admitted,materials,executionIdentity,failed}){
    async receive({frame,payload}){
     if(frame.type==='HELLO_ACK')return;
     need(gates.has(frame.device_id),'module_execution_unsupported');
-    if(['FENCE','OPEN_GATE','GATE_FENCE','AUTH_FENCE','QUERY_BARRIER','BARRIER_STORED'].includes(frame.type)){
+    if(['FENCE','OPEN_GATE','GATE_FENCE','AUTH_FENCE','RUN_FENCE','QUERY_BARRIER','BARRIER_STORED'].includes(frame.type)){
      if(frame.type!=='FENCE')need(executions.has(frame.device_id),'module_execution_unbound');
      const response=await gates.get(frame.device_id).receive(payload);if(response)void executionSession.send(response).catch(stop);
     }else{const owner=executions.get(frame.device_id);need(owner,'module_execution_unbound');await owner.receive({frame,payload});}
@@ -47,7 +47,8 @@ export function hostDeviceModule({admitted,materials,executionIdentity,failed}){
   void executionSession.start({module_id:materials.manifest.extension_id,module_digest:materials.inventory.files.find(f=>f.file_id===entry.file_id).digest,
    clock_domain_id:execution.clock_domain_id,descriptor_digest:execution.descriptor_digest,clock_domain_descriptor:admitted.descriptor,
    supported_ipc_versions:[deviceExecutionVersion],supported_features:[...deviceExecutionCapabilities.base,...deviceExecutionCapabilities.initial_control,
-    ...(fixedWorkerExecutionAvailable(materials,entry)?[...deviceExecutionCapabilities.manual,...deviceExecutionCapabilities.without_reference]:[])]}).catch(stop);
+    ...(fixedWorkerExecutionAvailable(materials,entry)?[...deviceExecutionCapabilities.manual,...deviceExecutionCapabilities.without_reference,
+     ...deviceExecutionCapabilities.automation]:[])]}).catch(stop);
  }
  function file(fileId,role){const selected=materials.inventory.files.find(f=>f.file_id===fileId);need(selected?.role===role,'module_content_binding');
   const target=path.resolve(materials.root_path,selected.path);need(target.startsWith(path.resolve(materials.root_path)+path.sep),'module_content_path');

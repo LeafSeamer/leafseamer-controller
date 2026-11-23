@@ -99,7 +99,7 @@ function readDispatch(db,id){
  saved.evidence={value:evidenceValue,ref:ref(id+'.evidence',evidenceValue),reply:evidenceReply};return saved;
 }
 export function selectCommandDispatch(db,{id,binding,provider,tick,features}){
- need(db.inTransaction&&[54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70].includes(Number(db.pragma('user_version',{simple:true}))),'writer');
+ need(db.inTransaction&&[54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97].includes(Number(db.pragma('user_version',{simple:true}))),'writer');
  const prior=db.prepare('SELECT d.permit_id FROM command_dispatch_request d JOIN command_final_admission f ON f.transaction_id=d.final_transaction_id WHERE f.command_id=?').pluck().get(id);
  if(prior)return {saved:readCommandDispatch(db,prior)};
  const guardId=db.prepare('SELECT g.guard_id FROM command_guard_request g JOIN command_final_admission f ON f.transaction_id=g.final_transaction_id WHERE f.command_id=?').pluck().get(id);need(guardId,'guard');
@@ -122,8 +122,8 @@ export function commitCommandDispatch(db,{candidate,binding,provider,tick}){
 }
 function stateBody(saved,commit,projection,previous,source){return {format:'command-dispatch-state/1',commit_id:commit,command_id:saved.final.value.command_id,
  revision:projection.state.revision,dispatch_ref:saved.ref,source_ref:source,previous_state_ref:previous.state_ref,record_digest:projection.record.record_digest,state_digest:digest(projection.state)};}
-function saveState(db,saved,commit,revision,source){
- const id=saved.final.value.command_id,initial=readCommandRecord(db,id),previous=initial.record;
+function saveState(db,saved,commit,revision,source,initial=readCommandRecord(db,saved.final.value.command_id)){
+ const id=saved.final.value.command_id,previous=initial.record;
  need(BigInt(previous.state.revision)+1n===BigInt(revision),'state_order');
  const projection=dispatchCommandProjection(initial,saved.final,revision,revision==='4'?saved.report.reply.frame.body:null),body=stateBody(saved,commit,projection,previous,source),
   audit=canonical({kind:'command_dispatch_state',command_id:id,revision,commit_ref:ref(commit,body)});
@@ -134,14 +134,19 @@ function saveState(db,saved,commit,revision,source){
  return readCommandRecord(db,id);
 }
 export function startCommandDispatchWrite(db,{id,binding,provider,tick}){
- const saved=withExecutionReadView(db,()=>{const current=readCommandDispatch(db,id);need(!current.write,'write_reuse');
-  currentCommandGuard(db,{id:current.guard.value.guard_id,binding,provider,tick,requireAck:true});return current;});
+ const {saved,initial}=withExecutionReadView(db,()=>{
+  const saved=readCommandDispatch(db,id);need(!saved.write,'write_reuse');
+  currentCommandGuard(db,{id:saved.guard.value.guard_id,binding,provider,tick,requireAck:true});
+  return {saved,initial:readCommandRecord(db,saved.final.value.command_id)};
+ });
  const attempt=crypto.randomUUID(),commit=crypto.randomUUID(),started=tick(),value={format:'command-dispatch-write/1',permit_id:id,request_ref:saved.ref,
   write_attempt_id:attempt,started_tick_ns:String(started),commit_id:commit};
  written(db.prepare('INSERT INTO execution_write_attempt VALUES(?,?,?)').run(attempt,saved.request.record.record_id,executionTick(started)));
  written(db.prepare('INSERT INTO command_dispatch_write VALUES(?,?,?,?,?)').run(id,attempt,commit,canonical(value),digest(value)));
- saveState(db,saved,commit,'3',ref(id+'.write',value));need(tick()<BigInt(saved.final.value.seal.send_window.before_tick_ns),'expired');
- return {attempt_id:attempt,payload:saved.request.wire.subarray(4)};
+ saveState(db,saved,commit,'3',ref(id+'.write',value),initial);
+ const before_tick=BigInt(saved.final.value.seal.send_window.before_tick_ns);
+ need(tick()<before_tick,'expired');
+ return {attempt_id:attempt,payload:saved.request.wire.subarray(4),before_tick};
 }
 export function acceptCommandDispatchReport(db,{binding,decoded,features,tick,receivedTick}){
  const {frame,payload}=decoded;assertDeviceExecutionFeatures(frame,features);const id=frame.body.permit_id,saved=readCommandDispatch(db,id);

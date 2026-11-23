@@ -10,9 +10,13 @@ import {collectAuthorizationDependencies,currentAuthorizationDependencies} from 
 import {selectedDeviceEvidenceDeadline} from './device-authorization-evidence.mjs';
 import {currentControlReference} from './device-initial-ready.mjs';
 import {memoExecutionRead} from './execution-read-view.mjs';
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('manual_authority_'+code);};
 const freeze=v=>{if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Object.freeze(v);}return v;};
 const maximum=99999999999999999999n;
+const verifiedSource=cacheVerifiedDocument((text,checksum)=>{
+ const value=checked(JSON.parse(text));need(canonicalize(value)===text&&value.digest===checksum,'integrity');return value;
+},{immutable:true});
 // 当前人员来源只在本机身份writer内采集；不把该短期原件当成设备授权State或OPEN许可。
 export function manualExecutionAuthority({db,service,writer,authorizeToken,currentRecordedToken,authority,executionCurrent,domain,coreSource,attachCurrent}){
  function sources(device,proof){
@@ -38,8 +42,8 @@ export function manualExecutionAuthority({db,service,writer,authorizeToken,curre
   const row=db.prepare(`SELECT s.body_jcs,s.body_digest,c.body_digest,c.audit_jcs,c.notification_jcs,
    s.device_id,s.binding_id,s.control_source_id,s.token_id,s.policy_id,s.acquisition_id,s.selected_tick,s.expires_tick FROM execution_manual_authority s
    JOIN execution_manual_authority_commit c USING(source_id) WHERE source_id=?`).raw().get(reference.id);
-  need(row,'missing');const value=checked(JSON.parse(row[0]));
-  need(canonicalize(value)===row[0]&&value.digest===row[1]&&row[1]===row[2]&&same(ref(value),reference)&&
+  need(row,'missing');const value=verifiedSource(row[0],row[1]);
+  need(row[1]===row[2]&&same(ref(value),reference)&&
    row[3]===canonicalize({kind:'manual_execution_source',source_ref:reference})&&row[4]===row[3]&&
    value.binding.device_id===row[5]&&value.binding_ref.id===row[6]&&value.control_state_ref.id===row[7]&&value.token_id===row[8]&&
    value.policy_ref.id===row[9]&&value.authentication_acquisition_ref.id===row[10]&&

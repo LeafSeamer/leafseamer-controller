@@ -18,7 +18,8 @@ const row=sqliteRow;
 const body=v=>({guard:v.guard,content_digest:v.permit.content_digest,schedule_guard:null,reference_context:null});
 function expectedAck(v){const g=v.guard;return {guard_id:g.guard_id,guard_digest:g.guard_digest,content_digest:v.permit.content_digest,
  permit_id:g.permit_id,command_id:g.command_id,installed_authorization_revision:g.authorization_revision,state:'installed',
- panel_binding_digest:null,automation_binding_digest:null,reference_time_digest:null,schedule_guard_digest:null,gate_access_ref:g.gate_access_ref,ownership_ref:g.ownership_ref};}
+ panel_binding_digest:null,automation_binding_digest:g.automation_binding?digest(g.automation_binding):null,reference_time_digest:null,
+ schedule_guard_digest:null,gate_access_ref:g.gate_access_ref,ownership_ref:g.ownership_ref};}
 function effect(db,item,id,phase,value,now){
  const domain={transaction_id:item.transaction,source_ref:ref(id+(phase==='request'?'':'.response'),value)},audit={kind:'command_guard_'+phase,guard_id:id,source_digest:digest(value)};
  const e={record_ref:{id:item.record.record_id,revision:'1',digest:item.record.record_digest},disposition:'applied',domain_commit_refs:[ref(item.transaction,domain)],
@@ -73,7 +74,7 @@ function readGuard(db,id){
  return {...saved,ack:{value:acknowledgement,ref:ref(id+'.response',acknowledgement),reply}};
 }
 export function selectCommandGuard(db,{id,binding,provider,tick,features}){
- need(db.inTransaction&&[53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70].includes(Number(db.pragma('user_version',{simple:true}))),'writer');
+ need(db.inTransaction&&[53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97].includes(Number(db.pragma('user_version',{simple:true}))),'writer');
  const prior=db.prepare('SELECT g.guard_id FROM command_guard_request g JOIN command_final_admission f ON f.transaction_id=g.final_transaction_id WHERE f.command_id=?').pluck().get(id);
  if(prior)return {saved:readCommandGuard(db,prior)};
  const actual=currentPreparedCommand(db,{id,binding,provider,tick}),v=actual.final.value;
@@ -102,6 +103,9 @@ function currentGuard(db,{id,binding,provider,tick,requireAck=false}){
   permit_id:current.final.value.permit.permit_id,observation:current.observation,selected_tick_ns:current.selected_tick_ns,send_window:current.final.value.seal.send_window}};
 }
 export function acceptCommandGuard(db,{binding,decoded,provider,tick,features,receivedTick}){
+ return withExecutionReadView(db,()=>acceptGuard(db,{binding,decoded,provider,tick,features,receivedTick}));
+}
+function acceptGuard(db,{binding,decoded,provider,tick,features,receivedTick}){
  const {frame,payload}=decoded;assertDeviceExecutionFeatures(frame,features);
  const id=db.prepare(`SELECT g.guard_id FROM command_guard_request g JOIN execution_frame_record f ON f.record_id=g.record_id
   WHERE f.ipc_session_id=? AND f.message_id=?`).pluck().get(binding.ipc_session_id,frame.reply_to);need(id,'reply');

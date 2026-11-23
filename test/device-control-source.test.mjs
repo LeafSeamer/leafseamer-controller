@@ -38,6 +38,18 @@ test('控制物理原件来自同一变更提交，精确保存来源域与自�
   assert.deepEqual(db.pragma('foreign_key_check'),[]);
  });
 });
+test('重复读取隔离返回值，并重新核对控制原件的联表列',async t=>{
+ const f=await fixture(t);inspect(f.dir,db=>{check(db);write(db,f);
+  const read=db.transaction(()=>currentControlSource(db,f.device));
+  const result=read();
+  result.current.value.observed_tick_ns='101';
+  assert.equal(result.authority.value.observed_tick_ns,'100');
+  assert.equal(read().current.value.observed_tick_ns,'100');
+  db.exec('DROP TRIGGER control_source_no_update');
+  db.prepare('UPDATE control_state_source SET observed_tick=? WHERE device_id=?').run('101'.padStart(20,'0'),f.device);
+  assert.throws(read,{code:'control_source_integrity'});
+ });
+});
 test('原件缺写、源域错误或提交失败回滚公开修订、head、原件与审计',async t=>{
  const f=await fixture(t);inspect(f.dir,db=>{check(db);
   for(const [table,action] of [['control_state_source','IGNORE'],['control_state_source',"ABORT,'injected_source'"],['control_change_commit',"ABORT,'injected_commit'"]]){

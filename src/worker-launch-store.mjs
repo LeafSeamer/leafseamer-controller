@@ -1,4 +1,5 @@
 import {sqliteRows} from './sqlite-rows.mjs';
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import crypto from 'node:crypto';
 import {workerDependencies,currentWorkerDependencies} from './worker-dependencies.mjs';
 import {workerRuntimeStore} from './worker-runtime-store.mjs';
@@ -19,6 +20,8 @@ import {currentInitialReady} from './device-initial-ready.mjs';
 import {currentControlSource} from './device-control-source.mjs';
 import canonicalize from 'canonicalize';
 import {decodeWorkerIntent} from './sdk/worker-runtime.mjs';
+import {deviceExecutionCapabilities} from './sdk/device-execution.mjs';
+import {readRunProtectionExits} from './run-protection-exits.mjs';
 
 export class WorkerLaunchError extends Error { constructor(code) { super(code); this.name='WorkerLaunchError'; this.code=code; } }
 const need=(ok,code)=>{if(!ok)throw new WorkerLaunchError(code);};
@@ -27,17 +30,26 @@ const same=(a,b)=>canonicalize(a)===canonicalize(b);
 const id=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\s\S])/.test(value);
 const deepFreeze=value=>{if(value&&typeof value==='object'){for(const child of Object.values(value))deepFreeze(child);Object.freeze(value);}return value;};
 const rows=sqliteRows;
+const readLaunchIntent=cacheVerifiedDocument((text,digest)=>{
+  const value=JSON.parse(text);
+  need(canonicalize(value)===text&&hash(value)===digest,'worker_launch_integrity');
+  return value;
+},{immutable:true});
+const readCoreOriginal=cacheVerifiedDocument(text=>{
+  const value=JSON.parse(text);
+  need(canonicalize(value)===text,'worker_launch_integrity');
+  return value;
+},{immutable:true});
 
 // 启动意图准备属于核心内部writer，不是安装审批或LaunchAuthorization提供者。
-export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attachStop,openingSource,encodingSource){
+export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attachStop,openingSource,encodingSource,projectReferenceCapture){
   const commandTasks=new Map(),guardTasks=new Map(),dispatchTasks=new Map(),settlementTasks=new Map(),cleanupTasks=new Map(),finalAdmissionTasks=new Map(),encodingTails=new Map();
   let pending=0,acquiring=0,runtime=null,authorization=null;const modules=new Map(),contentPins=new Set(),executionJournals=new Set(),executionClients=new Map();attachStop?.(()=>{for(const client of executionClients.values())client?.close();for(const journal of executionJournals)try{journal.end();}catch{}for(const module of modules.values())module?.close();runtime?.close();authorization?.close();for(const pin of contentPins)pin.close();});
   const available=()=>{need(isOpen()&&db.open,'worker_launch_closed');need(!db.inTransaction,'worker_launch_outer_transaction');};
   const fields='launch_id,intent_digest,preparation_id,transaction_id,service_boot_id,intent_jcs';
   function view(row){
     if(!row)return null;
-    const intent=JSON.parse(row.intent_jcs);
-    need(canonicalize(intent)===row.intent_jcs&&hash(intent)===row.intent_digest,'worker_launch_integrity');
+    const intent=readLaunchIntent(row.intent_jcs,row.intent_digest);
     return deepFreeze({preparation_id:row.preparation_id,transaction_id:row.transaction_id,service_boot_id:row.service_boot_id,
       intent,ref:{kind:'launch_intent',authority_service_id:service.service_id,database_instance_id:service.database_instance_id,
         object_id:row.launch_id,revision:'1',digest:row.intent_digest},current_boot:row.service_boot_id===bootId});
@@ -53,7 +65,7 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
       WHERE r.service_boot_id=? AND b.state='started' AND b.service_id=? AND b.database_instance_id=?`,bootId,service.service_id,service.database_instance_id)[0];
     need(row,'worker_launch_core_required');
     const result=Object.fromEntries(['intent','descriptor','receipt','policy'].map(name=>{
-      const value=JSON.parse(row[name+'_jcs']);need(canonicalize(value)===row[name+'_jcs'],'worker_launch_integrity');return [name,value];
+      return [name,readCoreOriginal(row[name+'_jcs'])];
     }));
     need(result.intent.role==='core'&&result.receipt.role==='core'&&result.receipt.gate_state==='closed'&&
       result.intent.service_id===service.service_id&&result.policy.service_id===service.service_id&&
@@ -73,25 +85,68 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     }});
     journal.open();executionJournals.add(journal);return journal;
   }
-  function currentDeviceCatalogInput(device){
+  function currentDeviceModule(device){
       need(isOpen()&&db.open&&db.inTransaction&&Number(service.schema_revision)>=25,'device_capabilities_unavailable');
       const candidates=rows(db,`SELECT r.launch_id,p.intent_digest FROM worker_runtime_binding r
        JOIN worker_launch_preparation p USING(launch_id) JOIN worker_launch_device d USING(launch_id)
        LEFT JOIN worker_runtime_withdrawal w USING(runtime_id) WHERE d.device_id=? AND r.service_boot_id=? AND w.runtime_id IS NULL LIMIT 5`,device,bootId);
       need(candidates.length===1,'device_capabilities_unavailable');const candidate=candidates[0],module=modules.get(candidate.launch_id);
       need(module,'device_capabilities_unavailable');const active=runtime.currentInTransaction({launch_id:candidate.launch_id,launch_intent_digest:candidate.intent_digest});
+      return {active,module};
+  }
+  function currentDeviceCatalogInput(device){
+      const {active,module}=currentDeviceModule(device);
       const selected=extensionSource.current(active.binding.launch_intent),dependencies=currentWorkerDependencies(db,service,active.binding.launch_intent,selected);
       return {service,device,runtime:active,selected,dependencies,channel:module.binding.ipc_session_id};
   }
   function readDeviceEventsCurrent(device,expectedSourceRef=null,after='0',limit=32){
     need(isOpen()&&db.open&&db.inTransaction&&Number(service.schema_revision)>=64,'device_events_writer');
-    const input=currentDeviceCatalogInput(device),module=modules.get(input.runtime.binding.launch_intent.launch_id);
-    need(module,'device_events_unavailable');const value=module.publishedEvents(device,after,limit);
+    const {module}=currentDeviceModule(device);
+    const value=module.publishedEvents(device,after,limit);
     need(expectedSourceRef===null||hash(deviceEventSourceRef(value.registration))===hash(expectedSourceRef),'device_events_source_changed');return value;
   }
   function readDeviceEvents(...args){available();return db.transaction(()=>readDeviceEventsCurrent(...args)).immediate();}
   const eventScopes=Number(service.schema_revision)>=65?deviceEventScopeStore({db,service,bootId,currentSource:readDeviceEventsCurrent}):null;
+  async function applyRunProtection(plan,assertCurrent=()=>{}){
+    available();assertCurrent();
+    const fixed=structuredClone(plan),{origin_scope,run_id,device_ids}=fixed;
+    need(Array.isArray(device_ids)&&device_ids.length>0&&device_ids.length<=256&&device_ids.every(id)&&new Set(device_ids).size===device_ids.length&&
+      typeof fixed.deny_through_generation==='string'&&/^[1-9][0-9]{0,19}(?![\s\S])/.test(fixed.deny_through_generation),'run_protection_targets');
+    for(const device_id of device_ids){
+      assertCurrent();available();
+      const original=db.transaction(()=>readRunProtectionExits(db,device_id,fixed)).immediate();
+      if(original.state==='acknowledged')continue;
+      const owners=db.prepare(`SELECT DISTINCT r.launch_id,s.ipc_session_id FROM execution_session s
+       JOIN worker_runtime_binding r USING(runtime_id) JOIN worker_launch_device d USING(launch_id)
+       WHERE d.device_id=? AND s.service_boot_id=?
+        AND NOT EXISTS(SELECT 1 FROM execution_session_end e WHERE e.ipc_session_id=s.ipc_session_id)
+        AND NOT EXISTS(SELECT 1 FROM worker_runtime_withdrawal w WHERE w.runtime_id=r.runtime_id)
+       ORDER BY r.launch_id`).raw().all(device_id,bootId);
+      for(const [launch,session] of owners){
+        if(original.exits.find(exit=>exit.launch_id===launch)?.state!=='pending')continue;
+        const client=executionClients.get(launch),module=modules.get(launch);
+        if(client?.binding.ipc_session_id!==session||!module||client.state.phase!=='ready'||
+         !deviceExecutionCapabilities.automation.every(feature=>client.negotiation.selected_features.includes(feature)))continue;
+        const configured=db.prepare(`SELECT 1 FROM device_execution_binding b JOIN device_module_frame f
+          ON json_extract(f.frame_jcs,'$.body.execution_ref.id')=b.binding_id
+          WHERE b.ipc_session_id=? AND b.device_id=? AND f.channel_id=? AND f.direction='w2c' AND f.message_type='EXECUTION_BOUND' LIMIT 1`)
+          .pluck().get(session,device_id,module.binding.ipc_session_id);
+        if(!configured)continue;
+        assertCurrent();
+        try{
+          await client.applyRunFence({device_id,origin_scope,run_id});
+        }catch(error){
+          if(error.code?.startsWith('SQLITE_'))throw error;
+          // 保留原批准与落库确认；忙、退出或隔离失败留给下一次扫描。
+        }
+      }
+    }
+    assertCurrent();available();
+    const targets=db.transaction(()=>device_ids.map(deviceId=>readRunProtectionExits(db,deviceId,fixed))).immediate();
+    return {state:targets.every(target=>target.state==='acknowledged')?'acknowledged':'pending',targets};
+  }
   return Object.freeze({runtime,authorization,controlBarrier,eventScopes,
+    ...(Number(service.schema_revision)>=79&&{applyRunProtection}),
     queueCommandEncoding(id){
       if(commandTasks.has(id))return;
       // 受理响应先完成本轮微任务；后台执行从下一事件轮开始，避免占用响应校验预算。
@@ -100,6 +155,7 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
         const candidate=db.prepare(`SELECT r.launch_id FROM command_admission_source c JOIN device_execution_binding b USING(binding_id)
           JOIN execution_session s USING(ipc_session_id) JOIN worker_runtime_binding r USING(runtime_id)
           WHERE c.command_id=? AND s.service_boot_id=?`).pluck().get(id,bootId);
+        need(candidate,'execution_encoding_source');
         const client=executionClients.get(candidate);need(client,'execution_encoding_source');
         // 同一Execution会话只有一个有序控制出口；多个已受理命令不能互相抢占它。
         const preceding=encodingTails.get(candidate)??Promise.resolve();
@@ -179,7 +235,7 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
       modules.set(selected.launch_id,null);
       const current=()=>db.inTransaction?runtime.currentInTransaction(selected):runtime.current(selected);
       const catalog=deviceCatalogStore({db,current,select(intent){const selected=extensionSource.current(intent);return {selected,dependencies:currentWorkerDependencies(db,service,intent,selected)};}});
-      const journal=deviceModuleJournal(db,current),eventSource=events&&Number(service.schema_revision)>=64?deviceEventSourceStore({db,current,catalog}):null;
+      const journal=deviceModuleJournal(db,current),eventSource=events&&Number(service.schema_revision)>=64?deviceEventSourceStore({db,current,catalog,projectReferenceCapture}):null;
       let module;
       try{module=await connectDeviceModule({events,eventSource,current,invalidate:()=>runtime.invalidate(selected),configuration:{reference,value:body.configuration},
         journal:{open:journal.open,record(direction,frame){journal.record(direction,frame);if(direction==='w2c')catalog.receive(frame);}},catalog,

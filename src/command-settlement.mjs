@@ -27,8 +27,9 @@ function source(db,id){
 }
 function checkControl(value,source){
  const p=source.dispatch.final.value.permit,b=source.dispatch.final.value.seal.binding;
- need(value.device_id===b.device_id&&value.gate_state==='protected'&&value.pending_operation_id===null&&value.mode==='manual'&&
-  value.control_epoch===p.control_epoch&&value.effective_version===p.control_version&&same(value.holder,source.ready.after.holder)&&
+ const mode=source.initial.source.metadata.origin==='automation'?'automatic':'manual',ready=source.ready.after;
+ need(value.device_id===b.device_id&&value.gate_state==='protected'&&value.pending_operation_id===null&&value.mode===mode&&ready.mode===mode&&
+  value.control_epoch===p.control_epoch&&value.effective_version===p.control_version&&same(value.holder,ready.holder)&&
   value.clock_domain_id===b.clock_domain_id&&value.descriptor_digest===b.descriptor_digest,'control');
 }
 function cutBody(source,barrierId){

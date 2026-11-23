@@ -9,3 +9,9 @@ export function authorizationRevoked(binding,selector){
  const fields={session:['session_id','session_revision'],principal:['principal_id','subject_revision'],grant:['grant_id','grant_revision'],extension:['extension_instance_id','extension_approval_revision']};
  const [id,revision]=fields[selector.kind];return binding[id]!==null&&binding[id]===selector.target_id&&BigInt(binding[revision])<BigInt(selector.revision_floor);
 }
+
+export function runGenerationMatches(origin,selector){
+ return origin!==null&&origin.origin_scope.authority_service_id===selector.origin_scope.authority_service_id&&
+  origin.origin_scope.database_instance_id===selector.origin_scope.database_instance_id&&origin.run_id===selector.run_id&&
+  BigInt(origin.arm_generation)<=BigInt(selector.deny_through_generation);
+}

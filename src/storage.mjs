@@ -12,6 +12,13 @@ import {configureVirtualDevice} from './worker-dependencies.mjs';
 import {workerLaunchStore} from './worker-launch-store.mjs';
 import {extensionInstallationStore} from './extension-installation-store.mjs';
 import {initializeLocalPermissions, localPermissionStore} from './local-permission-store.mjs';
+import {restoreRunGenerationDenials} from './run-generation-denial.mjs';
+import {timeProviderPollStore} from './time-provider-polls.mjs';
+import {sealTimeProviderRuntime} from './time-provider-link.mjs';
+import {timeProviderCaptureStore} from './time-provider-capture.mjs';
+import {referenceTimeAnchorStore} from './reference-time-anchor.mjs';
+import {referenceTimeInvalidationStore} from './reference-time-invalidation.mjs';
+import {referenceTimeExitStore} from './reference-time-exits.mjs';
 
 const sql = fs.readFileSync(new URL('./storage.sql', import.meta.url), 'utf8');
 const scriptDigest = 'sha256:' + crypto.createHash('sha256').update(sql).digest('hex');
@@ -149,6 +156,60 @@ const sourceProjectionSql=fs.readFileSync(new URL('./device-source-projection.sq
 const snapshotSql=fs.readFileSync(new URL('./service-snapshot.sql',import.meta.url),'utf8');
 const channelSql=fs.readFileSync(new URL('./service-subscription-channel.sql',import.meta.url),'utf8');
 const baselineSql=fs.readFileSync(new URL('./service-snapshot-baseline.sql',import.meta.url),'utf8');
+const deliverySql=fs.readFileSync(new URL('./service-subscription-delivery.sql',import.meta.url),'utf8');
+const deliveryDigest='sha256:'+crypto.createHash('sha256').update(deliverySql).digest('hex');
+const runEndorsementPolicySql=fs.readFileSync(new URL('./run-endorsement-policy.sql',import.meta.url),'utf8');
+const runEndorsementPolicyDigest='sha256:'+crypto.createHash('sha256').update(runEndorsementPolicySql).digest('hex');
+const runApprovalEndorsementSql=fs.readFileSync(new URL('./run-approval-endorsement.sql',import.meta.url),'utf8');
+const runApprovalEndorsementDigest='sha256:'+crypto.createHash('sha256').update(runApprovalEndorsementSql).digest('hex');
+const runApprovalRejectionSql=fs.readFileSync(new URL('./run-approval-rejection.sql',import.meta.url),'utf8');
+const runApprovalRejectionDigest='sha256:'+crypto.createHash('sha256').update(runApprovalRejectionSql).digest('hex');
+const runEndorsementRevocationSql=fs.readFileSync(new URL('./run-endorsement-revocation.sql',import.meta.url),'utf8');
+const runEndorsementRevocationDigest='sha256:'+crypto.createHash('sha256').update(runEndorsementRevocationSql).digest('hex');
+const runEndorsementRevocationReceiptSql=fs.readFileSync(new URL('./run-endorsement-revocation-receipt.sql',import.meta.url),'utf8');
+const runEndorsementRevocationReceiptDigest='sha256:'+crypto.createHash('sha256').update(runEndorsementRevocationReceiptSql).digest('hex');
+const runPreparationSql=fs.readFileSync(new URL('./run-preparation.sql',import.meta.url),'utf8');
+const runGenerationDenialSql=fs.readFileSync(new URL('./run-generation-denial.sql',import.meta.url),'utf8');
+const runGenerationDenialDigest='sha256:'+crypto.createHash('sha256').update(runGenerationDenialSql).digest('hex');
+const executionRunFenceSql=fs.readFileSync(new URL('./execution-run-fence.sql',import.meta.url),'utf8');
+const executionRunFenceDigest='sha256:'+crypto.createHash('sha256').update(executionRunFenceSql).digest('hex');
+const runProtectionCompletionSql=fs.readFileSync(new URL('./run-approval-protection-completion.sql',import.meta.url),'utf8');
+const runProtectionCompletionDigest='sha256:'+crypto.createHash('sha256').update(runProtectionCompletionSql).digest('hex');
+const timeProviderRuntimeSql=fs.readFileSync(new URL('./time-provider-runtime.sql',import.meta.url),'utf8');
+const timeProviderRuntimeDigest='sha256:'+crypto.createHash('sha256').update(timeProviderRuntimeSql).digest('hex');
+const timeProviderPollsSql = fs.readFileSync(new URL('./time-provider-polls.sql', import.meta.url), 'utf8');
+const timeProviderPollsDigest = 'sha256:' + crypto.createHash('sha256').update(timeProviderPollsSql).digest('hex');
+const timeProviderCaptureSql = fs.readFileSync(new URL('./time-provider-capture.sql', import.meta.url), 'utf8');
+const timeProviderCaptureDigest = 'sha256:' + crypto.createHash('sha256').update(timeProviderCaptureSql).digest('hex');
+const timeProviderReleaseSql = fs.readFileSync(new URL('./time-provider-poll-release.sql', import.meta.url), 'utf8');
+const timeProviderReleaseDigest = 'sha256:' + crypto.createHash('sha256').update(timeProviderReleaseSql).digest('hex');
+const timeProviderRecoverySql = fs.readFileSync(new URL('./time-provider-source-recovery.sql', import.meta.url), 'utf8');
+const timeProviderRecoveryDigest = 'sha256:' + crypto.createHash('sha256').update(timeProviderRecoverySql).digest('hex');
+const timeProviderControlSql = fs.readFileSync(new URL('./time-provider-poll-control.sql', import.meta.url), 'utf8');
+const timeProviderControlDigest = 'sha256:' + crypto.createHash('sha256').update(timeProviderControlSql).digest('hex');
+const referenceTimeAnchorSql = fs.readFileSync(new URL('./reference-time-anchor.sql', import.meta.url), 'utf8');
+const referenceTimeAnchorDigest = 'sha256:' + crypto.createHash('sha256').update(referenceTimeAnchorSql).digest('hex');
+const commandReferenceAcceptanceSql = fs.readFileSync(new URL('./command-reference-acceptance.sql', import.meta.url), 'utf8');
+const commandReferenceAcceptanceDigest = 'sha256:' + crypto.createHash('sha256').update(commandReferenceAcceptanceSql).digest('hex');
+const referenceTimeInvalidationSql = fs.readFileSync(new URL('./reference-time-invalidation.sql', import.meta.url), 'utf8');
+const referenceTimeInvalidationDigest = 'sha256:' + crypto.createHash('sha256').update(referenceTimeInvalidationSql).digest('hex');
+const referenceTimeExitsSql = fs.readFileSync(new URL('./reference-time-exits.sql', import.meta.url), 'utf8');
+const referenceTimeExitsDigest = 'sha256:' + crypto.createHash('sha256').update(referenceTimeExitsSql).digest('hex');
+const referenceTimeExitRecoverySql = fs.readFileSync(new URL('./reference-time-exit-recovery.sql', import.meta.url), 'utf8');
+const referenceTimeExitRecoveryDigest = 'sha256:' + crypto.createHash('sha256').update(referenceTimeExitRecoverySql).digest('hex');
+const commandIssueOrderSql = fs.readFileSync(new URL('./command-issue-order.sql', import.meta.url), 'utf8');
+const commandIssueOrderDigest = 'sha256:' + crypto.createHash('sha256').update(commandIssueOrderSql).digest('hex');
+const firstPairingIssueSql = fs.readFileSync(new URL('./first-pairing-issue.sql', import.meta.url), 'utf8');
+const firstPairingIssueDigest = 'sha256:' + crypto.createHash('sha256').update(firstPairingIssueSql).digest('hex');
+const deviceSourceTimeSql = fs.readFileSync(new URL('./device-source-time.sql', import.meta.url), 'utf8');
+const deviceSourceTimeDigest = 'sha256:' + crypto.createHash('sha256').update(deviceSourceTimeSql).digest('hex');
+const automationCommandSql = fs.readFileSync(new URL('./automation-command-adjudication.sql', import.meta.url), 'utf8');
+const automationCommandDigest = 'sha256:' + crypto.createHash('sha256').update(automationCommandSql).digest('hex');
+const automaticGateSql = fs.readFileSync(new URL('./automatic-device-gate.sql', import.meta.url), 'utf8');
+const automaticGateDigest = 'sha256:' + crypto.createHash('sha256').update(automaticGateSql).digest('hex');
+const automationEncodingSql = fs.readFileSync(new URL('./automation-command-encoding.sql', import.meta.url), 'utf8');
+const automationEncodingDigest = 'sha256:' + crypto.createHash('sha256').update(automationEncodingSql).digest('hex');
+const runPreparationDigest='sha256:'+crypto.createHash('sha256').update(runPreparationSql).digest('hex');
 const baselineDigest='sha256:'+crypto.createHash('sha256').update(baselineSql).digest('hex');
 const channelDigest='sha256:'+crypto.createHash('sha256').update(channelSql).digest('hex');
 const snapshotDigest='sha256:'+crypto.createHash('sha256').update(snapshotSql).digest('hex');
@@ -225,18 +286,18 @@ export function initializeStorage(dataDir) {
 }
 function validateStorage(db) {
   const revision = pragma(db, 'user_version');
-  require(pragma(db, 'application_id') === applicationId && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70].includes(revision), 'database_version_mismatch');
+  require(pragma(db, 'application_id') === applicationId && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97].includes(revision), 'database_version_mismatch');
   require(pragma(db, 'journal_mode') === 'wal', 'journal_mode_mismatch');
   pragma(db, 'synchronous = FULL');
   require(pragma(db, 'synchronous') === 2, 'synchronous_mismatch');
   require(pragma(db, 'quick_check') === 'ok' && rows(db, 'PRAGMA foreign_key_check').length === 0, 'database_integrity');
   const migrations = rows(db, 'SELECT * FROM schema_migration ORDER BY CAST(to_revision AS INTEGER)');
   require(migrations.length === revision && migrations[0].from_revision === '0' && migrations[0].to_revision === '1' && migrations[0].state === 'committed' && migrations[0].script_digest === scriptDigest, 'migration_mismatch');
-  for (let i = 1; i < revision; i++) require(migrations[i].from_revision === String(i) && migrations[i].to_revision === String(i + 1) && migrations[i].state === 'committed' && migrations[i].script_digest === [scriptDigest, identityDigest, clockDigest, authClockDigest, sessionDigest, tokenDigest, permissionDigest, contextDigest, admissionDigest, deviceDigest, runtimeDigest, workerDigest, extensionDigest, configurationDigest, roleDigest, reviewDigest, approvalDigest, capabilityDigest, workerRuntimeDigest, dependencyDigest, planDigest, activationDigest, authorizationDigest, moduleDigest, catalogDigest, controlDigest, executionDigest, executionFramesDigest, executionBindingDigest, executionHandshakeDigest, executionControlDigest, controlSourceDigest, manualAuthorityDigest, deviceAuthorizationDigest, coreSourceDigest, serviceIdentityDigest, serviceAccessTokenDigest, evaluatorSourceDigest, principalRevocationDigest, deviceRecoveryDigest, deviceConsumptionDigest, manualChallengeDigest, deviceEvidenceDigest, initialResourceDigest, initialOpenDigest, workerBindingDigest, executionOpenDigest, initialReadyDigest, commandRecordDigest, commandLifecycleDigest, commandEncodingDigest, commandFinalAdmissionDigest, commandGuardDigest, commandDispatchDigest, commandSettlementDigest, commandPreparationCleanupDigest, resourceSuccessorDigest, controlCommandCutDigest, peerPairingDigest, remotePermissionDigest, issuerWatermarkDigest, sessionDenialDigest, moduleEventsDigest, eventSourceDigest, eventScopeDigest, subscriptionDigest, sourceProjectionDigest, snapshotDigest, channelDigest, baselineDigest][i] && /^sha256:[0-9a-f]{64}$/.test(migrations[i].backup_ref), 'migration_mismatch');
+  for (let i = 1; i < revision; i++) require(migrations[i].from_revision === String(i) && migrations[i].to_revision === String(i + 1) && migrations[i].state === 'committed' && migrations[i].script_digest === [scriptDigest, identityDigest, clockDigest, authClockDigest, sessionDigest, tokenDigest, permissionDigest, contextDigest, admissionDigest, deviceDigest, runtimeDigest, workerDigest, extensionDigest, configurationDigest, roleDigest, reviewDigest, approvalDigest, capabilityDigest, workerRuntimeDigest, dependencyDigest, planDigest, activationDigest, authorizationDigest, moduleDigest, catalogDigest, controlDigest, executionDigest, executionFramesDigest, executionBindingDigest, executionHandshakeDigest, executionControlDigest, controlSourceDigest, manualAuthorityDigest, deviceAuthorizationDigest, coreSourceDigest, serviceIdentityDigest, serviceAccessTokenDigest, evaluatorSourceDigest, principalRevocationDigest, deviceRecoveryDigest, deviceConsumptionDigest, manualChallengeDigest, deviceEvidenceDigest, initialResourceDigest, initialOpenDigest, workerBindingDigest, executionOpenDigest, initialReadyDigest, commandRecordDigest, commandLifecycleDigest, commandEncodingDigest, commandFinalAdmissionDigest, commandGuardDigest, commandDispatchDigest, commandSettlementDigest, commandPreparationCleanupDigest, resourceSuccessorDigest, controlCommandCutDigest, peerPairingDigest, remotePermissionDigest, issuerWatermarkDigest, sessionDenialDigest, moduleEventsDigest, eventSourceDigest, eventScopeDigest, subscriptionDigest, sourceProjectionDigest, snapshotDigest, channelDigest, baselineDigest, deliveryDigest, runEndorsementPolicyDigest, runApprovalEndorsementDigest, runApprovalRejectionDigest, runEndorsementRevocationDigest, runEndorsementRevocationReceiptDigest, runPreparationDigest, runGenerationDenialDigest, executionRunFenceDigest, runProtectionCompletionDigest, timeProviderRuntimeDigest, timeProviderPollsDigest, timeProviderCaptureDigest, timeProviderReleaseDigest, timeProviderRecoveryDigest, timeProviderControlDigest, referenceTimeAnchorDigest, commandReferenceAcceptanceDigest, referenceTimeInvalidationDigest, referenceTimeExitsDigest, referenceTimeExitRecoveryDigest, commandIssueOrderDigest, firstPairingIssueDigest, deviceSourceTimeDigest, automationCommandDigest, automaticGateDigest, automationEncodingDigest][i] && /^sha256:[0-9a-f]{64}$/.test(migrations[i].backup_ref), 'migration_mismatch');
   return identity(db, String(revision));
 }
 export async function migrateStorage(dataDir, targetRevision = 70) {
-  require([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70].includes(targetRevision), 'migration_target');
+  require([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97].includes(targetRevision), 'migration_target');
   const file = filename(dataDir);
   let db;
   try {
@@ -255,10 +316,11 @@ export async function migrateStorage(dataDir, targetRevision = 70) {
       pragma(db, 'foreign_keys = OFF');
       require(pragma(db, 'foreign_keys') === 0, 'migration_setup_failed');
       db.transaction(() => {
-        db.exec([identitySql, clockSql, authClockSql, sessionSql, tokenSql, permissionSql, contextSql, admissionSql, deviceSql, runtimeSql, workerSql, extensionSql, configurationSql, roleSql, reviewSql, approvalSql, capabilitySql, workerRuntimeSql, dependencySql, planSql, activationSql, authorizationSql, moduleSql, catalogSql, controlSql, executionSql, executionFramesSql, executionBindingSql, executionHandshakeSql, executionControlSql, controlSourceSql, manualAuthoritySql, deviceAuthorizationSql, coreSourceSql, serviceIdentitySql, serviceAccessTokenSql, evaluatorSourceSql, principalRevocationSql, deviceRecoverySql, deviceConsumptionSql, manualChallengeSql, deviceEvidenceSql, initialResourceSql, initialOpenSql, workerBindingSql, executionOpenSql, initialReadySql, commandRecordSql, commandLifecycleSql, commandEncodingSql, commandFinalAdmissionSql, commandGuardSql, commandDispatchSql, commandSettlementSql, commandPreparationCleanupSql, resourceSuccessorSql, controlCommandCutSql, peerPairingSql, remotePermissionSql, issuerWatermarkSql, sessionDenialSql, moduleEventsSql, eventSourceSql, eventScopeSql, subscriptionSql, sourceProjectionSql, snapshotSql, channelSql, baselineSql][next - 2]);
+        db.exec([identitySql, clockSql, authClockSql, sessionSql, tokenSql, permissionSql, contextSql, admissionSql, deviceSql, runtimeSql, workerSql, extensionSql, configurationSql, roleSql, reviewSql, approvalSql, capabilitySql, workerRuntimeSql, dependencySql, planSql, activationSql, authorizationSql, moduleSql, catalogSql, controlSql, executionSql, executionFramesSql, executionBindingSql, executionHandshakeSql, executionControlSql, controlSourceSql, manualAuthoritySql, deviceAuthorizationSql, coreSourceSql, serviceIdentitySql, serviceAccessTokenSql, evaluatorSourceSql, principalRevocationSql, deviceRecoverySql, deviceConsumptionSql, manualChallengeSql, deviceEvidenceSql, initialResourceSql, initialOpenSql, workerBindingSql, executionOpenSql, initialReadySql, commandRecordSql, commandLifecycleSql, commandEncodingSql, commandFinalAdmissionSql, commandGuardSql, commandDispatchSql, commandSettlementSql, commandPreparationCleanupSql, resourceSuccessorSql, controlCommandCutSql, peerPairingSql, remotePermissionSql, issuerWatermarkSql, sessionDenialSql, moduleEventsSql, eventSourceSql, eventScopeSql, subscriptionSql, sourceProjectionSql, snapshotSql, channelSql, baselineSql, deliverySql, runEndorsementPolicySql, runApprovalEndorsementSql, runApprovalRejectionSql, runEndorsementRevocationSql, runEndorsementRevocationReceiptSql, runPreparationSql, runGenerationDenialSql, executionRunFenceSql, runProtectionCompletionSql, timeProviderRuntimeSql, timeProviderPollsSql, timeProviderCaptureSql, timeProviderReleaseSql, timeProviderRecoverySql, timeProviderControlSql, referenceTimeAnchorSql, commandReferenceAcceptanceSql, referenceTimeInvalidationSql, referenceTimeExitsSql, referenceTimeExitRecoverySql, commandIssueOrderSql, firstPairingIssueSql, deviceSourceTimeSql, automationCommandSql, automaticGateSql, automationEncodingSql][next - 2]);
         if (next === 7) initializeLocalPermissions(db, state);
+        if (next === 78) restoreRunGenerationDenials(db,{authority_service_id:state.service_id,database_instance_id:state.database_instance_id});
         db.prepare("INSERT INTO schema_migration VALUES (?, ?, ?, ?, ?, 'committed', ?)")
-          .run(crypto.randomUUID(), String(next - 1), String(next), [identityDigest, clockDigest, authClockDigest, sessionDigest, tokenDigest, permissionDigest, contextDigest, admissionDigest, deviceDigest, runtimeDigest, workerDigest, extensionDigest, configurationDigest, roleDigest, reviewDigest, approvalDigest, capabilityDigest, workerRuntimeDigest, dependencyDigest, planDigest, activationDigest, authorizationDigest, moduleDigest, catalogDigest, controlDigest, executionDigest, executionFramesDigest, executionBindingDigest, executionHandshakeDigest, executionControlDigest, controlSourceDigest, manualAuthorityDigest, deviceAuthorizationDigest, coreSourceDigest, serviceIdentityDigest, serviceAccessTokenDigest, evaluatorSourceDigest, principalRevocationDigest, deviceRecoveryDigest, deviceConsumptionDigest, manualChallengeDigest, deviceEvidenceDigest, initialResourceDigest, initialOpenDigest, workerBindingDigest, executionOpenDigest, initialReadyDigest, commandRecordDigest, commandLifecycleDigest, commandEncodingDigest, commandFinalAdmissionDigest, commandGuardDigest, commandDispatchDigest, commandSettlementDigest, commandPreparationCleanupDigest, resourceSuccessorDigest, controlCommandCutDigest, peerPairingDigest, remotePermissionDigest, issuerWatermarkDigest, sessionDenialDigest, moduleEventsDigest, eventSourceDigest, eventScopeDigest, subscriptionDigest, sourceProjectionDigest, snapshotDigest, channelDigest, baselineDigest][next - 2], backupRef, crypto.randomUUID());
+          .run(crypto.randomUUID(), String(next - 1), String(next), [identityDigest, clockDigest, authClockDigest, sessionDigest, tokenDigest, permissionDigest, contextDigest, admissionDigest, deviceDigest, runtimeDigest, workerDigest, extensionDigest, configurationDigest, roleDigest, reviewDigest, approvalDigest, capabilityDigest, workerRuntimeDigest, dependencyDigest, planDigest, activationDigest, authorizationDigest, moduleDigest, catalogDigest, controlDigest, executionDigest, executionFramesDigest, executionBindingDigest, executionHandshakeDigest, executionControlDigest, controlSourceDigest, manualAuthorityDigest, deviceAuthorizationDigest, coreSourceDigest, serviceIdentityDigest, serviceAccessTokenDigest, evaluatorSourceDigest, principalRevocationDigest, deviceRecoveryDigest, deviceConsumptionDigest, manualChallengeDigest, deviceEvidenceDigest, initialResourceDigest, initialOpenDigest, workerBindingDigest, executionOpenDigest, initialReadyDigest, commandRecordDigest, commandLifecycleDigest, commandEncodingDigest, commandFinalAdmissionDigest, commandGuardDigest, commandDispatchDigest, commandSettlementDigest, commandPreparationCleanupDigest, resourceSuccessorDigest, controlCommandCutDigest, peerPairingDigest, remotePermissionDigest, issuerWatermarkDigest, sessionDenialDigest, moduleEventsDigest, eventSourceDigest, eventScopeDigest, subscriptionDigest, sourceProjectionDigest, snapshotDigest, channelDigest, baselineDigest, deliveryDigest, runEndorsementPolicyDigest, runApprovalEndorsementDigest, runApprovalRejectionDigest, runEndorsementRevocationDigest, runEndorsementRevocationReceiptDigest, runPreparationDigest, runGenerationDenialDigest, executionRunFenceDigest, runProtectionCompletionDigest, timeProviderRuntimeDigest, timeProviderPollsDigest, timeProviderCaptureDigest, timeProviderReleaseDigest, timeProviderRecoveryDigest, timeProviderControlDigest, referenceTimeAnchorDigest, commandReferenceAcceptanceDigest, referenceTimeInvalidationDigest, referenceTimeExitsDigest, referenceTimeExitRecoveryDigest, commandIssueOrderDigest, firstPairingIssueDigest, deviceSourceTimeDigest, automationCommandDigest, automaticGateDigest, automationEncodingDigest][next - 2], backupRef, crypto.randomUUID());
         pragma(db, 'user_version = ' + next);
         require(rows(db, 'PRAGMA foreign_key_check').length === 0, 'migration_integrity');
       }).immediate();
@@ -319,22 +381,70 @@ export function openStorage(dataDir) {
         db.prepare("INSERT INTO execution_session_end VALUES(?,?,'restarted')").run(row[0],crypto.randomUUID());
     }).immediate();
     let closed = false, sessions = null, sessionClock = null, sessionAuthority = null;
+    let currentProviderBinding = null, currentProviderSupervisor = null, providerPollsOpened = false, referenceAnchor = null, referenceInvalidation = null;
+    let referenceExits = null;
     const localAuthority = Number(state.schema_revision) >= 7 ? localPermissionStore(db, state) : null;
     let createExtensionManagement,workerExtensionSource,stopWorkerContent,initialOpeningSource,commandEncodingProvider;
     const extensionInstallations=Number(state.schema_revision)>=13?extensionInstallationStore(db,state,()=>!closed,create=>{createExtensionManagement=create;},source=>{workerExtensionSource=source;},bootId):null;
-    const workerLaunches=Number(state.schema_revision)>=12?workerLaunchStore(db,state,bootId,()=>!closed,workerExtensionSource,stop=>{stopWorkerContent=stop;},()=>initialOpeningSource,()=>commandEncodingProvider):null;
+    const workerLaunches=Number(state.schema_revision)>=12?workerLaunchStore(db,state,bootId,()=>!closed,workerExtensionSource,stop=>{stopWorkerContent=stop;},()=>initialOpeningSource,()=>commandEncodingProvider,
+      capture=>referenceAnchor?.projectCapture(capture)??null):null;
     return Object.freeze({identity: state, serviceBootId: bootId, engine,
       configureVirtualDevice(input){require(!closed,'storage_closed');return configureVirtualDevice(db,state,input);},
-      bindCoreRuntime(binding, policy) {
+      bindCoreRuntime(binding, policy, supervision = null) {
         require(!closed && Number(state.schema_revision) >= 11, 'core_runtime_migration_required');
         require(binding.intent.service_id === state.service_id && policy.service_id === state.service_id &&
           policy.database_instance_id === state.database_instance_id && binding.receipt.gate_state === 'closed', 'core_runtime_scope');
         const bodies = [binding.intent, binding.descriptor, binding.receipt, policy].map(canonicalize);
         require(bodies.every(b => Buffer.byteLength(b) <= 8192), 'core_runtime_capacity');
-        db.transaction(() => {
-          db.prepare('INSERT INTO core_runtime_binding VALUES(?,?,?,?,?,?,?,?)').run(bootId, binding.receipt.receipt_id,
-            binding.receipt.bootstrap_id, binding.receipt.member_boot_id, ...bodies);
+        const provider = supervision?.currentTimeProviderObservation?.() ?? null;
+        if (provider) require(Number(state.schema_revision) >= 81, 'time_provider_runtime_migration_required');
+        const timeProviderBinding = db.transaction(() => {
+          require(db.prepare('INSERT INTO core_runtime_binding VALUES(?,?,?,?,?,?,?,?)').run(bootId, binding.receipt.receipt_id,
+            binding.receipt.bootstrap_id, binding.receipt.member_boot_id, ...bodies).changes===1,'core_runtime_storage');
+          if (provider) {
+            supervision.assertTimeProviderObservation(provider);
+            const {intent,receipt}=provider;
+            let sealed;
+            try { sealed=sealTimeProviderRuntime({identity:state,serviceBootId:bootId,core:binding,provider}); }
+            catch(error) { throw new StorageError(error.message); }
+            const {runtimeId,text,digest,memberBoot}=sealed;
+            require(db.prepare('INSERT INTO time_provider_runtime_binding VALUES(?,?,?,?,?,?,?,?)').run(bootId,runtimeId,intent.launch_id,
+              receipt.receipt_id,receipt.bootstrap_id,receipt.member_boot_id,text,digest).changes===1,
+              'time_provider_runtime_storage');
+            supervision.assertTimeProviderObservation(provider);
+            return Object.freeze({text,digest,memberBoot});
+          }
+          return null;
         }).immediate();
+        if (provider) supervision.assertTimeProviderObservation(provider);
+        if(supervision && Number(state.schema_revision)>=91) referenceExits=referenceTimeExitStore(db,bootId,
+          binding.receipt.domain_ref,supervision,binding.receipt.receipt_id);
+        currentProviderBinding = timeProviderBinding;
+        if(timeProviderBinding)currentProviderSupervisor=supervision;
+        return currentProviderBinding;
+      },
+      openTimeProviderPolls(authority) {
+        require(!closed && Number(state.schema_revision) >= 82, 'time_provider_poll_migration_required');
+        require(currentProviderBinding && !providerPollsOpened, 'time_provider_poll_runtime');
+        const polls = timeProviderPollStore(db, bootId, currentProviderBinding,{...authority,
+          assertCollectionAllowed:facts=>referenceInvalidation?.assertCollectionAllowed(facts)},
+          Number(state.schema_revision) >= 84, Number(state.schema_revision) >= 85, Number(state.schema_revision) >= 86);
+        providerPollsOpened = true;
+        return polls;
+      },
+      openReferenceTimeAnchor(authority) {
+        require(!closed && Number(state.schema_revision) >= 87, 'reference_time_anchor_migration_required');
+        require(currentProviderBinding && providerPollsOpened && !referenceAnchor, 'reference_time_anchor_runtime');
+        const needed=Number(state.schema_revision)>=89 ? referenceTimeInvalidationStore(db,bootId,currentProviderBinding,currentProviderSupervisor,referenceExits) : null;
+        referenceAnchor = referenceTimeAnchorStore(db,bootId,currentProviderBinding,authority,needed);
+        referenceInvalidation=needed;
+        return referenceAnchor;
+      },
+      ...(Number(state.schema_revision)>=91 && {reconcileReferenceProtection:()=>referenceExits?.reconcile()}),
+      openTimeProviderCapture(protection, publication = null) {
+        require(!closed && Number(state.schema_revision) >= 84, 'time_provider_capture_migration_required');
+        require(currentProviderBinding && providerPollsOpened, 'time_provider_capture_runtime');
+        return timeProviderCaptureStore(db,state,protection,publication);
       },
       registerDevice(input) { require(!closed && Number(state.schema_revision) >= 10, 'device_migration_required'); return registerDevice(db, state, input); },
       workerLaunches,
@@ -351,7 +461,9 @@ export function openStorage(dataDir) {
           Number(state.schema_revision) >= 8 ? {service: state, bootId} : null,authority===localAuthority?createExtensionManagement:null,authority===localAuthority?workerLaunches?.controlBarrier:null,
           authority===localAuthority?workerLaunches?.commandExecutionCurrent:null,authority===localAuthority?value=>{initialOpeningSource=value;}:null,
           authority===localAuthority?value=>{commandEncodingProvider=value;}:null,authority===localAuthority?workerLaunches?.queueCommandEncoding:null,
-          authority===localAuthority?workerLaunches?.deviceCapabilitiesCurrent:null,authority===localAuthority?workerLaunches?.eventScopes:null); return sessions;
+          authority===localAuthority?workerLaunches?.deviceCapabilitiesCurrent:null,authority===localAuthority?workerLaunches?.eventScopes:null,
+          authority===localAuthority?workerLaunches?.deviceAutomationCurrent:null,
+          authority===localAuthority && Number(state.schema_revision)>=88 ? accepted=>referenceAnchor?.acceptAt(accepted)??null : null); return sessions;
       },
       close() {
         if (closed) return; closed = true;

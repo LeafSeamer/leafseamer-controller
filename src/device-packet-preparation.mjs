@@ -57,7 +57,7 @@ export function devicePacketPreparation({binding,profile,plan,capability,exit,ex
    body.device_session_id===bound.device_session_id&&body.request.device_id===bound.device_id&&body.primitive_id===a.primitive_id,'encoding_target');
   need(same(a.primitive_plan_ref,planRef)&&same(a.transport_profile_ref,profileRef)&&same(a.capability_ref,capabilityRef)&&
    same(body.primitive_plan_ref,projection(planRef))&&same(body.transport_profile_ref,projection(profileRef)),'encoding_profile');
-  need(body.request.origin!=='manual'||a.requester.kind==='human','encoding_requester');
+  need((body.request.origin==='manual'&&a.requester.kind==='human')||(body.request.origin==='automation'&&a.requester.kind==='service'),'encoding_requester');
   need(digest(content(body.request))===a.content_digest&&body.expires_tick_ns===a.expires_tick_ns,'encoding_content');
   need(BigInt(a.created_tick_ns)<=t&&BigInt(a.created_tick_ns)<BigInt(a.expires_tick_ns),'encoding_authorization_time');
   return {authorizationRef:reference(a.authorization_id,a.authorization_digest),expired:t>=BigInt(a.expires_tick_ns)};

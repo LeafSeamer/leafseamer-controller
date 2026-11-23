@@ -37,7 +37,7 @@ public:
         {"generation",bootstrap::string(stored.generation)},{"backend",bootstrap::string("windows_job")}})){
     using namespace bootstrap;
     moduleLink=std::make_unique<ModuleLink>(owner,exchange.memberBoot,corePid);
-    executionLink=std::make_unique<ModuleLink>(owner,exchange.memberBoot,corePid,true);
+    executionLink=std::make_unique<ModuleLink>(owner,exchange.memberBoot,corePid,ModuleLink::Kind::execution);
     context=std::make_unique<WorkerContext>(owner,object({{"format",string("leafseamer-device-worker-start/3")},{"intent",stored.intent},{"module",materials.moduleContext},
       {"execution",object({{"controller_boot_id",string(coreBoot)}})},
       {"descriptor",core.descriptor},{"identity",object({{"service_id",string(core.policy.service)},{"database_instance_id",string(core.policy.database)}})},

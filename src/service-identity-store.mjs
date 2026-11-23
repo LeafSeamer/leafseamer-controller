@@ -2,10 +2,14 @@ import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {IdentityError,createOpaqueSecret,verifyOpaqueSecret} from './identity-crypto.mjs';
 import {seal as sealBody,ref,checked,same,digest} from './auth-clock-value.mjs';
+import {pairingReference} from './peer-pairing-value.mjs';
 import {serviceAccessTokenStore} from './service-access-token-store.mjs';
 import {deviceEvaluatorSource} from './device-evaluator-source.mjs';
 import {normalizeConsumerSlots,checkConsumerPairing,consumerOwner,sameConsumer} from './service-consumer-scope.mjs';
 import {serviceSubscriptionStore} from './service-subscription-store.mjs';
+import {runEndorsementPolicyStore} from './run-endorsement-policy.mjs';
+import {runApprovalEndorsementStore} from './run-approval-endorsement.mjs';
+import {runPreparationStore} from './run-preparation-store.mjs';
 const seal=({digest:_previous,...body})=>sealBody(body);
 const need=(ok,code)=>{if(!ok)throw new IdentityError('service_identity_'+code);};
 const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v);
@@ -15,16 +19,17 @@ const written=r=>need(r.changes===1,'storage');
 const unpack=(text,hash)=>{const v=checked(JSON.parse(text));need(canonicalize(v)===text&&v.digest===hash,'integrity');return v;};
 const deliver=v=>{if(v.denied)throw new IdentityError(v.denied);return v;};
 // 核心内部人员管理入口。服务主体不建立人员会话，凭据激活不授予设备执行许可。
-export function serviceIdentityStore({db,service,bootId,writer,time,authenticated,authority,coreSource=null,attachEvaluatorCurrent,pairings=()=>null,eventScopes=null,durationSample=null}){
+export function serviceIdentityStore({db,service,bootId,writer,time,authenticated,authority,coreSource=null,attachEvaluatorCurrent,pairings=()=>null,eventScopes=null,durationSample=null,deviceAutomationCurrent=null,pairingSample=null,authorizeEndorsement=null,authorizeArmInitiator=null,automationExecution=null}){
  const invalidVerifier=crypto.randomBytes(32),attempts=new Map();let globalStart=0n,globalCount=0;
  function management(input,permission,work){return deliver(writer(()=>{
   const now=time(),found=authenticated(input,now);if(found.denied)return found;
   const grant=authority.current(found.session.principal_id);
+  const recent=permission==='auth.manage'||permission==='grant.manage';
   need(db.prepare("SELECT 1 FROM subject WHERE principal_id=? AND kind='human'").pluck().get(found.session.principal_id)&&
-   grant.state==='active'&&grant.permissions.includes(permission)&&(permission!=='auth.manage'||now.upper<BigInt(found.session.recent_before_ns)),'management_denied');
+   grant.state==='active'&&grant.permissions.includes(permission)&&(!recent||now.upper<BigInt(found.session.recent_before_ns)),'management_denied');
   const actor={principal_id:found.session.principal_id,issuer_id:found.session.issuer_id,issuer_epoch:found.session.issuer_epoch,
    session_id:found.session.session_id,credential_id:found.credential.credential_id,policy_ref:ref(grant)};
-  const result=work(actor,now),last=time();need((permission!=='auth.manage'||last.upper<BigInt(found.session.recent_before_ns))&&
+  const result=work(actor,now),last=time();need((!recent||last.upper<BigInt(found.session.recent_before_ns))&&
    last.upper<BigInt(found.session.idle_before_ns)&&last.upper<BigInt(found.session.expires_ns)&&same(ref(authority.current(actor.principal_id)),actor.policy_ref),'management_changed');return result;
  }));}
  function principal(id){
@@ -43,8 +48,9 @@ export function serviceIdentityStore({db,service,bootId,writer,time,authenticate
  }
  function approval(subject){
   need(subject.state==='active'&&subject.approval_ref,'approval_required');
-  const row=db.prepare('SELECT body_jcs,body_digest FROM service_approval WHERE approval_id=? AND principal_id=?').raw().get(subject.approval_ref.id,subject.id);
-  need(row,'approval_required');const value=unpack(...row);need(same(ref(value),subject.approval_ref),'integrity');return value;
+  const row=db.prepare('SELECT body_jcs,body_digest,operation_id FROM service_approval WHERE approval_id=? AND principal_id=?').raw().get(subject.approval_ref.id,subject.id);
+  need(row,'approval_required');const value=unpack(row[0],row[1]);
+  need(same(ref(value),subject.approval_ref)&&(value.format!=='local-service-approval/3'||value.approval_operation_id===row[2]),'integrity');return value;
  }
  function capacity(){need(db.prepare('SELECT count(*) FROM service_identity_operation').pluck().get()<16384,'capacity');}
  function prior(actor,request,kind){
@@ -92,15 +98,46 @@ export function serviceIdentityStore({db,service,bootId,writer,time,authenticate
   need(eventScopes,'consumer_scope_required');const resolved=eventScopes.currentInTransaction(slot.allowed_scope_ref),peer=record.transcript.parties.find(p=>p.service_id===slot.consumer_service_id);
   need(resolved.registration.purpose===slot.purpose&&approved.permissions.includes('status.read')&&resolved.registration.sources.every(s=>approved.device_ids.includes(s.device_id))&&
    peer.object_scope_digest===digest({format:'leafseamer.device-binding-scope/1',authority_service_id:service.service_id,database_instance_id:service.database_instance_id,device_ids:approved.device_ids}),'consumer_scope');
+  return resolved;
  }
- function approvePrincipal(input,request,withConsumers=false){
-  fields(request,'request_id,principal_id,expected_revision,audiences,permissions,device_ids,not_before_ns,expires_ns'+(withConsumers?',consumer_slots':''));
+ function normalizeAutomationOrigin(origin){
+  fields(origin,'seamer_scope,pairing_ref,device_scope');
+  const {seamer_scope,pairing_ref,device_scope}=origin;
+  fields(seamer_scope,'authority_service_id,database_instance_id');
+  fields(pairing_ref,'id,revision,digest');
+  fields(device_scope,'format,authority_service_id,database_instance_id,device_ids');
+  need(uuid(seamer_scope.authority_service_id)&&uuid(seamer_scope.database_instance_id)&&uuid(pairing_ref.id)&&integer(pairing_ref.revision)>0n&&
+   typeof pairing_ref.digest==='string'&&/^sha256:[0-9a-f]{64}$(?![\s\S])/.test(pairing_ref.digest),'automation_origin');
+  need(device_scope.format==='leafseamer.device-binding-scope/1'&&device_scope.authority_service_id===service.service_id&&
+   device_scope.database_instance_id===service.database_instance_id&&Array.isArray(device_scope.device_ids)&&device_scope.device_ids.length<=64&&
+   device_scope.device_ids.every(uuid)&&same(device_scope.device_ids,[...new Set(device_scope.device_ids)].sort()),'automation_scope');
+  return structuredClone(origin);
+ }
+ function automationPairing(subject,approved,record){
+  const origin=approved.automation_origin;
+  const peer=record.transcript.parties.find(p=>p.service_id===record.peer_service_id);
+  const local=record.transcript.parties.find(p=>p.service_id===service.service_id);
+  need(subject.purpose==='automation'&&record.state==='activated'&&same(pairingReference(record),origin.pairing_ref)&&
+   peer?.service_kind==='seamer'&&peer.service_id===origin.seamer_scope.authority_service_id&&peer.database_instance_id===origin.seamer_scope.database_instance_id&&
+   peer.issuer_id===subject.issuer_id&&peer.issuer_epoch===subject.issuer_epoch&&local?.service_kind==='controller'&&
+   local.database_instance_id===service.database_instance_id&&local.issuer_id===subject.issuer_id&&local.issuer_epoch===subject.issuer_epoch,
+   'automation_pairing');
+  need(peer.permissions.includes('automation.prepare.read')&&approved.permissions.every(permission=>peer.permissions.includes(permission))&&
+   peer.object_scope_digest===digest(origin.device_scope)&&approved.device_ids.every(id=>origin.device_scope.device_ids.includes(id)),'automation_scope');
+  need(BigInt(approved.not_before_ns)>=BigInt(record.not_before_ns)&&BigInt(approved.expires_ns)<=BigInt(record.expires_ns),'automation_validity');
+ }
+ function approvePrincipal(input,request,profile='local'){
+  const withConsumers=profile==='subscription',withAutomation=profile==='automation';
+  fields(request,'request_id,principal_id,expected_revision,audiences,permissions,device_ids,not_before_ns,expires_ns'+(withConsumers?',consumer_slots':withAutomation?',automation_origin':''));
   const before=integer(request.not_before_ns),end=integer(request.expires_ns);need(end>before&&Array.isArray(request.audiences)&&
    request.audiences.length===1&&request.audiences[0]===service.service_id&&Array.isArray(request.permissions)&&request.permissions.length>0&&request.permissions.length<=64&&
    request.permissions.every(p=>typeof p==='string'&&/^[a-z][a-z0-9_.]{0,63}$/.test(p))&&new Set(request.permissions).size===request.permissions.length&&
    Array.isArray(request.device_ids)&&request.device_ids.length<=128&&request.device_ids.every(uuid)&&new Set(request.device_ids).size===request.device_ids.length,'input');
   if(withConsumers)need(Number(service.schema_revision)>=64&&request.permissions.includes('event.internal.subscribe'),'consumer_approval_required');
-  request={...request,permissions:[...request.permissions].sort(),device_ids:[...request.device_ids].sort(),...(withConsumers?{consumer_slots:normalizeConsumerSlots(request.consumer_slots,service)}:{})};
+  if(withAutomation)need(Number(service.schema_revision)>=61&&request.permissions.includes('automation.prepare')&&
+   request.permissions.every(permission=>['automation.prepare','automation.prepare.read','automation.protect'].includes(permission)),'automation_permissions');
+  request={...request,permissions:[...request.permissions].sort(),device_ids:[...request.device_ids].sort(),...(withConsumers?{consumer_slots:normalizeConsumerSlots(request.consumer_slots,service)}:{}),
+   ...(withAutomation?{automation_origin:normalizeAutomationOrigin(request.automation_origin)}:{})};
   return management(input,'auth.manage',(actor,now)=>{const old=prior(actor,request,'approve');if(old)return old;
    const subject=principal(request.principal_id);need(subject.revision===request.expected_revision,'revision');need(subject.state==='disabled'&&!subject.approval_ref,'approval_change_unavailable');
    need(now.upper<end,'expired');for(const id of request.device_ids)need(db.prepare('SELECT 1 FROM device_record WHERE device_id=?').pluck().get(id),'scope');
@@ -110,14 +147,44 @@ export function serviceIdentityStore({db,service,bootId,writer,time,authenticate
     need(before>=BigInt(record.not_before_ns)&&end<=BigInt(record.expires_ns),'consumer_validity');
     need(!active.some(a=>now.upper<BigInt(a.expires_ns)&&a.consumer_slots.some(other=>sameConsumer(slot,other))),'consumer_slot_conflict');
    }}
-   const op=crypto.randomUUID(),value=seal({format:withConsumers?'local-service-approval/2':'local-service-approval/1',id:crypto.randomUUID(),revision:'1',principal_id:subject.id,
+   if(withAutomation){
+    const record=pairings()?.requireActivatedInTransaction(request.automation_origin.pairing_ref);need(record,'automation_pairing');
+    automationPairing(subject,request,record);
+   }
+   const op=crypto.randomUUID(),value=seal({format:withAutomation?'local-service-approval/3':withConsumers?'local-service-approval/2':'local-service-approval/1',id:crypto.randomUUID(),revision:'1',principal_id:subject.id,
     issuer_id:subject.issuer_id,issuer_epoch:subject.issuer_epoch,audiences:request.audiences,permissions:request.permissions,device_ids:request.device_ids,
-    ...(withConsumers?{consumer_slots:request.consumer_slots}:{}),not_before_ns:request.not_before_ns,expires_ns:request.expires_ns,approved_by:actor,acquisition_ref:now.acquisition});
+    ...(withConsumers?{consumer_slots:request.consumer_slots}:{}),...(withAutomation?{automation_origin:request.automation_origin,approval_operation_id:op}:{}),
+    not_before_ns:request.not_before_ns,expires_ns:request.expires_ns,approved_by:actor,acquisition_ref:now.acquisition});
    written(db.prepare('INSERT INTO service_approval VALUES(?,?,?,?,?)').run(value.id,subject.id,canonicalize(value),value.digest,op));
-   const next=seal({...subject,revision:'2',state:'active',approval_ref:ref(value)});savePrincipal(next,op,subject);return commit(op,actor,request,'approve',{principal:next,approval:value},now);
+   const next=seal({...subject,revision:'2',state:'active',approval_ref:ref(value)});savePrincipal(next,op,subject);
+   const result=commit(op,actor,request,'approve',{principal:next,approval:value},now);
+   if(withAutomation){
+    automationPairing(next,value,pairings().requireActivatedInTransaction(value.automation_origin.pairing_ref));
+    need(time().upper<end,'automation_expired');
+   }
+   return result;
   });
  }
- function currentConsumer(request){
+ function currentAutomationApproval(bindingId,socket,request){
+  need(db.open&&db.inTransaction&&Number(service.schema_revision)>=61,'automation_writer');
+  fields(request,'principal,approval_ref');fields(request.principal,'issuer_id,issuer_epoch,principal_id');
+  fields(request.approval_ref,'id,revision,digest');
+  const pairingsApi=pairings();need(pairingsApi,'automation_pairing');
+  const {record}=pairingsApi.authorizeAutomationApprovalInTransaction(bindingId,socket);
+  return sourceAutomationApproval(request.principal,request.approval_ref,time(),record);
+ }
+ function sourceAutomationApproval(requested,approvalRef,now,peerRecord=null){
+  const subject=principal(requested.principal_id),value=approval(subject);
+  need(subject.issuer_id===requested.issuer_id&&subject.issuer_epoch===requested.issuer_epoch&&
+   value.format==='local-service-approval/3'&&same(ref(value),approvalRef),'automation_approval');
+  const record=peerRecord??pairings()?.requireActivatedInTransaction(value.automation_origin.pairing_ref);
+  need(record,'automation_pairing');automationPairing(subject,value,record);
+  const last=time();
+  need(now.lower>=BigInt(value.not_before_ns)&&last.lower>=BigInt(value.not_before_ns)&&last.upper<BigInt(value.expires_ns),'automation_expired');
+  return {issuer_scope:{authority_service_id:service.service_id,database_instance_id:service.database_instance_id},
+   subject_ref:ref(subject),approval_ref:ref(value),approval:value};
+ }
+ function resolveConsumer(request){
   need(db.open&&db.inTransaction&&Number(service.schema_revision)>=64,'consumer_writer');fields(request,'pairing_ref,consumer_id,purpose,allowed_scope_ref');
   need(typeof request.consumer_id==='string'&&['status_projection','canonical_trigger'].includes(request.purpose),'input');
   const record=pairings()?.requireActivatedInTransaction(request.pairing_ref);need(record,'consumer_pairing_required');const now=time(),matches=[];
@@ -125,15 +192,17 @@ export function serviceIdentityStore({db,service,bootId,writer,time,authenticate
   const live=matches.filter(({a})=>now.lower>=BigInt(a.not_before_ns)&&now.upper<BigInt(a.expires_ns));need(live.length===1,'consumer_unavailable');const {a,slot}=live[0],subject=principal(a.principal_id);
   need(same(ref(approval(subject)),ref(a))&&a.permissions.includes('event.internal.subscribe')&&slot.purpose===request.purpose&&same(slot.allowed_scope_ref,request.allowed_scope_ref),'consumer_scope');
   normalizeConsumerSlots(a.consumer_slots,service);checkConsumerPairing(slot,record,service);
-  consumerScope(slot,a,record);
+  const selected=consumerScope(slot,a,record);
   const last=time();need(last.lower>=BigInt(a.not_before_ns)&&last.upper<BigInt(a.expires_ns),'consumer_expired');
-  return structuredClone({format:'leafseamer-service-consumer-authorization/1',owner:consumerOwner(subject,slot),slot,subject_ref:ref(subject),approval_ref:ref(a),pairing_ref:slot.pairing_ref,
+  const consumer=structuredClone({format:'leafseamer-service-consumer-authorization/1',owner:consumerOwner(subject,slot),slot,subject_ref:ref(subject),approval_ref:ref(a),pairing_ref:slot.pairing_ref,
    not_before_ns:a.not_before_ns,expires_ns:a.expires_ns,acquisition_ref:last.acquisition});
+  return {consumer,selected};
  }
+ const currentConsumer=request=>resolveConsumer(request).consumer;
  const {subscriptionPolicyInTransaction,...serviceTokens}=Number(service.schema_revision)>=37?serviceAccessTokenStore({db,service,writer,time,management,principal,approval,credential,allowed,expired,authenticateCredential,consumerCurrent:currentConsumer}):{};
  function currentSubscription(saved){
-  const consumer=currentConsumer({pairing_ref:saved.pairing_ref,consumer_id:saved.owner.consumer_id,purpose:'canonical_trigger',allowed_scope_ref:saved.scope_ref});
-  const selected=eventScopes.currentInTransaction(saved.scope_ref),local=subscriptionPolicyInTransaction(consumer);if(local.denied)return local;
+  const {consumer,selected}=resolveConsumer({pairing_ref:saved.pairing_ref,consumer_id:saved.owner.consumer_id,purpose:'canonical_trigger',allowed_scope_ref:saved.scope_ref});
+  const local=subscriptionPolicyInTransaction(consumer);if(local.denied)return local;
   need(same(consumer.owner,saved.owner)&&selected.registration.sources.every(source=>local.policy.device_ids.includes(source.device_id)),'consumer_local_scope');
   const record=pairings().requireActivatedInTransaction(saved.pairing_ref),end=[consumer.expires_ns,local.policy.expires_ns,record.expires_ns].map(BigInt).reduce((a,b)=>a<b?a:b),last=time();need(last.upper<end,'consumer_expired');
   return {format:'leafseamer-service-subscription-authorization/1',principal_kind:'service',session:null,owner:consumer.owner,subject_ref:consumer.subject_ref,approval_ref:consumer.approval_ref,policy_ref:local.policy_ref,
@@ -144,8 +213,9 @@ export function serviceIdentityStore({db,service,bootId,writer,time,authenticate
   const paired=pairings().authorizeSubscriptionInTransaction(bindingId,socket),record=paired.record,pairing_ref={id:record.binding_id,revision:record.revision,digest:record.digest},now=time();
   const slots=activeConsumerApprovals().filter(a=>now.lower>=BigInt(a.not_before_ns)&&now.upper<BigInt(a.expires_ns)).flatMap(a=>a.consumer_slots)
    .filter(slot=>slot.consumer_service_id===paired.peer.service_id&&slot.consumer_id===request.consumer_id&&same(slot.pairing_ref,pairing_ref));
-  need(slots.length===1,'consumer_unavailable');const slot=slots[0],consumer=currentConsumer({pairing_ref,consumer_id:request.consumer_id,purpose:request.purpose,allowed_scope_ref:slot.allowed_scope_ref});
-  const selected=eventScopes.currentInTransaction(slot.allowed_scope_ref);need(same(selected.registration.scope,request.scope),'consumer_scope');
+  need(slots.length===1,'consumer_unavailable');const slot=slots[0];
+  const {consumer,selected}=resolveConsumer({pairing_ref,consumer_id:request.consumer_id,purpose:request.purpose,allowed_scope_ref:slot.allowed_scope_ref});
+  need(same(selected.registration.scope,request.scope),'consumer_scope');
   const local=subscriptionPolicyInTransaction(consumer);if(local.denied)return local;
   need(selected.registration.sources.every(source=>local.policy.device_ids.includes(source.device_id)),'consumer_local_scope');
   const end=[consumer.expires_ns,local.policy.expires_ns,record.expires_ns].map(BigInt).reduce((a,b)=>a<b?a:b),last=time();
@@ -154,8 +224,23 @@ export function serviceIdentityStore({db,service,bootId,writer,time,authenticate
    pairing_ref,scope_ref:slot.allowed_scope_ref,scope:selected.registration.scope,source_frontiers:selected.current_frontiers,service_boot_id:selected.registration.service_boot_id,
    expires_ns:String(end),acquisition_ref:last.acquisition};
  }
+ const runEndorsementPolicies=Number(service.schema_revision)>=72?runEndorsementPolicyStore({db,service,management,sourceCurrent:sourceAutomationApproval,
+  time,deviceAutomationCurrent,pairings,pairingSample}):null;
+ const runApprovalEndorsements=Number(service.schema_revision)>=73&&authorizeEndorsement?runApprovalEndorsementStore({db,service,writer,time,
+  authorize:authorizeEndorsement,readProposal:runEndorsementPolicies.withProposal,requireCurrentEndorsement:runEndorsementPolicies.requireCurrentEndorsement,
+  authorizeArmInitiator,requireCurrentInitiator:runEndorsementPolicies.requireCurrentInitiator,
+  authorizePeer:(bindingId,socket)=>pairings().authorizeAutomationApprovalInTransaction(bindingId,socket),pairings,pairingSample,
+  protectionTargets:Number(service.schema_revision)>=77?(...args)=>runPreparations.protectionTargets(...args):null,
+  authorizeProtectionPeer:Number(service.schema_revision)>=74?(bindingId,socket)=>pairings().authorizeRunProtectionInTransaction(bindingId,socket):null}):null;
+ const runPreparations=Number(service.schema_revision)>=77&&runApprovalEndorsements?runPreparationStore({db,service,bootId,writer,time,pairingSample,
+  authorizePeer:(bindingId,socket)=>pairings().authorizeAutomationApprovalInTransaction(bindingId,socket),
+  activePeer:(scope,bindingId)=>pairings().requireActivePeerInTransaction(scope,'seamer',bindingId),
+  prepareInitiator:runApprovalEndorsements.prepareRunInitiator,prepareApproval:runApprovalEndorsements.prepareRunApproval,automationExecution}):null;
  return Object.freeze({
-  approveSubscriptionServicePrincipal:(input,request)=>approvePrincipal(input,request,true),
+  approveSubscriptionServicePrincipal:(input,request)=>approvePrincipal(input,request,'subscription'),
+  approveAutomationServicePrincipal:(input,request)=>approvePrincipal(input,request,'automation'),
+  currentAutomationServiceApproval:(bindingId,socket,request)=>writer(()=>currentAutomationApproval(bindingId,socket,request)),
+  runEndorsementPolicies,runApprovalEndorsements,runPreparations,
   currentServiceConsumer:request=>writer(()=>currentConsumer(request)),
   currentServiceConsumerInTransaction:currentConsumer,
   authorizeServiceSubscription:(bindingId,socket,request)=>deliver(writer(()=>authorizeSubscription(bindingId,socket,request))),

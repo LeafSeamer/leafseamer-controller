@@ -24,7 +24,9 @@ export function deviceInitialOpen({db,writer,resourceCurrent,resourceRead,domain
    BigInt(s.selected_tick_ns)<=BigInt(selected)&&BigInt(selected)<BigInt(s.expires_tick_ns),'source');
   const revision=db.prepare('SELECT revision FROM control_state_source WHERE source_id=? AND device_id=?').pluck().get(i.control_state_ref.id,b.device_id);
   need(revision!==undefined,'control');const control=readControlSource(db,b.device_id,String(revision));
-  need(same(control.ref,i.control_state_ref)&&control.value.mode==='manual'&&control.value.holder&&
+  const {mode,holder}=control.value;
+  need(same(control.ref,i.control_state_ref)&&(mode==='manual'&&holder||
+   Number(db.pragma('user_version',{simple:true}))>=96&&mode==='automatic'&&holder===null)&&
    control.value.pending_operation_id===null&&control.value.gate_state==='protected','control');
   const fence=successor?readCommandClosure(db,i.closing_ref.id.replace(/\.fence_request$/,'')):readInitialFence(db,i.initial_fence_ref.id);
   const confirmation=successor?fence.ack?.ref:fence?.confirmation_ref;

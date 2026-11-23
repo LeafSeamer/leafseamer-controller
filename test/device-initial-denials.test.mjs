@@ -12,23 +12,25 @@ const rawDigest=value=>'sha256:'+crypto.createHash('sha256').update(value).diges
 function fixture(t){
  const db=new Database(':memory:');t.after(()=>db.close());
  db.exec(`CREATE TABLE service_state(service_id TEXT,database_instance_id TEXT,schema_revision TEXT);
- CREATE TABLE ca_command_initial(command_id TEXT);
+ CREATE TABLE ca_command_initial(command_id TEXT,key_id TEXT);
+ CREATE TABLE ca_request_key(key_id TEXT,device_id TEXT);
  CREATE TABLE execution_session(ipc_session_id TEXT,binding_jcs TEXT,binding_digest TEXT);
  CREATE TABLE execution_frame_record(record_id TEXT,transaction_id TEXT,direction TEXT,record_jcs TEXT,record_digest TEXT,
- frame_jcs TEXT,frame_digest TEXT,wire BLOB,wire_digest TEXT,message_type TEXT,ipc_session_id TEXT,sequence TEXT);
+ frame_jcs TEXT,frame_digest TEXT,wire BLOB,wire_digest TEXT,message_type TEXT,ipc_session_id TEXT,sequence TEXT,device_id TEXT);
+ CREATE TABLE run_generation_denial(snapshot_revision INTEGER,origin_service_id TEXT,origin_database_instance_id TEXT,run_id TEXT,deny_revision INTEGER,floor TEXT);
  CREATE TABLE execution_effect_commit(record_id TEXT,transaction_id TEXT,disposition TEXT);`);
  const service={service_id:'controller',database_instance_id:'database',schema_revision:'44'};
  db.prepare('INSERT INTO service_state VALUES(?,?,?)').run(service.service_id,service.database_instance_id,service.schema_revision);
  const binding={authority:'controller',service_id:service.service_id,database_instance_id:service.database_instance_id,ipc_session_id:'session'};
  db.prepare('INSERT INTO execution_session VALUES(?,?,?)').run(binding.ipc_session_id,canonicalize(binding),digest(binding));
- function add(id,type='HELLO_ACK',body={selected_features:deviceExecutionCapabilities.base}){
-  const value={ipc_session_id:'session',type,message_id:id,seq:id==='a'?'1':'2',body},payload=Buffer.from(JSON.stringify(value)),wire=Buffer.alloc(payload.length+4);
+ function add(id,type='HELLO_ACK',body={selected_features:deviceExecutionCapabilities.base},device=null){
+  const value={ipc_session_id:'session',type,message_id:id,seq:id==='a'?'1':'2',body,device_id:device},payload=Buffer.from(JSON.stringify(value)),wire=Buffer.alloc(payload.length+4);
   wire.writeUInt32BE(payload.length);payload.copy(wire,4);
   const record={record_id:id,session_ref:{id:'session',revision:'1',digest:digest(binding)},direction:'c2w',message_type:type,
    sequence:value.seq,message_id:id,frame_digest:digest(value),wire_digest:rawDigest(wire),wire_length:wire.length};
   const sealed={...record,record_digest:digest(record)};
-  db.prepare('INSERT INTO execution_frame_record VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(id,id,'c2w',canonicalize(sealed),sealed.record_digest,
-   canonicalize(value),digest(value),wire,rawDigest(wire),type,'session',value.seq.padStart(20,'0'));
+  db.prepare('INSERT INTO execution_frame_record VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(id,id,'c2w',canonicalize(sealed),sealed.record_digest,
+   canonicalize(value),digest(value),wire,rawDigest(wire),type,'session',value.seq.padStart(20,'0'),device);
   db.prepare("INSERT INTO execution_effect_commit VALUES(?,?,'applied')").run(id,id);
  }
  add('a');
@@ -40,22 +42,48 @@ test('首次快照必须处于writer，零水位绑定真实scope和设备；未
  assert.equal(source.outgoing_frame_refs.length,1);
  f.add('b');assert.notDeepEqual(f.capture(),source);
  assert.deepEqual(f.run(()=>readInitialDenials(f.db,f.service,'device',source)),source);
- f.db.exec("UPDATE service_state SET schema_revision='71'");f.service.schema_revision='71';
+ f.db.exec("UPDATE service_state SET schema_revision='94'");f.service.schema_revision='94';
+ assert.equal(f.capture().schema_revision,'94');
+ f.db.exec("UPDATE service_state SET schema_revision='95'");f.service.schema_revision='95';
+ assert.equal(f.capture().schema_revision,'95');
+ f.db.exec("UPDATE service_state SET schema_revision='96'");f.service.schema_revision='96';
+ assert.equal(f.capture().schema_revision,'96');
+ f.db.exec("UPDATE service_state SET schema_revision='97'");f.service.schema_revision='97';
+ assert.equal(f.capture().schema_revision,'97');
+ f.db.exec("UPDATE service_state SET schema_revision='98'");f.service.schema_revision='98';
  assert.throws(f.capture,/initial_denials_schema/);
  assert.deepEqual(f.run(()=>readInitialDenials(f.db,f.service,'device',source)),source);
 });
-test('59到70显式采用原手动快照语义，仍拒绝声明自动化能力',t=>{
- for(const revision of ['59','60','61','62','63','64','65','66','67','68','69','70']){
+test('Schema 79 起设备快照接纳已协商的运行拒绝能力',t=>{
+ for(const revision of ['59','60','61','62','63','64','65','66','67','68','69','70','71','72','73','74','75','76','77','78','79','80']){
   const f=fixture(t);f.db.prepare('UPDATE service_state SET schema_revision=?').run(revision);f.service.schema_revision=revision;
   const source=f.capture();assert.equal(source.schema_revision,revision);assert.equal(source.format,'initial-manual-deny-snapshots/2');assert.deepEqual(source.pending_admission_refs,[]);
-  f.add('b','HELLO_ACK',{selected_features:[...deviceExecutionCapabilities.base,...deviceExecutionCapabilities.automation]});assert.throws(f.capture,/initial_denials_features/);
+  f.add('b','HELLO_ACK',{selected_features:[...deviceExecutionCapabilities.base,...deviceExecutionCapabilities.automation]});
+  if(Number(revision)>=79)assert.equal(f.capture().run_deny_snapshot.snapshot_revision,'0');
+  else assert.throws(f.capture,/initial_denials_features/);
  }
 });
 test('任意设备的已受理命令或不再属于首次关闭的执行历史阻止空快照',t=>{
- const f=fixture(t);f.db.exec("INSERT INTO ca_command_initial VALUES('other_device_command')");
+ const f=fixture(t);f.db.exec("INSERT INTO ca_command_initial VALUES('other_device_command','other_key')");
  assert.throws(f.capture,/initial_denials_command_history/);f.db.exec('DELETE FROM ca_command_initial');
  f.add('b','FENCE',{issued_cut_revision:'1',target_gate_revision:'1',attempt_binding:{attempt_ordinal:'1',previous_barrier_id:null},
   open_intents:[],open_transmission_intents:[],cancel_transmissions:[]});assert.throws(f.capture,/initial_denials_fence_history/);
+});
+test('Schema 97 将设备出站历史限定在本设备，保留无设备归属的帧与本设备命令',t=>{
+ const f=fixture(t);f.db.exec("UPDATE service_state SET schema_revision='97'");f.service.schema_revision='97';
+ const initial=f.capture();
+ assert.equal(initial.history_scope,'device');
+ f.db.exec("INSERT INTO ca_request_key VALUES('other_key','other'); INSERT INTO ca_command_initial VALUES('other_command','other_key')");
+ f.add('b','DISPATCH',{},'other');
+ assert.deepEqual(f.capture(),initial);
+ f.db.exec("INSERT INTO ca_request_key VALUES('own_key','device'); INSERT INTO ca_command_initial VALUES('own_command','own_key')");
+ assert.throws(f.capture,/resource_successor_required/);
+ f.db.exec("DELETE FROM ca_command_initial WHERE command_id='own_command'");
+ f.add('c','DISPATCH',{},'device');
+ assert.throws(f.capture,/dispatch_ready/);
+ f.db.exec("DELETE FROM execution_frame_record WHERE record_id='c'");
+ f.add('d','DISPATCH',{});
+ assert.throws(f.capture,/dispatch_ready/);
 });
 test('拒绝能力、缺少提交、损坏原wire、错scope与重算空快照摘要均不能成为来源',t=>{
  const f=fixture(t),source=f.capture();

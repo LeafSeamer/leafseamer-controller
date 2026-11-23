@@ -1,5 +1,5 @@
 import {ClockError, clockInteger} from './native-clock.mjs';
-import {need, canonical, same, context, captureInterval, extrapolate} from './auth-clock-value.mjs';
+import {need, canonical, same, context, captureInterval, extrapolate, ref} from './auth-clock-value.mjs';
 
 // provider只能由受监督本地启动装配，不能从HTTP、环境开关或采样正文取得。
 // 缺少实现时保留诊断服务，不生成环境批准或运行域身份。
@@ -40,7 +40,7 @@ export function startAuthenticationClock(source, ledger, provider = null, {sched
       ledger.read(binding.runtime.clock_domain_id, tick(), evidence(), source.artifactDigest);
     } catch (error) { fail(error); }
   }
-  function current(withDomain = false, withDurationBounds = false) {
+  function current(projection = 'plain') {
     usable();
     try {
       const before = evidence(), now = tick(), domain = binding.runtime.clock_domain_id;
@@ -51,13 +51,21 @@ export function startAuthenticationClock(source, ledger, provider = null, {sched
       const observed = captureInterval(observation, before.policy), predicted = extrapolate(record, clockInteger(observation.b));
       need(clockInteger(observed.upper_ns) >= clockInteger(predicted.lower_ns) && clockInteger(observed.lower_ns) <= clockInteger(predicted.upper_ns), 'auth_clock_disjoint');
       const at = tick(), value = ledger.read(domain, at, after, source.artifactDigest);
-      const durationBounds=withDurationBounds?{duration_bounds:Object.freeze({policy_ref:Object.freeze({...record.policy_ref}),drift_ppb:record.drift_ppb,monotonic_quantization_ns:record.monotonic_quantization_ns})}:{};
-      return Object.freeze(withDomain ? {...value,...durationBounds, tick_ns: String(at), runtime_domain_ref: Object.freeze({clock_domain_id: domain, descriptor_digest: binding.runtime.descriptor_digest})} : value);
+      if (projection === 'plain') return Object.freeze(value);
+      const runtimeDomain = Object.freeze({clock_domain_id: domain, descriptor_digest: binding.runtime.descriptor_digest});
+      const sample = {...value, tick_ns: String(at), runtime_domain_ref: runtimeDomain};
+      if (projection === 'pairing') return Object.freeze(sample);
+      const bounds = Object.freeze({policy_ref: Object.freeze({...record.policy_ref}),
+        drift_ppb: record.drift_ppb, monotonic_quantization_ns: record.monotonic_quantization_ns});
+      if (projection === 'duration') return Object.freeze({...sample, duration_bounds: bounds});
+      return Object.freeze({...sample, ...bounds, acquisition_ref: Object.freeze(value.acquisition_ref),
+        runtime_ref: Object.freeze(ref(after.runtime)), source_ref: Object.freeze({...after.policy.system_time_source_ref})});
     } catch (error) { fail(error); throw new ClockError(failure); }
   }
   refresh();
   const timer = schedule && provider !== null ? setInterval(refresh, 500) : null; timer?.unref();
-  return Object.freeze({refresh, current: () => current(), pairingSample: () => current(true), durationSample: () => current(true,true),
+  return Object.freeze({refresh, current: () => current(), pairingSample: () => current('pairing'), durationSample: () => current('duration'),
+    referenceTimeSample: () => current('reference-time'),
     status() {
       if (!failure && binding && !stopped) { try { current(); } catch {} }
       return Object.freeze({state: failure ? 'faulted' : binding && !stopped ? 'available' : 'unqualified',

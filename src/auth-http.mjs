@@ -3,6 +3,8 @@ import {TLSSocket} from 'node:tls';
 import {createHttpAdapter,WireError} from './sdk/http.mjs';
 import {contractSelection as selection} from './sdk/index.mjs';
 import {canonical} from './auth-clock-value.mjs';
+import {pairingFields} from './peer-pairing-value.mjs';
+import {localPairingLimit, localPairingOperations, localPairingPath, loopbackHost} from './local-pairing-admin.mjs';
 
 const routes = new Map([
   ['/auth/sessions', 'POST'], ['/auth/sessions/refresh', 'POST'],
@@ -38,6 +40,26 @@ function tokenInput(req) {
   const decoded = credential(bearer?.[1]); return {token_id: decoded.credential_id, secret: decoded.secret};
 }
 const wireCredential = (id, secret) => 'v1.' + id + '.' + secret;
+function readBody(req, res, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0, settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      req.off('data', data); req.off('end', end); req.off('aborted', abort); req.off('error', abort); res.off('close', abort);
+      req.pause();
+      error ? reject(error) : resolve(value);
+    };
+    const data = chunk => { size += chunk.length; if (size > limit) finish(413); else chunks.push(chunk); };
+    const end = () => finish(null, Buffer.concat(chunks, size));
+    const abort = () => finish(400);
+    const timer = setTimeout(() => finish(408), bodyDeadline);
+    timer.unref();
+    req.on('data', data); req.once('end', end); req.once('aborted', abort); req.once('error', abort); res.once('close', abort);
+  });
+}
 const timestamp = (value, up = false) => new Date(Number((BigInt(value) + (up ? 999999n : 0n)) / 1000000n)).toISOString();
 function sessionView(session, permissions, revision, until = null) {
   const end = [session.expires_ns, session.idle_before_ns, ...(until ? [until] : [])].map(BigInt).reduce((a, b) => a < b ? a : b);
@@ -45,7 +67,7 @@ function sessionView(session, permissions, revision, until = null) {
     authorization_revision: revision, permissions, validity: {not_before: timestamp(session.not_before_ns, true), not_after: timestamp(end), authorization_policy_revision: revision}};
 }
 function failure(error) {
-  if (error?.name === 'ClockError') return [503, 'CLOCK_UNTRUSTED'];
+  if (error?.name === 'ClockError' || error?.code === 'command_reference_changed') return [503, 'CLOCK_UNTRUSTED'];
   if (['login_invalid', 'session_invalid', 'session_expired', 'token_invalid', 'token_expired', 'password_invalid'].includes(error?.code)) return [401, 'AUTH_REQUIRED'];
   if (['local_authorization_denied', 'local_authorization_audience', 'http_origin', 'http_tls', 'http_permission', 'http_extension'].includes(error?.code)) return [403, 'PERMISSION_DENIED'];
   if (['remote_authorization_missing','remote_authorization_denied','remote_authorization_expired','remote_authorization_parent',
@@ -82,7 +104,7 @@ function failure(error) {
 }
 
 // origin与sessions只能由可信本地启动装配。代理身份头不能开启认证入口。
-export function createAuthenticationHttp({serviceId, databaseInstanceId, serviceBootId, sessions = null, origin = null, onFailure = null}) {
+export function createAuthenticationHttp({serviceId, databaseInstanceId, serviceBootId, sessions = null, origin = null, onFailure = null, localPairing = null}) {
   const adapter = createHttpAdapter(selection);
   let site = null;
   if (origin !== null) {
@@ -211,19 +233,7 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
     if (Number(req.headers['content-length'] ?? 0) > maximumBody) { await reply(res, request, 413, 'PAYLOAD_TOO_LARGE'); return; }
     pending++;
     try {
-      const bytes = await new Promise((resolve, reject) => {
-        const chunks = []; let size = 0, settled = false;
-        const finish = (error, value) => {
-          if (settled) return; settled = true; clearTimeout(timer);
-          req.off('data', data); req.off('end', end); req.off('aborted', abort); req.off('error', abort); res.off('close', abort);
-          req.pause(); error ? reject(error) : resolve(value);
-        };
-        const data = chunk => { size += chunk.length; if (size > maximumBody) finish(413); else chunks.push(chunk); };
-        const end = () => finish(null, Buffer.concat(chunks, size));
-        const abort = () => finish(400);
-        const timer = setTimeout(() => finish(408), bodyDeadline); timer.unref();
-        req.on('data', data); req.once('end', end); req.once('aborted', abort); req.once('error', abort); res.once('close', abort);
-      });
+      const bytes = await readBody(req, res, maximumBody);
       let decoded;
       try { decoded = await adapter.decodeRequest(bytes, request); }
       catch { await reply(res, request, 400, 'INVALID_REQUEST'); return; }
@@ -233,7 +243,55 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
       else empty(res, status === 408 ? 408 : status === 400 ? 400 : 503);
     } finally { pending--; }
   }
+  async function serveLocalPairing(req, res) {
+    const respond = (status, value) => {
+      if (res.destroyed || res.headersSent) return;
+      const bytes = Buffer.from(canonical(value));
+      if (bytes.length > localPairingLimit) { empty(res, 503); return; }
+      res.writeHead(status, {'Content-Type': 'application/json', 'Content-Length': bytes.length,
+        'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', Connection: 'close'});
+      res.end(bytes);
+    };
+    if (req.method !== 'POST') { empty(res, 405, {Allow: 'POST'}); return; }
+    if (!site || !(req.socket instanceof TLSSocket) || !req.socket.encrypted || !loopbackHost(req.socket.remoteAddress) ||
+      !loopbackHost(req.socket.localAddress) || req.headers.host !== site.host || req.headers.origin !== origin ||
+      req.headers['sec-fetch-site'] === 'cross-site' || req.headers.forwarded !== undefined ||
+      Object.keys(req.headers).some(key => key.startsWith('x-forwarded-'))) {
+      respond(403, {error: 'local_pairing_origin'}); return;
+    }
+    const length = Number(req.headers['content-length']);
+    if (length > localPairingLimit) { respond(413, {error: 'local_pairing_size'}); return; }
+    if (!Number.isInteger(length) || length < 1 || req.headers['content-type'] !== 'application/json' ||
+      req.headers['transfer-encoding'] !== undefined || req.headers['content-encoding'] !== undefined) {
+      respond(400, {error: 'local_pairing_input'}); return;
+    }
+    if (pending >= maximumPending) { respond(429, {error: 'local_pairing_capacity'}); return; }
+    pending++;
+    try {
+      const auth = cookieInput(req);
+      const bytes = await readBody(req, res, localPairingLimit);
+      let body;
+      try {
+        const text = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
+        body = JSON.parse(text);
+        pairingFields(body, 'operation,request');
+        if (!localPairingOperations.includes(body.operation) || bytes.length !== length || canonical(body) !== text) throw new Error();
+      } catch { respond(400, {error: 'local_pairing_input'}); return; }
+      respond(200, await localPairing(auth, body.operation, body.request));
+    } catch (error) {
+      if (error === 400 || error === 408 || error === 413) respond(error, {error: 'local_pairing_input'});
+      else if (['session_invalid','session_expired'].includes(error.code)) respond(401, {error: 'local_pairing_session'});
+      else if (/^(?:peer_pairing|remote_authorization)_[a-z_]{1,59}$/.test(error.code)) {
+        const status = /_management(?:_changed)?$/.test(error.code) ? 403 :
+          ['peer_pairing_input', 'remote_authorization_request'].includes(error.code) ? 422 : 409;
+        respond(status, {error: error.code});
+      } else respond(503, {error: 'local_pairing_unavailable'});
+    } finally { pending--; }
+  }
   return Object.freeze({handle(req, res) {
+    if (req.url === localPairingPath && localPairing !== null) {
+      void serveLocalPairing(req, res).catch(() => empty(res, 503)); return true;
+    }
     const pathname = req.url?.split('?')[0];
     const method = routes.get(pathname) ?? (/^\/api\/v1\/commands\/[^/]+(?:\/evidence(?:\/[^/]+\/revisions\/[^/]+)?)?$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/(?:control|capabilities)$/.test(pathname)||/^\/api\/v1\/control-operations\/[^/]+$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+$/.test(pathname)?'GET':
       /^\/api\/v1\/devices\/[^/]+\/control\/(acquire|release|transfers)$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+\/(accept|cancel)$/.test(pathname)||pathname==='/api/v1/control-requests/lookup'?'POST':null);

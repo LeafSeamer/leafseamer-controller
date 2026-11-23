@@ -2,6 +2,7 @@ import {controlNeed as need,controlHash as hash,controlSame as same} from './dev
 import canonicalize from 'canonicalize';
 import {readCommandRecord,readCommandRevision,closeQueuedCommand} from './command-record-store.mjs';
 import {readCommandFinalAdmission} from './command-final-admission.mjs';
+import {commandIssueHead} from './command-issue-order.mjs';
 import {readCommandDispatch} from './command-dispatch.mjs';
 import {withExecutionReadView} from './execution-read-view.mjs';
 
@@ -21,9 +22,8 @@ function source(db,operation,commit){
  need(same(commandIds,adjudicated),'command_cut_admissions');
  const commands=commandIds.map(id=>{const saved=readCommandRecord(db,id);return {command_ref:recordRef(saved.record),binding_ref:saved.source.binding_ref,
   binding:saved.source.binding,queued:saved.record.state.phase==='queued'&&saved.record.attempts.length===0,transmission:transmission(db,saved)};});
- const water=db.prepare('SELECT max(issued_revision) FROM command_transmission_issue').pluck().get()??'0';
  return {format:'control-command-cut/1',operation_id:operation.operation_id,device_id:operation.device_id,commit_id:commit,
-  expected_control:operation.expected_control,target:operation.target,issued_revision:String(BigInt(water)),commands};
+  expected_control:operation.expected_control,target:operation.target,issued_revision:commandIssueHead(db),commands};
 }
 // T3与控制版本预留共用writer；捕获全部命令及已签发传输，完成历史也不从切点省略。
 export function captureControlCommands(db,operation,commit,bootId){

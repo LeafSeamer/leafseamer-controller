@@ -18,12 +18,26 @@ const need=(ok,code)=>{if(!ok)throw new IdentityError('initial_resource_'+code);
 const freeze=v=>{if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Object.freeze(v);}return v;};
 const objectRef=(id,v)=>({id,revision:'1',digest:digest(v)});
 const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/.test(v);
-const decode=cacheVerifiedDocument((text,hash)=>{const v=checked(JSON.parse(text));need(canonicalize(v)===text&&v.digest===hash,'integrity');return v;});
+const decode=cacheVerifiedDocument((text,hash)=>{
+ const value=checked(JSON.parse(text));
+ need(canonicalize(value)===text&&value.digest===hash,'integrity');
+ return value;
+},{immutable:true});
+const decodeSource=cacheVerifiedDocument((text,hash)=>{
+ const value=JSON.parse(text);
+ need(canonicalize(value)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===hash,'source_integrity');
+ return value;
+},{immutable:true});
+const decodeEvidence=cacheVerifiedDocument((text,hash)=>{
+ const value=JSON.parse(text),{evidence_digest,...unsigned}=value;
+ need(canonicalize(value)===text&&evidence_digest===hash&&digest(unsigned)===hash,'source_binding');
+ return value;
+},{immutable:true});
 
 // 初始来源原件保持空库存；精确T2后继另返回非空资源当前资格，不能替代hold释放或恢复。
 // 全部输入取自同一writer内的实际运行、已批准固定模块、原始采样、屏障与命令/出站账本。
 export function deviceInitialResource({db,service,writer,evidenceCurrent,executionCurrent,domain,attachCurrent,attachRead}){
- function sources(device,ownOpen=null,ready=null,preparedRef=null){
+ function sources(device,ownOpen=null,ready=null,preparedRef=null,deviceScoped=Number(service.schema_revision)>=97){
   need(db.inTransaction,'writer');const authorization=evidenceCurrent(device),execution=executionCurrent(device),b=execution.value.binding;
   need(same(b,authorization.value.requirement.binding),'binding');
   const q=execution.catalog.qualification,p=execution.value.transport_profile,sample=execution.baseline;
@@ -46,20 +60,20 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
    fence.ack.frame.body.cancel_coverage.length===0,'fence');
   // 同Ready下的排队claim不产生attempt或hold；schema51编码帧另须精确持久准备账本。
   // 编码只占独立缓存预留，派发或其他历史仍拒绝；此路径不证明非空hold释放。
-  const admissions=[49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70].includes(Number(service.schema_revision))?pendingInitialCommands(db,ready,preparedRef,history?.commandIds):[];
-  if(![49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70].includes(Number(service.schema_revision)))need(!db.prepare('SELECT 1 FROM ca_command_initial c JOIN ca_request_key k USING(key_id) WHERE k.device_id=? LIMIT 1').pluck().get(device),'command_history');
+  const admissions=[49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97].includes(Number(service.schema_revision))?pendingInitialCommands(db,ready,preparedRef,history?.commandIds,deviceScoped?device:null):[];
+  if(![49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97].includes(Number(service.schema_revision)))need(!db.prepare('SELECT 1 FROM ca_command_initial c JOIN ca_request_key k USING(key_id) WHERE k.device_id=? LIMIT 1').pluck().get(device),'command_history');
   let sent=db.prepare(`SELECT record_id,record_digest,message_type,sequence FROM execution_frame_record
    WHERE ipc_session_id=? AND direction='c2w' AND (device_id=? OR device_id IS NULL) ORDER BY sequence`).raw().all(b.ipc_session_id,device).filter(v=>v[0]!==ownOpen?.id);
   sent=sent.filter(v=>{const old=history?.outgoing.get(v[0]);if(!old)return true;need(old.digest===v[1],'retired_frame');return false;});
   const encoding=sent.filter(v=>v[2]==='ENCODE_PACKET').map(v=>{need(ready,'encoding_ready');return encodingOnlyFrame(db,v[0],b,ready.ref);});
   const guards=sent.filter(v=>v[2]==='GUARD_INSTALL').map(v=>guardOnlyFrame(db,v[0],b,preparedRef));
   const dispatches=sent.filter(v=>v[2]==='DISPATCH').map(v=>dispatchRiskFrame(db,v[0],b,preparedRef));
-  sent=sent.filter(v=>!['ENCODE_PACKET','GUARD_INSTALL','DISPATCH'].includes(v[2]));
+  sent=sent.filter(v=>!['ENCODE_PACKET','GUARD_INSTALL','DISPATCH','RUN_FENCE'].includes(v[2]));
   need(sent.length>0&&sent.every(v=>v[2]==='HELLO_ACK'||v[2]==='FENCE'),'execution_history');
   const now=domain();need(now.ref.clock_domain_id===b.clock_domain_id&&now.ref.descriptor_digest===b.descriptor_digest&&
    same(sample.clock_domain_descriptor.clock_domain_id,b.clock_domain_id)&&sample.clock_domain_descriptor.descriptor_digest===b.descriptor_digest&&
    BigInt(sample.captured_tick_ns)<=BigInt(now.tick),'clock');
-  return {authorization,execution,control,fence,now,admissions,encoding,guards,dispatches,history,denials:captureInitialDenials(db,service,device,ownOpen,ready,preparedRef,history),inventory:{binding_ref:execution.ref,authorization_evidence_ref:authorization.ref,
+  return {authorization,execution,control,fence,now,admissions,encoding,guards,dispatches,history,denials:captureInitialDenials(db,service,device,ownOpen,ready,preparedRef,history,deviceScoped),inventory:{binding_ref:execution.ref,authorization_evidence_ref:authorization.ref,
    authorization_state_ref:authorization.value.state_ref,control_state_ref:controlRef,control_authority_ref:control.authority.ref,
    catalog_ref:execution.value.catalog_approval_ref,baseline_ref:objectRef(sample.sample_id,sample),
    initial_fence_ref:fence.ref,initial_confirmation_ref:fence.confirmation_ref,
@@ -83,13 +97,13 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
    value.inventory.baseline_ref.id===row[8]&&row[12]===canonicalize({kind:'initial_device_resource_selected',source_ref:reference,commit_ref:ref(commit)}),'integrity');
   const i=value.inventory,original=(table,column,reference)=>{
    const row=db.prepare(`SELECT body_jcs,body_digest FROM ${table} WHERE ${column}=?`).raw().get(reference.id);need(row,'source_missing');
-   const v=JSON.parse(row[0]);need(reference.revision==='1'&&reference.digest===row[1]&&canonicalize(v)===row[0]&&digest(v)===row[1],'source_integrity');return v;
+   need(reference.revision==='1'&&reference.digest===row[1],'source_integrity');
+   return decodeSource(...row);
   };
   const binding=original('device_execution_binding','binding_id',i.binding_ref),sample=original('device_baseline_sample','sample_id',i.baseline_ref);
   const authorizationRow=db.prepare('SELECT body_jcs,body_digest FROM device_authorization_evidence WHERE evidence_id=?').raw().get(i.authorization_evidence_ref.id);
-  need(authorizationRow,'source_missing');const authorization=JSON.parse(authorizationRow[0]),{evidence_digest,...unsigned}=authorization;
-  need(canonicalize(authorization)===authorizationRow[0]&&digest(unsigned)===evidence_digest&&evidence_digest===authorizationRow[1]&&
-   same(i.authorization_evidence_ref,{id:authorization.evidence_id,revision:authorization.revision,digest:evidence_digest})&&
+  need(authorizationRow,'source_missing');const authorization=decodeEvidence(...authorizationRow);
+  need(same(i.authorization_evidence_ref,{id:authorization.evidence_id,revision:authorization.revision,digest:authorization.evidence_digest})&&
    same(authorization.requirement.binding,value.binding)&&same(authorization.state_ref,i.authorization_state_ref)&&
    same(authorization.requirement.control_state_ref,i.control_state_ref)&&same(authorization.requirement.control_authority_ref,i.control_authority_ref)&&
    value.expires_tick_ns===authorization.requirement.expires_tick_ns&&BigInt(authorization.requirement.selected_tick_ns)<=BigInt(value.selected_tick_ns)&&
@@ -131,7 +145,7 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
   need(!readyRef||ready,'ready');
   let successor=null;
   if(preparedRef){
-   need(ready&&[52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70].includes(Number(service.schema_revision)),'prepared_version');
+   need(ready&&[52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97].includes(Number(service.schema_revision)),'prepared_version');
    const held=db.prepare(`SELECT command_id,transaction_id FROM command_device_hold h WHERE device_id=?
     ${Number(service.schema_revision)>=57?'AND NOT EXISTS(SELECT 1 FROM command_hold_release r WHERE r.hold_id=h.hold_id)':''}`).raw().all(saved.value.binding.device_id);
    need(held.length===1&&held[0][1]===preparedRef.id,'prepared_hold');
@@ -143,7 +157,7 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
     after.holds.length===1&&after.holds[0].hold_ref.id===final.value.hold.hold_id&&after.holds[0].classification==='active','prepared_resource');
    successor={final_admission_ref:final.ref,resource:after};
   }
-  const actual=sources(saved.value.binding.device_id,ownOpen,ready,preparedRef),now=BigInt(actual.now.tick);
+  const actual=sources(saved.value.binding.device_id,ownOpen,ready,preparedRef,saved.value.deny_snapshots?.history_scope==='device'),now=BigInt(actual.now.tick);
   // 不改写旧空库存原件。当前资格明确附带所有排队受理Ref，且逐项核验其同Ready来源。
   const inventory={...actual.inventory,command_ids:[]},denials=['initial-manual-deny-snapshots/2','initial-manual-deny-snapshots/3'].includes(actual.denials.format)?
    {...actual.denials,accepted_command_count:0,pending_admission_refs:[]}:actual.denials;

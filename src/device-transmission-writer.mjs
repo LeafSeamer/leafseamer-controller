@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {decodeExecutionPayload,DeviceExecutionError} from './device-execution-channel.mjs';
-import {authorizationRevoked} from './device-authorization-fence.mjs';
+import {authorizationRevoked,runGenerationMatches} from './device-authorization-fence.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError(code);};
 const digest=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 const same=(a,b)=>canonicalize(a)===canonicalize(b);
@@ -35,19 +35,27 @@ export function deviceTransmissionWriter({binding,preparation,executor,action,cu
   return {value,t,accessRef:reference(a.access_id,a.access_digest)};
  }
  async function incoming(bytes,type){
-  current();const decoded=await decodeExecutionPayload(bytes,'c2w');current();need(decoded.frame.type===type,'transmission_message_type');
+  current();const decoded=await decodeExecutionPayload(bytes,'c2w');current();need(decoded.frame.type===type&&decoded.frame.journal_mode==='durable','transmission_message_type');
   for(const key of ['ipc_session_id','controller_boot_id','worker_boot_id','device_id','clock_domain_id','descriptor_digest'])need(decoded.frame[key]===bound[key],'transmission_channel');
   return decoded;
  }
+ const runDenied=(g,live)=>live.value.run_denials.some(({selector})=>runGenerationMatches(g.automation_binding,selector));
  function checkGuard(frame,live,allowRevoked=false){
   const body=frame.body,g=body.guard,{guard_digest,...unsigned}=g;
   need(digest(unsigned)===guard_digest,'transmission_guard_digest');
   for(const key of ['controller_boot_id','worker_boot_id','ipc_session_id','device_id','clock_domain_id','descriptor_digest'])need(g[key]===bound[key],'transmission_guard_binding');
-  need(g.admission_origin==='non_panel'&&g.panel_binding===null&&g.automation_binding===null&&g.time_required===false&&g.reference_time===null&&
-   body.schedule_guard===null&&body.reference_context===null&&g.binding.principal_kind==='human'&&g.binding.origin==='manual'&&
+  need(g.admission_origin==='non_panel'&&g.panel_binding===null&&g.time_required===false&&g.reference_time===null&&
+   body.schedule_guard===null&&body.reference_context===null&&
    g.binding.audience===bound.scope.authority_service_id&&g.binding.extension_instance_id===null,'transmission_guard_path');
+  if(g.binding.origin==='automation'){
+   const origin=g.automation_binding;
+   need(g.binding.principal_kind==='service'&&origin.authorization_mode==='preparation'&&origin.continuation===null&&
+    origin.arm_generation===g.binding.arm_generation&&origin.arm_generation!=='0'&&origin.execution_binding_ref.object_id===origin.execution_id&&
+    same(origin.execution_binding_ref.scope,origin.origin_scope),'transmission_guard_automation');
+  }else need(g.binding.origin==='manual'&&g.binding.principal_kind==='human'&&g.automation_binding===null,'transmission_guard_path');
   need(same(g.gate_access_ref,live.accessRef)&&g.authorization_revision===live.value.authorization_revision&&live.t<BigInt(g.authorization_deadline_tick_ns),'transmission_guard_stale');
   need(allowRevoked||!live.value.authorization_denials.some(v=>authorizationRevoked(g.binding,v)),'transmission_authorization_revoked');
+  need(allowRevoked||!runDenied(g,live),'transmission_run_denied');
   need(!live.value.command_denials.some(v=>v.parent_command_id===g.command_id),'transmission_command_denied');
   return g;
  }
@@ -60,8 +68,15 @@ export function deviceTransmissionWriter({binding,preparation,executor,action,cu
   need(same(packet,prepared.packet)&&same(content(request),content(prepared.request))&&digest(content(request))===p.content_digest&&
    installed.frame.body.content_digest===p.content_digest,'transmission_content');
   need(request.action_id===selected.action_id&&request.capability_version===selected.capability_version&&body.parameters_schema_digest===selected.parameters_schema_digest&&
-   request.origin==='manual'&&request.dispatch.mode==='immediate'&&request.automation_binding===null,'transmission_action');
-  need(p.origin==='manual'&&p.admission_origin==='non_panel'&&p.automation_binding===null&&p.panel_binding_digest===null,'transmission_origin');
+   request.device_id===bound.device_id&&request.dispatch.mode==='immediate','transmission_action');
+  const origin=g.automation_binding;
+  need(request.origin===g.binding.origin&&p.origin===g.binding.origin&&p.admission_origin==='non_panel'&&p.panel_binding_digest===null&&
+   same(request.automation_binding,origin)&&same(p.automation_binding,origin)&&p.grant_revision===g.binding.grant_revision&&
+   p.arm_generation===g.binding.arm_generation,'transmission_origin');
+  if(origin){
+   const {grant_id,grant_revision,arm_generation}=g.binding,{run_id,definition_version,step_id,logical_action_id}=origin;
+   need(same(request.run_binding,{run_id,definition_version,grant_id,grant_revision,arm_generation,step_id,logical_action_id}),'transmission_automation_grant');
+  }
   need(body.guard_id===g.guard_id&&body.guard_digest===g.guard_digest&&p.guard_id===g.guard_id&&p.guard_digest===g.guard_digest&&p.permit_id===g.permit_id&&p.command_id===g.command_id&&
    p.command_id===packet.command_id&&p.attempt_id===packet.attempt_id&&authority.target.command_ref.id===p.command_id&&authority.target.proposed_attempt_id===p.attempt_id,'transmission_permit_binding');
   for(const key of ['controller_boot_id','worker_boot_id','device_session_id','clock_domain_id','descriptor_digest'])need(p[key]===bound[key],'transmission_permit_binding');
@@ -73,11 +88,12 @@ export function deviceTransmissionWriter({binding,preparation,executor,action,cu
    tx.primitive_id===packet.primitive_id&&same(tx.packet_ref,{packet_id:packet.packet_id,packet_digest:packet.packet_digest})&&same(tx.send_window,body.send_window),'transmission_intent');
   for(const key of ['permit_id','command_id','attempt_id','dispatch_intent_id','worker_boot_id','device_session_id','guard_id','guard_digest','clock_domain_id','descriptor_digest','controller_boot_id','admission_origin','panel_binding_digest','origin'])
    need(tx.intent[key]===p[key],'transmission_intent');
-  need(tx.intent.ipc_session_id===bound.ipc_session_id&&tx.intent.device_id===bound.device_id&&tx.intent.automation_binding===null&&tx.intent.automation_binding_digest===null,'transmission_intent');
+  need(tx.intent.ipc_session_id===bound.ipc_session_id&&tx.intent.device_id===bound.device_id&&same(tx.intent.automation_binding,origin)&&
+   tx.intent.automation_binding_digest===(origin?digest(origin):null),'transmission_intent');
   need(body.send_window.clock_domain_id===bound.clock_domain_id&&body.send_window.descriptor_digest===bound.descriptor_digest&&
    BigInt(body.send_window.earliest_tick_ns)<=live.t&&live.t<BigInt(body.send_window.latest_tick_ns)&&
    BigInt(body.send_window.latest_tick_ns)<=BigInt(g.authorization_deadline_tick_ns)&&BigInt(body.send_window.latest_tick_ns)<=BigInt(a.expires_tick_ns),'transmission_window');
-  return {live,packet,revoked:live.value.authorization_denied_permit_ids.includes(p.permit_id)||live.value.authorization_denials.some(v=>authorizationRevoked(g.binding,v))};
+  return {live,packet,revoked:runDenied(g,live)||live.value.authorization_denied_permit_ids.includes(p.permit_id)||live.value.authorization_denials.some(v=>authorizationRevoked(g.binding,v))};
  }
  function report(entry,disposition,proof,observation=null){
   const p=entry.frame.body.permit,tx=p.transmission;
@@ -127,7 +143,8 @@ export function deviceTransmissionWriter({binding,preparation,executor,action,cu
     const live=gate(),g=checkGuard(frame,live);need(!permitGuards.has(g.permit_id)&&guards.size<budget.max_guards,'transmission_guard_capacity');reserve(payload.length+8192);
     const ack=frozen({type:'GUARD_ACK',reply_to:frame.message_id,device_id:bound.device_id,body:{guard_id:g.guard_id,guard_digest:g.guard_digest,
      content_digest:frame.body.content_digest,permit_id:g.permit_id,command_id:g.command_id,installed_authorization_revision:g.authorization_revision,state:'installed',
-     panel_binding_digest:null,automation_binding_digest:null,reference_time_digest:null,schedule_guard_digest:null,gate_access_ref:g.gate_access_ref,ownership_ref:g.ownership_ref}});
+     panel_binding_digest:null,automation_binding_digest:g.automation_binding?digest(g.automation_binding):null,reference_time_digest:null,schedule_guard_digest:null,
+     gate_access_ref:g.gate_access_ref,ownership_ref:g.ownership_ref}});
     const entry={frame,payload,ack};guards.set(id,entry);permitGuards.set(g.permit_id,id);return ack;
    }catch(error){stop(error);throw error;}
   },

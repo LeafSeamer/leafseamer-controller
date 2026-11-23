@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import {createDeviceExecutionCodec} from './sdk/device-execution.mjs';
 import {contractSelection} from './sdk/index.mjs';
 const codec=createDeviceExecutionCodec(contractSelection),limit=262144,bufferLimit=4*(limit+4);
+const lastValidated=new Map();
 export class DeviceExecutionError extends Error{constructor(code){super(code);this.name='DeviceExecutionError';this.code=code;}}
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError(code);};
 // 一次worker启动只对应一个执行会话。两端从监督器/已采用运行的同一身份计算，
@@ -25,9 +26,14 @@ export function executionSocket(memberBoot,side){
 export async function decodeExecutionPayload(bytes,direction){
  need(bytes instanceof Uint8Array&&bytes.byteLength>0&&bytes.byteLength<=limit,'execution_frame_size');
  const copy=Buffer.from(bytes);
+ const previous=lastValidated.get(direction);
+ if(previous?.bytes.equals(copy))return {frame:previous.frame,payload:copy};
  // 此处type只选择校验根；完整原字节仍经SDK的重复键、数字、深度及Schema检查。
  let type;try{type=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(copy)).type;}catch{need(false,'execution_frame');}
- return {frame:await codec.decode(copy,direction,type),payload:copy};
+ const frame=await codec.decode(copy,direction,type);
+ // 每个方向只保留最后一帧的不可变语法结果。授权、寿命、序号和写前检查由各领域调用负责。
+ lastValidated.set(direction,{bytes:Buffer.from(copy),frame});
+ return {frame,payload:copy};
 }
 export function executionWire(payload){
  need(payload instanceof Uint8Array&&payload.byteLength>0&&payload.byteLength<=limit,'execution_frame_size');

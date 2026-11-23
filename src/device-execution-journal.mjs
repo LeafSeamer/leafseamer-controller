@@ -15,9 +15,14 @@ import {commitCommandFinalAdmission,observeCommandFinalAdmission,currentPrepared
 import {selectCommandDispatch,commitCommandDispatch,readCommandDispatch,startCommandDispatchWrite,acceptCommandDispatchReport,acceptCommandDispatchEvidence} from './command-dispatch.mjs';
 import {protectCommandForSettlement,selectCommandClosure,commitCommandClosure,readCommandClosure,currentCommandClosure,acceptCommandClosure,commitCommandSettlement} from './command-settlement.mjs';
 import {selectCommandPreparationCleanup,commitCommandPreparationCleanup,readCommandPreparationCleanup,currentCommandPreparationCleanup,acceptCommandPreparationCleanup} from './command-preparation-cleanup.mjs';
+import {selectRunFence,commitRunFence,readRunFence,currentRunFence,acceptRunFence} from './execution-run-fence.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError(code);};
 const hash=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
 const freeze=value=>{if(value&&typeof value==='object'){for(const item of Object.values(value))freeze(item);Object.freeze(value);}return value;};
+function guardHistory(saved,binding){
+ need(saved.request.frame.ipc_session_id===binding.ipc_session_id&&saved.ack,'execution_guard_history');
+ return freeze({value:saved.value,ref:saved.ref,qualification:null,ack:{value:saved.ack.value,ref:saved.ack.ref,reply:{frame:saved.ack.reply.frame}}});
+}
 
 export function executionJournalHistory(db,sessionId){
  need(typeof sessionId==='string'&&/^[0-9a-f-]{36}$/.test(sessionId),'execution_session_id');
@@ -288,13 +293,12 @@ export function deviceExecutionJournal({db,current,currentInTransaction,core,isO
    need(!busy,'execution_receive_busy');busy=true;
    try{live();const receivedTick=tick(),decoded=await decodeExecutionPayload(bytes,'w2c');live();
     const features=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features;
-    return db.transaction(()=>acceptCommandGuard(db,{binding,decoded,provider:encodingSource?.(),tick,features,receivedTick})).immediate();
+    const saved=db.transaction(()=>acceptCommandGuard(db,{binding,decoded,provider:encodingSource?.(),tick,features,receivedTick})).immediate();
+    return guardHistory(saved,binding);
    }catch(error){fail(error);throw error;}finally{busy=false;}
   },
   commandGuardHistory(id){
-   available();const saved=db.transaction(()=>readCommandGuard(db,id)).immediate();
-   need(saved.request.frame.ipc_session_id===binding.ipc_session_id&&saved.ack,'execution_guard_history');
-   return freeze({value:saved.value,ref:saved.ref,qualification:null,ack:{value:saved.ack.value,ref:saved.ack.ref,reply:{frame:saved.ack.reply.frame}}});
+   available();return guardHistory(db.transaction(()=>readCommandGuard(db,id)).immediate(),binding);
   },
   async prepareCommandDispatch(id){
    try{live();const features=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features;
@@ -304,13 +308,17 @@ export function deviceExecutionJournal({db,current,currentInTransaction,core,isO
     return {...db.transaction(()=>commitCommandDispatch(db,{candidate,binding,provider:encodingSource?.(),tick})).immediate(),replay:false};
    }catch(error){fail(error);throw error;}
   },
-  async sendCommandDispatch(transport,id){
+  async sendCommandDispatch(transport,selected){
    let write=null,finished=false;
-   try{live();const saved=db.transaction(()=>readCommandDispatch(db,id)).immediate(),payload=saved.request.wire.subarray(4);
+   try{live();const id=selected.value.permit_id,payload=Buffer.from(selected.request.wire.subarray(4));
     await decodeExecutionPayload(payload,'c2w');live();
     const sent=await transport.send(payload,{beforeWrite(){live();need(!write,'execution_dispatch_write_reuse');
-     write=db.transaction(()=>startCommandDispatchWrite(db,{id,binding,provider:encodingSource?.(),tick})).immediate();
-     need(write.payload.equals(payload),'execution_dispatch_changed');need(tick()<BigInt(saved.final.value.seal.send_window.before_tick_ns),'execution_dispatch_expired');
+     write=db.transaction(()=>{
+      const current=startCommandDispatchWrite(db,{id,binding,provider:encodingSource?.(),tick});
+      need(current.payload.equals(payload),'execution_dispatch_changed');
+      return current;
+     }).immediate();
+     need(tick()<write.before_tick,'execution_dispatch_expired');
     }});
     need(write&&sent?.not_started!==true&&sent?.wire_length===payload.length+4,'execution_write_unknown');
     const result=api.finishHandshakeWrite(write.attempt_id,'complete');finished=true;need(result.result==='complete','execution_write_unknown');return result;
@@ -375,6 +383,43 @@ export function deviceExecutionJournal({db,current,currentInTransaction,core,isO
    try{available();const saved=db.transaction(()=>commitCommandSettlement(db,{id})).immediate();
     return freeze({record:saved.record,settlement_ref:saved.lifecycle.settlement.ref});
    }catch(error){fail(error);throw error;}
+  },
+  async prepareRunFence(input){
+   try{live();const features=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features;
+    const fixed=structuredClone(input),candidate=db.transaction(()=>selectRunFence(db,{binding,runtime:currentInTransaction(),input:fixed,features})).immediate();
+    if(candidate.saved)return api.runFenceHistory(candidate.saved.request.recordRef.id,true);
+    await decodeExecutionPayload(Buffer.from(JSON.stringify(candidate.frame)),'c2w');live();
+    const saved=db.transaction(()=>commitRunFence(db,{binding,runtime:currentInTransaction(),candidate,tick})).immediate();
+    return api.runFenceHistory(saved.request.recordRef.id);
+   }catch(error){fail(error);throw error;}
+  },
+  async sendRunFence(transport,id){
+   let attempt=null,finished=false;
+   try{live();const saved=db.transaction(()=>readRunFence(db,binding,id)).immediate(),payload=Buffer.from(saved.request.row.wire.subarray(4));
+    const sent=await transport.send(payload,{beforeWrite(){live();need(!attempt,'execution_run_fence_write_reuse');
+     attempt=db.transaction(()=>{
+      const actual=currentRunFence(db,{binding,runtime:currentInTransaction(),id}),attemptId=crypto.randomUUID();
+      need(actual.request.row.wire.equals(saved.request.row.wire),'execution_run_fence_changed');
+      need(db.prepare('INSERT INTO execution_write_attempt VALUES(?,?,?)').run(attemptId,id,executionTick(tick())).changes===1,'execution_run_fence_storage');
+      return attemptId;
+     }).immediate();
+    }});
+    need(attempt&&sent?.not_started!==true&&sent?.wire_length===payload.length+4,'execution_write_unknown');
+    const result=api.finishHandshakeWrite(attempt,'complete');finished=true;need(result.result==='complete','execution_write_unknown');return result;
+   }catch(error){if(attempt&&!finished)try{api.finishHandshakeWrite(attempt,'unknown');}catch{}fail(error);throw error;}
+  },
+  async receiveRunFence(bytes){
+   need(!busy,'execution_receive_busy');busy=true;
+   try{live();const receivedTick=tick(),decoded=await decodeExecutionPayload(bytes,'w2c');live();
+    const features=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features;
+    const saved=db.transaction(()=>acceptRunFence(db,{binding,decoded,features,tick,receivedTick})).immediate();
+    return api.runFenceHistory(saved.request.recordRef.id);
+   }catch(error){fail(error);throw error;}finally{busy=false;}
+  },
+  runFenceHistory(id,replay=false){
+   available();
+   const {request,ack}=db.transaction(()=>readRunFence(db,binding,id)).immediate();
+   return freeze({replay,request:{ref:request.recordRef,frame:request.frame},ack:ack?{ref:ack.recordRef,frame:ack.frame}:null});
   },
   async prepareCommandCleanup(command,phase){
    try{live();const features=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features;

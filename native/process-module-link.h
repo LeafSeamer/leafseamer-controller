@@ -1,8 +1,11 @@
 #pragma once
 
-// 独立业务字节通路。监督器只转发创建时绑定的核心/worker，不解析或授权设备动作。
+// 监督器只在创建时绑定的两个进程之间转发业务字节。
 // 每方向只有一块有界缓冲，背压不阻塞监督线程，断连不允许重新认领。
 class ModuleLink {
+public:
+  enum class Kind { module, execution, timeProvider };
+private:
   struct Port {
     Handle pipe,connectedEvent,readEvent,writeEvent;
     OVERLAPPED connecting{},reading{},writing{};
@@ -60,12 +63,18 @@ class ModuleLink {
   };
   Port core,worker;
   DWORD corePid;
-  static std::wstring name(const std::string& boot,const wchar_t* side,bool execution){
+  static std::wstring name(const std::string& boot,const wchar_t* side,Kind kind){
     require(boot.size()==32&&boot.find_first_not_of("0123456789abcdef")==std::string::npos,"module_link_identity");
-    return std::wstring(execution?L"\\\\.\\pipe\\LeafSeamer.Execution.":L"\\\\.\\pipe\\LeafSeamer.Module.")+std::wstring(boot.begin(),boot.end())+side;
+    const wchar_t* prefix=L"\\\\.\\pipe\\LeafSeamer.Module.";
+    if(kind==Kind::execution)prefix=L"\\\\.\\pipe\\LeafSeamer.Execution.";
+    if(kind==Kind::timeProvider)prefix=L"\\\\.\\pipe\\LeafSeamer.TimeCollector.";
+    return std::wstring(prefix)+std::wstring(boot.begin(),boot.end())+side;
   }
 public:
-  ModuleLink(Instance& owner,const std::string& boot,DWORD pid,bool execution=false):core(owner,name(boot,L".core",execution)),worker(owner,name(boot,L".worker",execution)),corePid(pid){require(pid!=0,"module_link_peer");}
+  ModuleLink(Instance& owner,const std::string& boot,DWORD pid,Kind kind=Kind::module)
+    :core(owner,name(boot,L".core",kind)),worker(owner,name(boot,kind==Kind::timeProvider?L".provider":L".worker",kind)),corePid(pid){
+    require(pid!=0,"module_link_peer");
+  }
   void poll(DWORD workerPid){
     core.connect(corePid);worker.connect(workerPid);core.flush();worker.flush();core.read();worker.read();core.forward(worker);worker.forward(core);
   }

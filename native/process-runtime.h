@@ -33,7 +33,7 @@ class Protected {
   std::unique_ptr<content::Pin> pin;
 public:
   std::wstring root,node;
-  std::string digest;
+  std::string digest, timeProviderDigest;
   explicit Protected(const std::string& expectedManifest){
     using namespace bootstrap;
     root=installationRoot();const auto bytes=manifestBytes(root+L"\\build-manifest.json");
@@ -46,6 +46,7 @@ public:
       require(hash.size()==64&&hash.find_first_not_of("0123456789abcdef")==std::string::npos,"runtime_inventory");
       const auto path=loading::wide(name);content::parts(path,L'/');
       files.push_back({path,sizeOf(root+L"\\"+path),"sha256:"+hash});if(name=="runtime/node.exe")nodeHash=hash;
+      if(name=="runtime/reference-time-provider.exe")timeProviderDigest="sha256:"+hash;
     }
     require(!nodeHash.empty(),"runtime_node");const auto buildHash=bootstrap::digest(bytes);
     digest=bootstrap::digest(object({{"controller_build_sha256",string(buildHash.substr(7))},{"node_sha256",string(nodeHash)}}));

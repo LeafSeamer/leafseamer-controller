@@ -1,5 +1,8 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import dgram from 'node:dgram';
+import {once} from 'node:events';
+import {monitorEventLoopDelay} from 'node:perf_hooks';
 import https from 'node:https';
 import canonicalize from 'canonicalize';
 import {setTimeout as delay} from 'node:timers/promises';
@@ -7,10 +10,12 @@ import {connectCoreSupervisor} from '../../dist/supervisor-control.mjs';
 import {openNativeClock} from '../../dist/native-clock.mjs';
 import {createCoreBootstrapChannel,verifyCoreAdmission} from '../../dist/core-bootstrap.mjs';
 import {openStorage} from '../../dist/storage.mjs';
+import {openTimeProviderLink} from '../../dist/time-provider-link.mjs';
 import {authenticated} from './extension-auth.mjs';
 import {createAuthenticationHttp} from '../../dist/auth-http.mjs';
 import {contractSelection} from '../../dist/sdk/index.mjs';
 import {automationPeer} from './automation-peer.mjs';
+import {referenceBundleAuthority} from './reference-bundle-authority.mjs';
 import {loadGuiAssets} from '../../dist/gui-assets.mjs';
 import {corePerformance} from './core-performance.mjs';
 let business=null,intakeClient=null,manager=null,moduleClient=null,executionClient=null,intakeTail=Promise.resolve(),commandToken=null,commandRequest=null,evaluator=null,evaluatorSource=null,authorizationContext=null,authorizationEvidence=null;
@@ -21,9 +26,10 @@ const performanceCapture=await corePerformance(JSON.parse(fs.readFileSync(option
 const report=value=>{const entry={...value,reported_ms:performance.now()};performanceCapture.record(entry);process.stderr.write(JSON.stringify(entry)+'\n');if(['unavailable','core-source-lost'].includes(value.event))void performanceCapture.stop().catch(()=>{});};
 let firstManualChallenge=null,initialResource=null,initialResourceRequest=null,initialOpening=null,initialOpeningRequest=null;const manualCoreObservations=new Map();
 let commandServer=null,commandHttp=null,commandAgent=null,guiTimer=null,automationRegistration=null,bindingPeer=null;
+let commandGui=null,configurePublicationGui=null;
 async function startCommandHttp(material){
- let handler,gui;commandServer=https.createServer(material,(req,res)=>{
-  if(gui&&['GET','HEAD'].includes(req.method)&&gui.handle(req,res))return;
+ let handler;commandServer=https.createServer(material,(req,res)=>{
+  if(commandGui&&['GET','HEAD'].includes(req.method)&&commandGui.handle(req,res))return;
   if(!handler.handle(req,res)){res.writeHead(404);res.end();}
  });
  await new Promise(resolve=>commandServer.listen(0,'127.0.0.1',resolve));
@@ -36,7 +42,9 @@ async function startCommandHttp(material){
    catch(error){report({event:'http-command-error',stage:'confirm',code:error.code,cause:error.cause?.code});throw error;}}};
  handler=createAuthenticationHttp({serviceId:business.identity.service_id,databaseInstanceId:business.identity.database_instance_id,
   serviceBootId:receipt.member_boot_id,sessions,origin,onFailure:value=>report({event:'http-handler-failure',...value})});
- if(input.gui){gui=loadGuiAssets(input.gui.directory,business.identity,origin);
+ if(input.gui)commandGui=loadGuiAssets(input.gui.directory,business.identity,origin);
+ if(input.automation_peer?.publication_gui)configurePublicationGui=directory=>{commandGui=loadGuiAssets(directory,business.identity,origin);};
+ if(input.gui||configurePublicationGui){
   const spki=crypto.createHash('sha256').update(new crypto.X509Certificate(material.cert).publicKey.export({type:'spki',format:'der'})).digest('base64');
   report({event:'gui-endpoint',origin,spki});
  }
@@ -60,17 +68,17 @@ async function manualSourceFor(proof,device,refresh=true){
  if(input.mode.includes('_guard_dispatch'))manager.real.refresh();
  const checks=input.mode.endsWith('_manual_challenge_checks'),requestId=crypto.randomUUID(),observation=source.observeCore(),challenge=manager.sessions.beginManualExecutionChallenge(proof,device,requestId);
  if(checks&&canonicalize(manager.sessions.beginManualExecutionChallenge(proof,device,requestId))!==canonicalize(challenge))throw new Error('manual_challenge_replay');
- await delay(10);
+ if(checks)await delay(10);
  const response={request_id:crypto.randomUUID(),challenge_ref:{id:challenge.id,revision:challenge.revision,digest:challenge.digest},nonce:challenge.nonce};
  if(checks&&!firstManualChallenge){
   try{manager.sessions.completeManualExecutionChallenge(proof,{...response,nonce:'A'.repeat(43)});report({event:'manual-challenge-wrong-nonce',code:'unexpected_success'});}catch(error){report({event:'manual-challenge-wrong-nonce',code:error.code});}
   try{manager.sessions.selectManualExecutionSource(proof,device);report({event:'manual-challenge-bypass',code:'unexpected_success'});}catch(error){report({event:'manual-challenge-bypass',code:error.code});}
  }
- await delay(10);
+ if(checks)await delay(10);
  const value=manager.sessions.completeManualExecutionChallenge(proof,response);
- await delay(10);
+ if(checks)await delay(10);
  if(checks&&canonicalize(value)!==canonicalize(manager.sessions.completeManualExecutionChallenge(proof,response)))throw new Error('manual_challenge_source_replay');
- await delay(10);
+ if(checks)await delay(10);
  manualCoreObservations.set(value.ref.id,observation);
  report({event:'manual-challenge',challenge,source_ref:value.ref});
  if(!firstManualChallenge){
@@ -100,7 +108,7 @@ async function releaseAfterCommands(device){
  report({event:'command-control-released',before,accepted,operation,replay,control:manager.sessions.getControl(token,device)});
  if(operation.state!=='effective')throw Object.assign(new Error('command_control_not_effective'),{code:'command_control_not_effective'});
 }
-async function runSuccessor(device){
+async function runSuccessor(device,parameters={value:23},contextId=commandRequest.context_id){
  const missing=await commandHttp('GET','/api/v1/commands/00000000-0000-4000-8000-000000000001');if(missing.status!==404)throw new Error('successor_http_connection');
  const baseline=await moduleClient.captureBaseline(device);manager.real.refresh();
  const manual=await manualSourceFor(commandToken,device),challenge=manager.sessions.beginDeviceEvaluatorChallenge({request_id:crypto.randomUUID(),policy_ref:evaluator.policy_ref,device_id:device});
@@ -109,25 +117,92 @@ async function runSuccessor(device){
  const recovery=manager.sessions.requestDeviceAuthorizationRecovery(commandToken,{request_id:crypto.randomUUID(),device_id:device,
   manual_source_ref:manual.ref,evaluator_source_ref:evaluated.ref,expected_state_ref:context.state_ref,expected_context_digest:context.context_digest});
  const selected=manager.sessions.consumeDeviceAuthorizationRecovery(commandToken,recovery.receipt.id);
- let evidence=manager.sessions.selectDeviceAuthorizationEvidence({request_id:crypto.randomUUID(),device_id:device,manual_source_ref:manual.ref,evaluator_source_ref:evaluated.ref,
+ const firstEvidence=manager.sessions.selectDeviceAuthorizationEvidence({request_id:crypto.randomUUID(),device_id:device,manual_source_ref:manual.ref,evaluator_source_ref:evaluated.ref,
   expected_state_ref:selected.ref,expected_evidence_ref:null});
  await business.workerLaunches.runtime.refreshCurrent(key);await source.refreshCoreObservation();
  manager.real.refresh();const pendingManual=manualSourceFor(commandToken,device,false),next=manager.sessions.beginDeviceEvaluatorChallenge({request_id:crypto.randomUUID(),policy_ref:evaluator.policy_ref,device_id:device});
  const nextEvaluator=manager.sessions.completeDeviceEvaluatorChallenge({request_id:crypto.randomUUID(),challenge_ref:{id:next.id,revision:'1',digest:next.digest},nonce:next.nonce,credential_id:evaluator.credential_id,secret:evaluator.secret}),nextManual=await pendingManual;
- evidence=manager.sessions.selectDeviceAuthorizationEvidence({request_id:crypto.randomUUID(),device_id:device,manual_source_ref:nextManual.ref,evaluator_source_ref:nextEvaluator.ref,
-  expected_state_ref:selected.ref,expected_evidence_ref:evidence.ref});
+ const evidence=manager.sessions.selectDeviceAuthorizationEvidence({request_id:crypto.randomUUID(),device_id:device,manual_source_ref:nextManual.ref,evaluator_source_ref:nextEvaluator.ref,
+  expected_state_ref:selected.ref,expected_evidence_ref:firstEvidence.ref});
+ report({event:'successor-stage',stage:'authorization-selected',remaining_ms:Number((BigInt(evidence.value.requirement.expires_tick_ns)-clock.tick())/1000000n)});
  const resource=manager.sessions.selectInitialDeviceResources({request_id:crypto.randomUUID(),device_id:device,expected_evidence_ref:evidence.ref});
  const opening=manager.sessions.prepareInitialDeviceOpen({request_id:crypto.randomUUID(),device_id:device,expected_resource_ref:resource.ref});
  report({event:'successor-resource',baseline,resource,opening,remaining_ms:Number((BigInt(opening.value.plan.expires_tick_ns)-clock.tick())/1000000n)});
  const opened=await executionClient.initialOpen(opening.ref,{ready:true});report({event:'successor-stage',stage:'opened',remaining_ms:Number((BigInt(opening.value.plan.expires_tick_ns)-clock.tick())/1000000n)});
- const request={...commandRequest,parameters:{value:23},idempotency_key:crypto.randomUUID(),dispatch:{mode:'immediate',max_queue_ms:10000}};
+ const request={...commandRequest,parameters,context_id:contextId,idempotency_key:crypto.randomUUID(),dispatch:{mode:'immediate',max_queue_ms:10000}};
  const accepted=await commandHttp('POST','/api/v1/commands',request);
  if(accepted.status!==202)throw Object.assign(new Error('successor_http_admission'),{code:'successor_http_admission',cause:accepted.body});
  report({event:'successor-stage',stage:'accepted',remaining_ms:Number((BigInt(opening.value.plan.expires_tick_ns)-clock.tick())/1000000n)});
- for(const [stage,method]of [['encoded','whenCommandEncoded'],['finalized','whenCommandFinalized'],['guarded','whenCommandGuarded'],['dispatched','whenCommandDispatched']])business.workerLaunches[method](accepted.body.command_ref.object_id).then(()=>report({event:'successor-stage',stage,remaining_ms:Number((BigInt(opening.value.plan.expires_tick_ns)-clock.tick())/1000000n)}),()=>{});
+  for(const [stage,method]of [['encoded','whenCommandEncoded'],['finalized','whenCommandFinalized'],['guarded','whenCommandGuarded'],['dispatched','whenCommandDispatched']]){
+   business.workerLaunches[method](accepted.body.command_ref.object_id).then(result=>{
+    const disposition=stage==='guarded'?result?.ack?.value?.disposition:undefined;
+    report({event:'successor-stage',stage,disposition,remaining_ms:Number((BigInt(opening.value.plan.expires_tick_ns)-clock.tick())/1000000n)});
+   },()=>{});
+  }
  const id=accepted.body.command_ref.object_id,cleaned=await business.workerLaunches.whenCommandCleaned(id),closed=await business.workerLaunches.whenCommandSettled(id);
  const current=await commandHttp('GET','/api/v1/commands/'+id),replayed=await commandHttp('POST','/api/v1/commands',request);
  report({event:'successor-command',opened,accepted,current,replayed,closed,cleaned,state:executionClient.state});
+}
+async function openOrdinaryGate(device,automatic,token=commandToken){
+ await executionClient.initialFence(device);
+ const evaluate=()=>{
+  const challenge=manager.sessions.beginDeviceEvaluatorChallenge({request_id:crypto.randomUUID(),policy_ref:evaluator.policy_ref,device_id:device});
+  return manager.sessions.completeDeviceEvaluatorChallenge({request_id:crypto.randomUUID(),challenge_ref:{id:challenge.id,revision:challenge.revision,digest:challenge.digest},
+   nonce:challenge.nonce,credential_id:evaluator.credential_id,secret:evaluator.secret});
+ };
+ const manual=automatic?null:await manualSourceFor(commandToken,device,false);
+ const evaluated=evaluate(),inputs={device_id:device,manual_source_ref:manual?.ref??null,evaluator_source_ref:evaluated.ref};
+ const context=automatic?manager.sessions.currentAutomaticAuthorizationContext(inputs):manager.sessions.currentManualAuthorizationContext(inputs);
+ const recovery=manager.sessions.requestDeviceAuthorizationRecovery(token,{...inputs,request_id:crypto.randomUUID(),
+  expected_state_ref:context.state_ref,expected_context_digest:context.context_digest});
+ const selected=manager.sessions.consumeDeviceAuthorizationRecovery(token,recovery.receipt.id);
+ const evidence=manager.sessions.selectDeviceAuthorizationEvidence({...inputs,request_id:crypto.randomUUID(),expected_state_ref:selected.ref,expected_evidence_ref:null});
+ await business.workerLaunches.runtime.refreshCurrent(key);
+ await source.refreshCoreObservation();
+ manager.real.refresh();
+ const freshManual=automatic?null:await manualSourceFor(commandToken,device,false);
+ const renewed=manager.sessions.selectDeviceAuthorizationEvidence({...inputs,manual_source_ref:freshManual?.ref??null,evaluator_source_ref:evaluate().ref,
+  request_id:crypto.randomUUID(),expected_state_ref:selected.ref,expected_evidence_ref:evidence.ref});
+ const resources=manager.sessions.selectInitialDeviceResources({request_id:crypto.randomUUID(),device_id:device,expected_evidence_ref:renewed.ref});
+ const opening=manager.sessions.prepareInitialDeviceOpen({request_id:crypto.randomUUID(),device_id:device,expected_resource_ref:resources.ref});
+ const opened=await executionClient.initialOpen(opening.ref,{ready:true});
+ const control=manager.sessions.getControl(token,device);
+ const current=executionClient.currentReady(opened.ready.ref);
+ return {control,selected,recovery,renewed,opening,ready:opened.ready,current};
+}
+async function runOrdinaryGate(device,automatic){
+ const {control,selected,recovery,renewed,opening,ready,current}=await openOrdinaryGate(device,automatic);
+ if(!automatic){
+  report({event:'manual-gate-before-migration',control,selected,recovery,ready,current});
+  executionClient.close();
+  return;
+ }
+ report({event:'automatic-ready',control,selected,renewed,opening,ready,current});
+ try{
+  await manager.sessions.submitCommand(commandToken,{...commandRequest,idempotency_key:crypto.randomUUID(),
+   expected_control:{epoch:control.control_epoch,version:control.effective_version}},{withStatus:true});
+  throw Error('manual_command_on_automatic_device');
+ }catch(error){if(error.code!=='command_control_owner')throw error;report({event:'automatic-manual-rejected',code:error.code});}
+ manager.sessions.revokeDeviceEvaluatorPolicy(manager.auth,{request_id:crypto.randomUUID(),policy_ref:evaluator.policy_ref});
+ const until=performance.now()+5000;
+ let protectedControl;
+ do{
+  protectedControl=manager.sessions.getControl(commandToken,device);
+  if(protectedControl.gate_state==='protected')break;
+  if(performance.now()>=until)throw Error('automatic_gate_protection_timeout');
+  await delay(20);
+ }while(true);
+ let rejection;
+ try{executionClient.currentReady(ready.ref);}catch(error){rejection=error.code;}
+ if(!rejection)throw Error('revoked_evaluator_kept_ready');
+ report({event:'automatic-protected',control:protectedControl,rejection,state:executionClient.state});
+}
+async function openAutomationTarget(device){
+ manager.real.refresh();const token=manager.token(['control.read','device.recover','device.command']);
+ const value=await openOrdinaryGate(device,true,token);
+ const result={ready_ref:value.ready.ref,control:value.control};
+ report({event:'automation-target-ready',...result,
+  remaining_ms:Number((BigInt(value.opening.value.plan.expires_tick_ns)-clock.tick())/1000000n)});return result;
 }
 async function verifyCapturedEvents(device){
 const qualified=moduleClient.qualifiedEventCapture(device);
@@ -135,13 +210,50 @@ const firstEvent=await moduleClient.readEvents(device,1),repeated=await moduleCl
 const firstPublished=moduleClient.publishedEvents(device);
 let wrong;try{await moduleClient.acknowledgeEvents(device,{through_sequence:r.batch.through_sequence,batch_digest:'sha256:'+'0'.repeat(64)});wrong='unexpected_success';}catch(error){wrong=error.code;}
 const receipt={through_sequence:r.batch.through_sequence,batch_digest:r.batch_digest};await moduleClient.acknowledgeEvents(device,receipt);await moduleClient.acknowledgeEvents(device,receipt);
-const secondEvent=await moduleClient.readEvents(device),s=secondEvent.body.result;await moduleClient.acknowledgeEvents(device,{through_sequence:s.batch.through_sequence,batch_digest:s.batch_digest});
+let secondEvent;
+async function publishSecond(){
+ if(!secondEvent){
+  secondEvent=await moduleClient.readEvents(device);const {batch,batch_digest}=secondEvent.body.result;
+  await moduleClient.acknowledgeEvents(device,{through_sequence:batch.through_sequence,batch_digest});
+ }
+ return moduleClient.publishedEvents(device);
+}
+const incremental=input.automation_peer?.incremental_source_event===true;
+async function publishArmedEvent(){
+ if(!secondEvent)throw Error('automation_trigger_baseline_missing');
+ report({event:'successor-stage',stage:'trigger-source-start'});
+ manager.real.refresh();
+ commandToken=manager.token(['control.read','device.recover','device.command','command.read','request.create']);
+ const context=manager.sessions.createRequestContext(commandToken,{audience:business.identity.service_id,operations:['submitCommand'],
+  selection:contractSelection,ttl_ms:30000,max_unique_requests:1});
+  try{await runSuccessor(device,{value:31},context.context_id);}
+  catch(error){await performanceCapture.stop().catch(()=>{});throw error;}
+ // 目标开闸由同一RunGrant的首动作资格查验触发，避免在事件交付前消耗其独立窗口。
+ const frame=await moduleClient.readEvents(device);
+ const {batch,batch_digest}=frame.body.result;
+ if(batch.events.length!==1||batch.events[0].payload.value!==31)throw Error('automation_trigger_capture');
+ await moduleClient.acknowledgeEvents(device,{through_sequence:batch.through_sequence,batch_digest});
+ const sourceEvent=moduleClient.publishedEvents(device,'2').events[0];
+ if(!sourceEvent?.origin.source_time_ref)throw Error('automation_trigger_source_time');
+ return {sourceEvent};
+}
+if(!incremental)await publishSecond();
+if(input.automation_peer){
+ bindingPeer=await automationPeer({business,manager,config:input.automation_peer,device,
+  refresh:()=>input.automation_peer.verify_armed_target_dispatch?source.assertCurrent():business.workerLaunches.runtime.refreshCurrent(key),report,
+  readReferenceBundle:referencePublication?.readBundle,
+  publishBufferedEvent:incremental?publishSecond:null,configurePublicationGui,
+  openArmTarget:input.automation_peer.arm_target?()=>openAutomationTarget(input.automation_peer.arm_target):null,
+  readExecutionState:()=>executionClient.state,
+  publishArmedEvent:input.automation_peer.verify_armed_target_dispatch?publishArmedEvent:null});
+ report({event:'event-source-published',published:moduleClient.publishedEvents(device)});
+ scheduling?.reset();
+ await bindingPeer.phase('events');
+ if(input.automation_peer.verify_armed_target_ready){await bindingPeer.close();bindingPeer=null;return;}
+}
+await publishSecond();
 const empty=await moduleClient.readEvents(device);await moduleClient.acknowledgeEvents(device,{through_sequence:empty.body.result.batch.through_sequence,batch_digest:empty.body.result.batch_digest});
 const published=moduleClient.publishedEvents(device),suffix=moduleClient.publishedEvents(device,'1');
-if(input.automation_peer){
- bindingPeer=await automationPeer({business,manager,config:input.automation_peer,device,refresh:()=>business.workerLaunches.runtime.refreshCurrent(key),report});
- report({event:'event-source-published',published});await bindingPeer.phase('events');
-}
 const stopped=await moduleClient.stopEvents(device);let afterStop;try{moduleClient.qualifiedEventCapture(device);afterStop='unexpected_success';}catch(error){afterStop=error.code;}
 if(bindingPeer)await bindingPeer.phase('events-stopped');
 report({event:'module-events-captured',first:firstEvent,repeated,second:secondEvent,empty,stopped,wrong,qualified,afterStop,firstPublished,published,suffix});
@@ -152,11 +264,79 @@ report({event:'module-events-new-session',started,empty:newEmpty,stopped:newStop
 const boot=createCoreBootstrapChannel(process.stdin,process.stdout,{timeoutMs:10000});
 const assignment=await boot.assignment(),receipt=await boot.proveAndReceive(assignment);boot.release();
 const policy=JSON.parse(options['--bootstrap-policy']),input=JSON.parse(fs.readFileSync(options['--fixture']));
+const scheduling=input.automation_peer?.verify_armed_target_dispatch?monitorEventLoopDelay({resolution:20}):null;
+scheduling?.enable();
+const omitRetirementRequest=input.mode.endsWith('_reference_restart_missing');
+const automaticReady=input.mode.endsWith('_ready_automatic');
+const manualGateMigration=input.mode.endsWith('_ready_manual_migration');
 const controlFlow=input.mode==='supervisor_create_module_writable'||input.mode.includes('_control_fence_')||(input.mode.includes('_manual_authority_')||input.mode.includes('_manual_challenge_')||input.mode.includes('_evidence_'))||(input.mode.includes('_evaluator_')||(input.mode.includes('_recovery_')||input.mode.includes('_consumption_')||input.mode.includes('_evidence_')));
-const source=await connectCoreSupervisor({pipe:options['--supervisor-pipe'],channelId:options['--supervisor-channel'],policy,binding:{descriptor:assignment.clock_domain_descriptor,receipt}});
-source.subscribeLost(error=>report({event:'core-source-lost',code:error.code}));
+const source=await connectCoreSupervisor({pipe:options['--supervisor-pipe'],channelId:options['--supervisor-channel'],policy,
+ timeProviderIntent:options['--time-provider-intent']??null,binding:{descriptor:assignment.clock_domain_descriptor,receipt}});
+source.subscribeLost(error=>report({event:'core-source-lost',code:error.code,stack:error.stack,...error.timing,
+ ...(scheduling&&{event_loop_delay:{samples:scheduling.count,max_ms:scheduling.max/1e6,p99_ms:scheduling.percentile(99)/1e6}})}));
 async function waitPastSource(deadline){while(clock.tick()<=BigInt(deadline))await delay(Math.max(1,Number((BigInt(deadline)-clock.tick())/1000000n)+25));}
 const clock=openNativeClock(),hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
+let referenceLink=null,referencePublication=null,referenceWithdrawn=false;
+async function collectCommandReference(binding){
+ const udp=dgram.createSocket('udp4');
+ try{
+  udp.bind(0,'127.0.0.1');await once(udp,'listening');
+  const network={authentication:'trusted_network',endpoint:'127.0.0.1:'+udp.address().port};
+  const fixed=(id,digest=hash(id))=>({id,digest,revision:'1'}),slot='source.command-time';
+  const valid=String(clock.tick()+90000000000n),boundary=((1n<<32n)-2208988800n)*1000000000n;
+  const key=crypto.createSecretKey(crypto.randomBytes(32));
+  const readAuthentication=()=>manager.real.referenceTimeSample();
+  const assertCurrent=()=>source.assertCurrent();
+  referenceLink=await openTimeProviderLink(binding,{assertCurrent,readAuthentication});
+  udp.on('message',(request,peer)=>{
+   const reply=Buffer.alloc(48);reply[0]=36;reply[1]=1;reply[19]=1;
+   request.copy(reply,24,40,48);reply.writeUInt32BE(0xffffffff,32);reply.writeUInt32BE(0xffffffff,36);reply[47]=1;
+   udp.send(reply,peer.port,peer.address);
+  });
+  const configuration_ref=fixed('configuration.command-time');
+  const bundleAuthority=input.source_reference_capture?referenceBundleAuthority({serviceId:policy.service_id,configuration:configuration_ref,
+   timeBounds:{lower_ns:String(boundary-1000000000n),upper_ns:String(boundary+1000000000n)},maxAnchorAge:'90000000000',
+   maxExchangeAge:'90000000000',maxUpstreamAge:'91000000000'}):null;
+  const reserved_bytes=bundleAuthority?16384:8192;
+  const facts={source_slot:slot,source_digest:bundleAuthority?.sourceDoc.source_digest??hash(slot),approval_ref:bundleAuthority?.references.approval_ref??fixed('approval.command-time'),configuration_ref,
+   endpoint_ref:fixed('endpoint.loopback',hash(network)),minimum_poll_interval_ns:'16000000000',poll_lease_ns:'2000000000',reserved_bytes};
+  const polls=business.openTimeProviderPolls({limits:{max_outstanding:1,max_reserved_bytes:reserved_bytes},readSource:()=>({...facts,valid_before_tick_ns:valid}),
+   readAuthentication,assertCurrent,observeRetirement:source.observeTimeProviderRetirement,assertRetirement:source.assertTimeProviderRetirement});
+  const publication=business.openReferenceTimeAnchor({sourceSlot:slot,readContext:polls.referenceContext,
+   readApproval:()=>referenceWithdrawn?null:{format:'leafseamer-reference-approval/1',authentication:'trusted_network',source_digest:facts.source_digest,
+    approval_ref:facts.approval_ref,configuration_ref:facts.configuration_ref,profile_ref:bundleAuthority?.references.profile_ref??fixed('profile.command-time'),
+    policy_ref:bundleAuthority?.references.policy_ref??fixed('policy.command-time'),
+    time_scale:'UTC',leap_mode:'normal_only',smear:false,elapsed_error_ppm:0,span_quantization_ns:'1000',max_span_ns:'2000000000',
+    max_anchor_age_ns:'90000000000',max_exchange_age_ns:'90000000000',max_upstream_age_ns:'91000000000',max_half_width_ns:'1000000000',valid_before_tick_ns:valid},
+   readEvidence:request=>({format:'leafseamer-reference-evidence/1',exchange_digest:request.exchange_digest,
+    ...(bundleAuthority?bundleAuthority.proofs(request):{authentication_ref:fixed('authentication.command-time'),error_ref:fixed('error.command-time'),era_ref:fixed('era.command-time')}),
+    independent_utc_lower_ns:String(boundary-1000000000n),independent_utc_upper_ns:String(boundary+1000000000n),t2_error_ns:'1000',t3_error_ns:'1000',
+    upstream_age_at_m1_ns:'1000',valid_before_tick_ns:valid}),...(bundleAuthority&&{readBundleOriginals:bundleAuthority.readBundleOriginals})});
+  referencePublication=publication;
+  const archive=business.openTimeProviderCapture({currentKey:scope=>({...scope,key,id:'fixture.command-time',writable:true}),
+   readKey:scope=>({...scope,key,id:'fixture.command-time'})},publication);
+  const original=polls.reserve(slot,'poll.command-time'),pollRef={id:original.reservation.poll_id,digest:original.digest};
+  const before=readAuthentication();
+  await referenceLink.collect(()=>{
+   const reservation=original.reservation,attempt=polls.markAttempt(pollRef),authorize=()=>polls.authorizeAttempt(attempt);
+   return {reservation,attempt,authorize,network,archive:candidate=>archive.store({reservation,attempt,authorize,candidate,network}),
+    release:(receipt,acknowledgement)=>archive.release({reservation,receipt,acknowledgement,assertCurrent})};
+  });
+  if(bundleAuthority){
+   const current=readAuthentication(),{tick_ns,runtime_domain_ref}=current,provider=publication.receiverReference;
+   const reference=provider.readFirst({tick_ns,runtime_domain_ref});
+   if(!reference)throw new Error('fixture_receiver_reference_missing');
+   const check={first_tick_ns:tick_ns,tick_ns,reference},altered=structuredClone(reference);
+   altered.state.status='unqualified';
+   report({event:'receiver-reference-native-receipt',boot:reference.service_boot_id,bundle_digest:reference.bundle.bundle_digest,
+    current:provider.isCurrent(check),before_publication:provider.readFirst({tick_ns:before.tick_ns,runtime_domain_ref})===null,
+    wrong_domain:provider.readFirst({tick_ns,runtime_domain_ref:{...runtime_domain_ref,descriptor_digest:hash('other domain')}})===null,
+    wrong_boot:!provider.isCurrent({...check,reference:{...reference,service_boot_id:crypto.randomUUID()}}),
+    altered:!provider.isCurrent({...check,reference:altered}),expired:!provider.isCurrent({...check,tick_ns:reference.valid_before_tick_ns})});
+  }
+  report({event:'command-reference-anchor',current:publication.current()});
+ }finally{udp.close();}
+}
 const ref=kind=>({kind,authority_service_id:policy.service_id,database_instance_id:policy.database_instance_id,object_id:kind,revision:'1',digest:hash(kind)});
 const intent={launch_id:'worker.launch',service_id:policy.service_id,supervisor_instance_id:source.scope.supervisor_instance_id,
   runtime_generation:assignment.clock_domain_descriptor.runtime_generation,member_id:'worker.member',role:'worker',artifact_manifest_ref:policy.artifact_manifest_ref,
@@ -171,7 +351,9 @@ const authorization=()=>{const now=clock.tick();return seal({authorization_ref:r
 const fence=(revision,disposition)=>{const value={scope:source.scope,revision,items:[{...key,disposition}]};return {...value,digest:hash(value)};};
 if(!input.runtime){await source.putFence(fence('1','allow'));await source.registerWorker(intent,authorization());report({event:'registered',key});}
 if(input.runtime){
- business=openStorage(options['--data-dir']);business.bindCoreRuntime(await verifyCoreAdmission(assignment,receipt,policy),policy);
+ business=openStorage(options['--data-dir']);
+ const needsReference=input.reference_acceptance||input.source_reference_capture;
+ const timeBinding=business.bindCoreRuntime(await verifyCoreAdmission(assignment,receipt,policy),policy,needsReference?source:null);
  const clientConfig=input.runtime.installation_client;
  const {captureInstallationPeer,createInstallationChannel}=await import(clientConfig.peer_module);
  const {createInstallationClient}=await import(clientConfig.client_module);
@@ -185,8 +367,10 @@ if(input.runtime){
    // 实际独立安装IPC查询；回执绑定已封存manifest/inventory的摘要，无须先登记worker。
    const response=await queryIntake(request);if(response.result?.status!=='available'||canonicalize(response.result.receipt)!==canonicalize(content.receipt))throw new Error('fixture_intake_unavailable');
    return {status:'available',content};}});
- business.workerLaunches.runtime.bindSource(source);business.extensionInstallations.bindRuntimeSource(source);business.workerLaunches.authorization.bindSource(source);
+ const workerSource=omitRetirementRequest?{...source,async retireWorker(){throw new Error('fixture_retirement_request_lost');}}:source;
+ business.workerLaunches.runtime.bindSource(workerSource);business.extensionInstallations.bindRuntimeSource(source);business.workerLaunches.authorization.bindSource(workerSource);
  manager=await authenticated({after(){}},{store:business},{native:{source:clock,descriptor:assignment.clock_domain_descriptor},sampleWindowPolicy:'authentication-clock-sample/2'});
+ if(needsReference)await collectCommandReference(timeBinding);
  if(input.command_tls)await startCommandHttp(input.command_tls);
  if(input.mode.endsWith('_capabilities')){
   const before=manager.sessions.localPermissions(manager.auth);
@@ -220,15 +404,31 @@ if(input.runtime){
   report({event:'evaluator-policy',policy:evaluatorPolicy});
  }
  if(controlFlow){
-  const permissions=['control.read','control.acquire','device.command','device.recover','command.read','command.evidence.read','command.cancel','request.create',...(input.mode.endsWith('_successor_control')||input.mode.includes('_control_queued')||input.mode.endsWith('_control_unresolved')?['control.release']:[])];
+  const armTarget=input.automation_peer?.arm_target;
+  const permissions=['control.read','control.acquire','device.command','device.recover','command.read','command.evidence.read','command.cancel','request.create',...(automaticReady||armTarget||input.mode.endsWith('_successor_control')||input.mode.includes('_control_queued')||input.mode.endsWith('_control_unresolved')?['control.release']:[])];
   const before=manager.sessions.localPermissions(manager.auth);manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id:manager.logged.session.principal_id,expected_revision:before.revision,permissions:[...new Set([...before.permissions,...permissions,...(input.gui?['device.read']:[])])]});
   commandToken=manager.token(permissions);const device=intent.object_scope.device_ids[0],{contractSelection:selection}=await import('../../dist/sdk/index.mjs');
-  const context=manager.sessions.createRequestContext(commandToken,{audience:business.identity.service_id,operations:['acquireControl','submitCommand'],selection,ttl_ms:60000,max_unique_requests:8});
-  const original=manager.sessions.getControl(commandToken,device),accepted=await manager.sessions.changeControl(commandToken,'acquireControl',{device_id:device},{context_id:context.context_id,idempotency_key:'manual.command.owner',expected_control:{epoch:original.control_epoch,version:original.effective_version},reason:'模拟器人员控制'});
-  const until=performance.now()+5000;let operation;
-  do{operation=manager.sessions.getControlOperation(commandToken,accepted.receipt.initial_result_ref.id);if(operation.state!=='pending')break;if(performance.now()>=until)throw new Error('command_control_wait');await delay(20);}while(true);
-  if(operation.state!=='effective')throw new Error('command_control_not_effective');
+  const context=manager.sessions.createRequestContext(commandToken,{audience:business.identity.service_id,
+   operations:automaticReady||armTarget?['acquireControl','releaseControl','submitCommand']:['acquireControl','submitCommand'],selection,ttl_ms:60000,max_unique_requests:8});
+  async function change(selected,method,key){
+   const original=manager.sessions.getControl(commandToken,selected);
+   const accepted=await manager.sessions.changeControl(commandToken,method,{device_id:selected},{context_id:context.context_id,idempotency_key:key,
+    expected_control:{epoch:original.control_epoch,version:original.effective_version},reason:'模拟器人员控制'});
+   const until=performance.now()+5000;let operation;
+   do{operation=manager.sessions.getControlOperation(commandToken,accepted.receipt.initial_result_ref.id);if(operation.state!=='pending')break;if(performance.now()>=until)throw new Error('command_control_wait');await delay(20);}while(true);
+   if(operation.state!=='effective')throw new Error('command_control_not_effective');return operation;
+  }
+  const operation=await change(device,'acquireControl','manual.command.owner');
   const control=manager.sessions.getControl(commandToken,device);report({event:'command-control',control,operation});
+  if(automaticReady){
+   const released=await change(device,'releaseControl','automation.target.release');
+   report({event:'automatic-released',released,control:manager.sessions.getControl(commandToken,device)});
+  }
+  if(armTarget){
+   await change(armTarget,'acquireControl','automation.target.acquire');
+   const released=await change(armTarget,'releaseControl','automation.target.release');
+   report({event:'automation-target-control',result:released,control:manager.sessions.getControl(commandToken,armTarget)});
+  }
   commandRequest={device_id:device,action_id:'leafseamer.simulator.value.set',capability_version:'1.0.0',parameters:{value:7},context_id:context.context_id,
    expected_control:{epoch:control.control_epoch,version:control.effective_version},origin:'manual',automation_binding:null,required_completion:'sent',preconditions:[],dispatch:{mode:'immediate',max_queue_ms:1000},evidence_timeout_ms:1000};
  }
@@ -275,6 +475,8 @@ try{
       }
       const connected=await moduleClient.connectReadOnly(device),first=await moduleClient.captureBaseline(device),second=await moduleClient.captureBaseline(device);
       const accepted=moduleClient.currentBaseline(device);
+      const armTarget=input.automation_peer?.arm_target;
+      if(armTarget){await moduleClient.connectReadOnly(armTarget);await moduleClient.captureBaseline(armTarget);}
       if(eventCaptureMode){
        const started=await moduleClient.startEvents(device),empty=await moduleClient.readEvents(device);
        await moduleClient.acknowledgeEvents(device,{through_sequence:empty.body.result.batch.through_sequence,batch_digest:empty.body.result.batch_digest});
@@ -307,16 +509,30 @@ try{
         report({event:'execution-negotiated',negotiation:execution.negotiation,state:execution.state});
       }
       if(controlFlow||input.mode.includes('_binding_'))report({event:'execution-bound',first:moduleClient.bindExecution(device),repeated:moduleClient.bindExecution(device)});
+      const protectionPlan=input.run_fence?{origin_scope:input.run_fence.origin_scope,run_id:input.run_fence.run_id,deny_through_generation:'2',
+        device_ids:input.run_fence.after_retirement?[device]:[device,crypto.randomUUID()]}:null;
+      const beforeConfiguration=protectionPlan?await business.workerLaunches.applyRunProtection(protectionPlan):null;
       if(input.mode==='supervisor_create_module_writable'||input.mode.includes('_open_dispatch'))report({event:'execution-configured',first:await moduleClient.configureExecution(device),repeated:await moduleClient.configureExecution(device)});
+      if(armTarget){
+        await moduleClient.configureExecution(armTarget);
+      }
+      if(protectionPlan&&!input.run_fence.after_retirement){
+        const scheduled=await business.workerLaunches.applyRunProtection(protectionPlan);
+        const request={...input.run_fence,device_id:device},first=await executionClient.applyRunFence(request);
+        report({event:'run-fence',beforeConfiguration,scheduled,first,repeated:await executionClient.applyRunFence(request),state:executionClient.state});
+      }
       let manualSource=null,recoveryRequest=null,recoveryAccepted=null,consumedRecovery=null,competingRecovery=null;
+      if(automaticReady||manualGateMigration){await runOrdinaryGate(device,automaticReady);break moduleWork;}
       if(controlFlow){
         report({event:'initial-control-fence',first:await executionClient.initialFence(device),repeated:await executionClient.initialFence(device)});
-        if(commandHttp){const missing=await commandHttp('GET','/api/v1/commands/00000000-0000-4000-8000-000000000001');if(missing.status!==404)throw new Error('command_http_connection');}
-        try{await manualSourceFor({...commandToken,secret:'A'.repeat(43)},device);report({event:'manual-source-bad-secret',code:'unexpected_success'});}
-        catch(error){report({event:'manual-source-bad-secret',code:error.code});}
-        const coreObservation=source.observeCore();source.assertCoreObservation(coreObservation);
-        try{source.assertCoreObservation(structuredClone(coreObservation));report({event:'core-observation-copy',code:'unexpected_success'});}
-        catch(error){report({event:'core-observation-copy',code:error.code});}
+        if(!input.automation_peer?.verify_armed_target_dispatch){
+         if(commandHttp){const missing=await commandHttp('GET','/api/v1/commands/00000000-0000-4000-8000-000000000001');if(missing.status!==404)throw new Error('command_http_connection');}
+         try{await manualSourceFor({...commandToken,secret:'A'.repeat(43)},device);report({event:'manual-source-bad-secret',code:'unexpected_success'});}
+         catch(error){report({event:'manual-source-bad-secret',code:error.code});}
+         const coreObservation=source.observeCore();source.assertCoreObservation(coreObservation);
+         try{source.assertCoreObservation(structuredClone(coreObservation));report({event:'core-observation-copy',code:'unexpected_success'});}
+         catch(error){report({event:'core-observation-copy',code:error.code});}
+        }
         manualSource=await manualSourceFor(commandToken,device);
         report({event:'manual-source',source:manualSource,current:manager.sessions.currentManualExecutionSource(manualSource.ref)});
         await delay(25); // 独立调用间让实际监督观察刷新任务运行，保留原证据期限。
@@ -339,7 +555,8 @@ try{
             const freshEvaluator=manager.sessions.completeDeviceEvaluatorChallenge({request_id:crypto.randomUUID(),challenge_ref:{id:challenge.id,revision:'1',digest:challenge.digest},
               nonce:challenge.nonce,credential_id:evaluator.credential_id,secret:evaluator.secret});
             authorizationEvidence=manager.sessions.selectDeviceAuthorizationEvidence({...evidenceRequest,manual_source_ref:freshManual.ref,evaluator_source_ref:freshEvaluator.ref});
-            if(input.mode.includes('_dispatch_ready')){
+            // 触发组合场景使用首次选择的就绪证据。证据续换由独立场景覆盖。
+            if(input.mode.includes('_dispatch_ready')&&!input.automation_peer?.verify_armed_target_dispatch){
               // 首次Evidence先在恢复窗口内采用，再等待实际新观察并续约。
               await business.workerLaunches.runtime.refreshCurrent(key);
               await source.refreshCoreObservation();
@@ -437,7 +654,7 @@ try{
                         const committed=await business.workerLaunches.whenCommandFinalized(accepted.adjudication.command_ref.object_id);
                         report({event:'command-final-admission',record:committed.saved.record,value:committed.saved.lifecycle.final_admission.value,
                           observation:committed.observation,replay:committed.replay});
-                        if(!input.mode.includes('_cleanup_successor')&&!input.mode.endsWith('_control_unresolved'))report({event:'command-prepared-current',value:preparedProof??executionClient.currentPreparedCommand(committed.saved.source.command_id)});
+                        if(!input.reference_schema&&!input.mode.includes('_cleanup_successor')&&!input.mode.endsWith('_control_unresolved'))report({event:'command-prepared-current',value:preparedProof??executionClient.currentPreparedCommand(committed.saved.source.command_id)});
                         if(input.mode.includes('_t2_guard')){
                           if(guardProof)report(guardProof);
                           else await business.workerLaunches.whenCommandGuarded(committed.saved.source.command_id);
@@ -448,9 +665,15 @@ try{
                     await waitPastSource(initialOpening.value.plan.expires_tick_ns);
                     const code=async action=>{try{await action();return 'unexpected_success';}catch(error){return error.code;}};
                     const readOnly=manager.token(['control.read']);
+                    if(input.reference_acceptance){
+                      referenceWithdrawn=true;
+                      const current=referencePublication.current();
+                      await referencePublication.reconcileProtection();
+                      report({event:'command-reference-invalidated',current,protection:referencePublication.protectionStatus()});
+                    }
                     const terminalHttp=commandHttp?await commandHttp('GET','/api/v1/commands/'+accepted.adjudication.command_ref.object_id):null;
                     if(terminalHttp&&terminalHttp.status!==200)throw Object.assign(new Error('command_http_terminal'),{code:'command_http_terminal',cause:terminalHttp.body});
-                    if(input.mode.endsWith('_dispatch_closure')||input.mode.endsWith('_closure_cleanup')){
+                    if(input.reference_schema||input.mode.endsWith('_dispatch_closure')||input.mode.endsWith('_closure_cleanup')){
                       const commandId=accepted.adjudication.command_ref.object_id,first=await commandHttp('GET','/api/v1/commands/'+commandId+'/evidence?state_revision=5&limit=1'),
                         second=await commandHttp('GET','/api/v1/commands/'+commandId+'/evidence?state_revision=5&limit=1&cursor='+encodeURIComponent(first.body.next_cursor)),
                         original=await commandHttp('GET','/api/v1/commands/'+commandId+'/evidence/'+first.body.items?.[0]?.source_ref.id+'/revisions/1'),
@@ -468,8 +691,11 @@ try{
                   if(input.mode.endsWith('_stale')){await moduleClient.captureBaseline(device);await checkCommand('ready-stale');executionClient.currentReady(ready.ref);report({event:'ready-stale',code:'unexpected_success'});}
                   else{await checkCommand('ready-expired');report({event:'ready-expired',state:executionClient.state,control:manager.sessions.getControl(commandToken,device)});}
                   if(input.mode.includes('_cleanup_successor'))await runSuccessor(device);
-                  if(eventCaptureMode)await verifyCapturedEvents(device);
+                  if(input.automation_peer?.target_gate_only)await openAutomationTarget(input.automation_peer.arm_target);
+                  else if(eventCaptureMode)await verifyCapturedEvents(device);
                   if(input.mode.endsWith('_successor_control')||input.mode.endsWith('_control_unresolved'))await releaseAfterCommands(device);
+                  if(protectionPlan&&input.run_fence.after_retirement)report({event:'run-protection-retirement',plan:protectionPlan,
+                    beforeConfiguration,result:await business.workerLaunches.applyRunProtection(protectionPlan)});
                   break moduleWork;
                 }
                 if(input.mode.endsWith('_stale')){await moduleClient.captureBaseline(device);await executionClient.initialOpen(initialOpening.ref);report({event:'open-stale',code:'unexpected_success'});}
@@ -678,13 +904,23 @@ try{
     if(business){try{business.workerLaunches.runtime.current(key);}catch{}report({event:'runtime-withdrawn',binding:business.workerLaunches.runtime.query(key)});}
     if(business&&input.mode.endsWith('_capabilities')){try{business.workerLaunches.deviceAutomation(intent.object_scope.device_ids[0]);report({event:'automation-bindings-withdrawn',code:'unexpected_success'});}catch(error){report({event:'automation-bindings-withdrawn',code:error.code});}}
     if(bindingPeer)await bindingPeer.phase('withdrawn',{running:false});
-    const retirementDeadline=performance.now()+5000;
-    for(;;){try{report({event:'retired',result:await source.retireWorker(intent,'revoked')});break;}
-      catch(error){if(error.code!=='supervisor_indeterminate'||performance.now()>=retirementDeadline)throw error;await delay(25);}}
+    if(!omitRetirementRequest){
+      const retirementDeadline=performance.now()+5000;
+      for(;;){try{report({event:'retired',result:await source.retireWorker(intent,'revoked')});break;}
+        catch(error){if(error.code!=='supervisor_indeterminate'||performance.now()>=retirementDeadline)throw error;await delay(25);}}
+    }
+    if(input.reference_acceptance){
+      if(!input.mode.includes('_reference_restart'))await referencePublication.reconcileProtection();
+      report({event:'command-reference-exit-retired',protection:referencePublication.protectionStatus()});
+    }
   }
   }
   if(input.mode==='supervisor_deny')await source.putFence(fence('2','deny'));
-  const released=await held.release();report({event:'released',status:released.status});
+  try{const released=await held.release();report({event:'released',status:released.status});}
+  catch(error){
+    if(!omitRetirementRequest || error.code!=='supervisor_indeterminate')throw error;
+    report({event:'release-unproven',code:error.code});
+  }
  }else{
   const started=performance.now(),pending=source.prepareWorkerMaterialization(key);
   if(input.mode==='revoke_pending'){await delay(100);await source.putFence(fence('2','deny'));}
@@ -718,4 +954,5 @@ if(input.gui){guiTimer=setInterval(()=>{
 await bindingPeer?.close();
 report({event:'done',record:await source.queryLaunch(key)});
 await performanceCapture.stop();
-process.stdin.setEncoding('utf8').on('data',data=>{if(data==='stop\n'){clearInterval(guiTimer);commandAgent?.destroy();commandServer?.close();manager?.real.stop();intakeClient?.close();business?.close();source.close();process.stdin.destroy();}});process.stdin.resume();
+scheduling?.disable();
+process.stdin.setEncoding('utf8').on('data',data=>{if(data==='stop\n'){clearInterval(guiTimer);commandAgent?.destroy();commandServer?.close();manager?.real.stop();intakeClient?.close();business?.close();referenceLink?.close();source.close();process.stdin.destroy();}});process.stdin.resume();

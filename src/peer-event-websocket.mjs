@@ -6,13 +6,32 @@ export function createPeerWebsocketServer({protocol}){
  const active=new Set();
  return Object.freeze({
   accept(request,socket,head,{open,stable}){guard(active.size<16);server.handleUpgrade(request,socket,head,ws=>{
-   let app;try{stable();app=open();}catch{ws.terminate();return;}let queued=0,chain=Promise.resolve(),ended=false;const timer=setTimeout(()=>ws.terminate(),5000);timer.unref();
+   let app;try{stable();app=open();}catch{ws.terminate();return;}let queued=0,chain=Promise.resolve(),ended=false,idleQueued=false;const timer=setTimeout(()=>ws.terminate(),5000);timer.unref();
    const stop=()=>{if(ended)return;ended=true;clearTimeout(timer);active.delete(connection);try{app.close();}catch{}};
-   const connection={ws,check(){try{stable();app.check();}catch{ws.terminate();stop();}}};active.add(connection);ws.on('error',()=>{ws.terminate();stop();});ws.on('close',stop);
-   ws.on('message',(bytes,binary)=>{if(binary||++queued>4){ws.terminate();stop();return;}chain=chain.then(async()=>{guard(!ended);stable();const result=await app.receive(Buffer.from(bytes));
+   const fail=()=>{ws.terminate();stop();};
+   async function pump(idle=false){
+    guard(!ended);stable();
+    const delivery=await app.next?.(idle);
+    if(delivery){
+     const {body,beforeSend,afterSend}=delivery;
+     guard(!ended&&ws.readyState===WebSocket.OPEN&&ws.bufferedAmount+body.length<=limit&&body.length<=limit);
+     stable();beforeSend();
+     await new Promise((resolve,reject)=>ws.send(body,{binary:false},error=>error?reject(error):resolve()));
+     guard(!ended&&ws.readyState===WebSocket.OPEN);stable();afterSend();
+    }
+   }
+   const connection={ws,check(){
+    let live;
+    try{stable();live=app.check();}catch{fail();return;}
+    if(live!==true||ended||queued||idleQueued)return;
+    idleQueued=true;
+    chain=chain.then(()=>pump(true)).catch(fail).finally(()=>{idleQueued=false;});
+   }};active.add(connection);ws.on('error',fail);ws.on('close',stop);
+   ws.on('message',(bytes,binary)=>{if(binary||++queued>4){fail();return;}chain=chain.then(async()=>{guard(!ended);stable();const result=await app.receive(Buffer.from(bytes));
     for(const body of result.messages){guard(!ended&&ws.readyState===WebSocket.OPEN&&ws.bufferedAmount+body.length<=limit&&body.length<=limit);stable();result.beforeSend();ws.send(body,{binary:false});}
     clearTimeout(timer);
-   }).catch(()=>{ws.terminate();stop();}).finally(()=>{queued--;});});
+    await pump();
+   }).catch(fail).finally(()=>{queued--;});});
   });},
   sweep(){for(const connection of active)connection.check();},
   close(){for(const {ws}of active)ws.terminate();return new Promise(resolve=>server.close(()=>resolve()));}

@@ -55,9 +55,9 @@ static unsigned long long tick() {
   require(value <= std::numeric_limits<unsigned long long>::max() / 100, "bootstrap_clock"); return value * 100;
 }
 struct Policy {
-  std::string service, database, manifest, profile, revision, clockRevision, body;
+  std::string service, database, manifest, manifestDigest, profile, revision, clockRevision, body;
   unsigned long long timeout = 0;
-  explicit Policy(const std::string& input) {
+  explicit Policy(const std::string& input, const char* format = "leafseamer-core-bootstrap-policy/1") {
     require(input.size() <= 8192, "bootstrap_policy");
     sqlite3* raw = nullptr; require(sqlite3_open(":memory:", &raw) == SQLITE_OK, "bootstrap_policy");
     std::unique_ptr<sqlite3, DatabaseCloser> db(raw);
@@ -76,12 +76,12 @@ struct Policy {
     };
     fields("$", {"format", "service_id", "database_instance_id", "artifact_manifest_ref", "platform_profile_ref", "policy_revision", "bootstrap_timeout_ms", "clock_backend_revision"});
     fields("$.artifact_manifest_ref", {"manifest_id", "revision", "digest"}); fields("$.platform_profile_ref", {"profile_id", "revision"});
-    require(value("$.format") == "leafseamer-core-bootstrap-policy/1", "bootstrap_policy");
+    require(value("$.format") == format, "bootstrap_policy");
     service = value("$.service_id"); database = value("$.database_instance_id"); revision = value("$.policy_revision"); clockRevision = value("$.clock_backend_revision");
     const auto decimal = [](const std::string& s) { require(s.size() <= 20 && (s == "0" || s[0] != '0'), "bootstrap_policy");
       for (const char c : s) require(c >= '0' && c <= '9', "bootstrap_policy"); };
     decimal(revision); const auto manifestRevision = value("$.artifact_manifest_ref.revision"), profileRevision = value("$.platform_profile_ref.revision");
-    decimal(manifestRevision); decimal(profileRevision); const auto manifestDigest = value("$.artifact_manifest_ref.digest");
+    decimal(manifestRevision); decimal(profileRevision); manifestDigest = value("$.artifact_manifest_ref.digest");
     require(manifestDigest.size() == 71 && manifestDigest.rfind("sha256:", 0) == 0, "bootstrap_policy");
     for (size_t i = 7; i < manifestDigest.size(); ++i) require((manifestDigest[i] >= '0' && manifestDigest[i] <= '9') || (manifestDigest[i] >= 'a' && manifestDigest[i] <= 'f'), "bootstrap_policy");
     manifest = object({{"manifest_id", string(value("$.artifact_manifest_ref.manifest_id"))}, {"revision", string(manifestRevision)}, {"digest", string(manifestDigest)}});
@@ -89,7 +89,7 @@ struct Policy {
     Statement duration(raw, "SELECT json_type(?1,'$.bootstrap_timeout_ms'),json_extract(?1,'$.bootstrap_timeout_ms')"); duration.bind(1, input);
     require(sqlite3_step(duration.value) == SQLITE_ROW && duration.text(0) == "integer", "bootstrap_policy");
     const auto millis = sqlite3_column_int64(duration.value, 1); require(millis >= 1 && millis <= 60000, "bootstrap_policy"); timeout = static_cast<unsigned long long>(millis);
-    body = object({{"format", string("leafseamer-core-bootstrap-policy/1")}, {"service_id", string(service)}, {"database_instance_id", string(database)},
+    body = object({{"format", string(format)}, {"service_id", string(service)}, {"database_instance_id", string(database)},
       {"artifact_manifest_ref", manifest}, {"platform_profile_ref", profile}, {"policy_revision", string(revision)},
       {"bootstrap_timeout_ms", std::to_string(timeout)}, {"clock_backend_revision", string(clockRevision)}});
     require(body == input, "bootstrap_policy_canonical");
@@ -151,14 +151,30 @@ struct Exchange {
       {"artifact_manifest_ref", policy.manifest}, {"channel_binding_id", string(channel)}, {"challenge_id", string(challenge)}};
   }
   Exchange(const Domain& parent,const std::string& launch,const std::string& body,const std::string& memberId,const std::string& group):policy(parent.policy){
+    memberExchange(parent, launch, body, memberId, group, "worker");
+  }
+  Exchange(const Domain& parent,const Policy& provider,const std::string& launch):policy(provider){
+    require(provider.service==parent.policy.service&&provider.database==parent.policy.database&&
+      provider.profile==parent.policy.profile&&provider.clockRevision==parent.policy.clockRevision,"time_provider_scope");
+    const auto memberId=identifier();
+    const auto group=object({{"group_id",string(launch)},{"generation",string(parent.generation)},{"backend",string("windows_job")}});
+    const auto body=object({{"launch_id",string(launch)},{"service_id",string(provider.service)},{"supervisor_instance_id",string(parent.supervisor)},
+      {"runtime_generation",string(parent.generation)},{"member_id",string(memberId)},{"role",string("time_provider")},
+      {"artifact_manifest_ref",provider.manifest},{"containment_ref",group},{"device_ids","[]"},{"policy_revision",string(provider.revision)}});
+    memberExchange(parent,launch,body,memberId,group,"time_provider");
+  }
+private:
+  void memberExchange(const Domain& parent,const std::string& launch,const std::string& body,const std::string& memberId,
+      const std::string& group,const char* role){
     supervisor=parent.supervisor;generation=parent.generation;descriptor=parent.descriptor;domainId=parent.domainId;descriptorDigest=parent.descriptorDigest;
     member=memberId;memberBoot=identifier();bootstrapId=identifier();channel=identifier();challenge=identifier();receiptId=identifier();
     intent=body;intentDigest=digest(body);containment=group;issued=tick();
     require(issued<=std::numeric_limits<unsigned long long>::max()-policy.timeout*1000000,"bootstrap_clock");expires=issued+policy.timeout*1000000;
     common={{"bootstrap_version",string("bootstrap/0.1.0-draft.1")},{"bootstrap_id",string(bootstrapId)},{"launch_id",string(launch)},
-      {"launch_intent_digest",string(intentDigest)},{"member_id",string(member)},{"member_boot_id",string(memberBoot)},{"role",string("worker")},
+      {"launch_intent_digest",string(intentDigest)},{"member_id",string(member)},{"member_boot_id",string(memberBoot)},{"role",string(role)},
       {"artifact_manifest_ref",policy.manifest},{"channel_binding_id",string(channel)},{"challenge_id",string(challenge)}};
   }
+public:
   static std::string frame(const char* type, const Object& payload) {
     return object({{"version", string("bootstrap/0.1.0-draft.1")}, {"type", string(type)}, {"payload", object(payload)}});
   }

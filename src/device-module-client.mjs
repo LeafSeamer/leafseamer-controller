@@ -31,9 +31,12 @@ export async function connectDeviceModule({current,invalidate,configuration,jour
   try{moduleFrameBytes(frame);journal.record('c2w',frame);check();need(clock.tick()<BigInt(frame.deadline_tick_ns),'module_expired');await transport.send(frame);const answer=await result;check();return answer;}
   catch(error){fail();await result.catch(()=>{});throw error;}
  }
- function eventSession(deviceId,existing=true){
-  check();need(events&&!pending,'module_event_unavailable');const selected=sessions.get(deviceId);need(selected?.state==='connected','module_session');
-  const capture=captures.get(deviceId);need(existing?capture:!capture,'module_event_capture');return {selected,capture};
+ function eventSession(deviceId,existing=true,readCommitted=false){
+  check();const capture=captures.get(deviceId);
+  // 订阅读取只使用已提交前缀，无需占用模块管道。停采从发出请求起停止该采集的读取。
+  need(events&&(!pending||readCommitted)&&!capture?.stopping,'module_event_unavailable');
+  const selected=sessions.get(deviceId);need(selected?.state==='connected','module_session');
+  need(existing?capture:!capture,'module_event_capture');return {selected,capture};
  }
  try{
   monitor=setInterval(()=>{try{check();}catch{fail();}},100);monitor.unref();
@@ -84,7 +87,7 @@ export async function connectDeviceModule({current,invalidate,configuration,jour
    }catch(error){fail();throw error;}
   },
   publishedEvents(deviceId,after='0',limit=32){
-   const {capture}=eventSession(deviceId);need(eventSource,'module_event_source_unavailable');
+   const {capture}=eventSession(deviceId,true,true);need(eventSource,'module_event_source_unavailable');
    try{return eventSource.read(capture.started,after,limit);}catch(error){fail();throw error;}
   },
   qualifiedEventCapture(deviceId){
@@ -102,7 +105,8 @@ export async function connectDeviceModule({current,invalidate,configuration,jour
    }catch(error){fail();throw error;}
   },
   async stopEvents(deviceId){
-   const {capture:c}=eventSession(deviceId);try{const frame=await request('EVENT_STOP',c.body,'EVENT_STOPPED'),closed=frame.body.closed;
+   const {capture:c}=eventSession(deviceId);c.stopping=true;
+   try{const frame=await request('EVENT_STOP',c.body,'EVENT_STOPPED'),closed=frame.body.closed;
     need(closed.acknowledged_sequence===c.acknowledged&&BigInt(closed.last_sequence)>=BigInt(c.highest)&&(!c.failure||same(closed.failure,c.failure)),'module_event_stop');eventSource?.stop(frame);captures.delete(deviceId);return frame;
    }catch(error){fail();throw error;}
   },

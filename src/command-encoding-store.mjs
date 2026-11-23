@@ -17,11 +17,12 @@ const reservation=(prepare,command)=>({format:'command-encoding-reservation/1',p
  profile:{id:'leafseamer.simulator.encoding.limits.1',max_entries:256,max_bytes:2048},slots:1,max_bytes:8,state:'reserved'});
 function authority(actual,prepare,attempt){
  const s=actual.command.source,b=actual.execution.value,r=reservation(prepare,s.command_id);
+ const automated=s.metadata.origin==='automation';
  const value={format_version:'encoding-authorization/0.1.0-draft.1',authorization_id:prepare+'.authorization',revision:'1',binding:b.binding,
   target:{kind:'ordinary',command_ref:{id:s.command_id,revision:'1',digest:s.initial_ref.digest},proposed_attempt_id:attempt,cancellation_ref:null,execution_ref:null},
-  requester:{kind:'human',...actual.identity.actor},admission_source_ref:ref(s.command_id+'.admission-source',s),authorization_snapshot_ref:actual.snapshot_ref,
+  requester:{kind:automated?'service':'human',...actual.identity.actor},admission_source_ref:ref(s.command_id+'.admission-source',s),authorization_snapshot_ref:actual.snapshot_ref,
   capability_ref:b.capability_ref,primitive_id:b.primitive_plan.primitive_id,primitive_plan_ref:b.primitive_plan_ref,transport_profile_ref:b.transport_profile_ref,
-  content_digest:s.metadata.request_identity.request_digest,encoding_reservation_ref:ref(prepare+'.reservation',r),max_bytes:8,
+  content_digest:automated?s.execution_content_digest:s.metadata.request_identity.request_digest,encoding_reservation_ref:ref(prepare+'.reservation',r),max_bytes:8,
   created_tick_ns:actual.snapshot.authentication_window.selected_tick_ns,expires_tick_ns:actual.expires_tick_ns};
  return {...value,authorization_digest:digest(value)};
 }
@@ -97,10 +98,10 @@ function readRequest(db,id){return memoExecutionRead(db,'command-encoding-reques
   value.format==='command-encoding-request/1'&&value.prepare_id===id&&value.command_id===r.command_id&&same(value.authorization,a)&&
   same(value.binding_ref,ref(r.binding_id,b))&&same(s.binding_ref,value.binding_ref)&&same(s.binding,a.binding)&&
   same(value.request_record_ref,{id:r.record_id,revision:'1',digest:request.record.record_digest})&&request.transaction===r.transaction_id&&request.replyRecord===null&&request.frame.reply_to===null,'source');
- const snapshot=value.identity_snapshot,actor={issuer_id:s.metadata.actor.issuer_id,issuer_epoch:s.metadata.actor.issuer_epoch,principal_id:s.metadata.actor.principal_id};
+ const snapshot=value.identity_snapshot,actor={issuer_id:s.metadata.actor.issuer_id,issuer_epoch:s.metadata.actor.issuer_epoch,principal_id:s.metadata.actor.principal_id},automated=s.metadata.origin==='automation';
  need(digest(unsigned)===authorization_digest&&a.format_version==='encoding-authorization/0.1.0-draft.1'&&a.authorization_id===id+'.authorization'&&a.revision==='1'&&
   a.target.kind==='ordinary'&&a.target.command_ref.id===s.command_id&&a.target.command_ref.revision==='1'&&a.target.command_ref.digest===s.initial_ref.digest&&
-  a.target.proposed_attempt_id===body.attempt_id&&a.target.cancellation_ref===null&&a.target.execution_ref===null&&same(a.requester,{kind:'human',...actor})&&
+  a.target.proposed_attempt_id===body.attempt_id&&a.target.cancellation_ref===null&&a.target.execution_ref===null&&same(a.requester,{kind:automated?'service':'human',...actor})&&
   same(a.admission_source_ref,ref(s.command_id+'.admission-source',s))&&same(a.authorization_snapshot_ref,ref(s.command_id+'.encoding-identity',snapshot))&&
   snapshot.command_id===s.command_id&&snapshot.identity.token_id===s.token_id&&same(snapshot.identity.actor,actor)&&
   snapshot.identity.authorization_digest===s.authorization_digest&&same(snapshot.identity.ready_ref,s.ready_ref)&&same(snapshot.identity.binding_ref,s.binding_ref)&&
@@ -108,7 +109,8 @@ function readRequest(db,id){return memoExecutionRead(db,'command-encoding-reques
   same(a.encoding_reservation_ref,value.reservation_ref)&&a.max_bytes===8&&a.created_tick_ns===snapshot.authentication_window.selected_tick_ns&&a.expires_tick_ns===snapshot.authentication_window.before_tick_ns&&
   BigInt(a.created_tick_ns)<=request.observedTick&&request.committedTick<BigInt(a.expires_tick_ns)&&BigInt(a.expires_tick_ns)<=BigInt(s.deadline.queue_deadline_tick_ns),'authority');
  const {context_id,idempotency_key,...content}=body.request;
- need(context_id===s.context_id&&idempotency_key===s.metadata.request_identity.key.idempotency_key&&digest(content)===s.metadata.request_identity.request_digest&&
+ need((automated?same(body.request,s.execution_request)&&same(snapshot.authentication_window,s.authentication_window)&&digest(content)===s.execution_content_digest:
+  context_id===s.context_id&&idempotency_key===s.metadata.request_identity.key.idempotency_key&&digest(content)===s.metadata.request_identity.request_digest)&&
   a.content_digest===digest(content)&&body.prepare_id===id&&body.command_id===s.command_id&&body.device_session_id===b.binding.device_session_id&&body.primitive_id===a.primitive_id&&
   body.expires_tick_ns===a.expires_tick_ns&&same(body.primitive_plan_ref,{object_id:a.primitive_plan_ref.id,digest:a.primitive_plan_ref.digest})&&
   same(body.transport_profile_ref,{object_id:a.transport_profile_ref.id,digest:a.transport_profile_ref.digest}),'request');
@@ -153,6 +155,68 @@ export function currentCommandEncoding(db,{id,provider}){
  return withExecutionReadView(db,()=>{const saved=readCommandEncoding(db,id),actual=provider.current(saved.value.command_id,saved.value.identity_snapshot);
   need(same(saved.request.frame.body,requestBody(actual,id,saved.value.authorization.target.proposed_attempt_id)),'changed');return saved;});
 }
+function sealedAuthorization(text,expected){
+ const value=JSON.parse(text),{digest:hash,...body}=value;
+ need(canonical(value)===text&&digest(body)===hash&&hash===expected,'finalization_authorization');return value;
+}
+function automationAuthorization(db,source){
+ const {actor,automation_binding:origin,run_binding:run}=source.metadata;
+ const basis=row(db,`SELECT g.body_jcs AS grant_jcs,g.body_digest AS grant_digest,g.grant_id,
+  a.body_jcs AS command_jcs,a.body_digest AS command_digest,
+  c.body_jcs AS preparation_jcs,c.body_digest AS preparation_digest FROM automation_command_adjudication a
+  JOIN run_preparation_grant g USING(preparation_id,grant_id) JOIN run_preparation_commit c USING(preparation_id)
+  WHERE a.command_id=? AND a.decision='accepted'`,source.command_id);
+ need(basis,'finalization_authorization');
+ const grant=parse(basis.grant_jcs,basis.grant_digest),preparation=parse(basis.preparation_jcs,basis.preparation_digest),
+  {command}=parse(basis.command_jcs,basis.command_digest),
+  {service_approval_ref:approvalRef,target_policy_ref:policyRef}=preparation.proof.actual,pairingRef=preparation.pairing_ref;
+ const {issuer_id,issuer_epoch,principal_id}=actor,ref={id:basis.grant_id,revision:grant.revision,digest:basis.grant_digest};
+ need(same(preparation.grant_ref,{kind:'grant',scope:source.binding.scope,object_id:ref.id,revision:ref.revision,digest:ref.digest})&&
+  same(command.execution_basis.pairing_ref,pairingRef)&&same(command.authority.grant_ref,preparation.grant_ref)&&
+  basis.grant_id===grant.grant_id&&run.grant_id===ref.id&&run.grant_revision===ref.revision&&
+  run.run_id===grant.run_id&&run.arm_generation===grant.arm_generation&&run.definition_version===grant.definition_version&&
+  same(grant.origin_scope,origin.origin_scope)&&same(grant.principal,{principal_kind:'service',issuer_id,issuer_epoch,principal_id})&&
+  grant.state==='active'&&grant.device_actions.some(action=>same(action,source.metadata.target))&&
+  grant.validity.authorization_policy_revision===policyRef.revision,'finalization_authorization');
+ const pairRow=row(db,`SELECT body_jcs,body_digest FROM peer_pairing_revision
+  WHERE binding_id=? AND revision=? AND state='activated'`,pairingRef.id,Number(pairingRef.revision));
+ const approved=row(db,`SELECT body_jcs,body_digest FROM service_approval WHERE approval_id=? AND principal_id=?`,approvalRef.object_id,principal_id);
+ const subjectRows=db.prepare(`SELECT body_jcs,body_digest FROM service_principal_revision WHERE principal_id=? AND state='active'
+  AND json_extract(body_jcs,'$.approval_ref.id')=? LIMIT 2`).raw().all(principal_id,approvalRef.object_id);
+ need(pairRow&&approved&&subjectRows.length===1&&approvalRef.kind==='service_approval'&&same(approvalRef.scope,source.binding.scope),'finalization_authorization');
+ const pair=sealedAuthorization(pairRow.body_jcs,pairingRef.digest),approval=sealedAuthorization(approved.body_jcs,approvalRef.digest),
+  subject=sealedAuthorization(...subjectRows[0]);
+ const peer=pair.transcript.parties.find(item=>item.service_kind==='seamer'&&item.service_id===origin.origin_scope.authority_service_id&&
+  item.database_instance_id===origin.origin_scope.database_instance_id),audience=source.binding.scope.authority_service_id;
+ need(pairRow.body_digest===pairingRef.digest&&pair.binding_id===pairingRef.id&&pair.revision===pairingRef.revision&&
+  peer?.issuer_id===issuer_id&&peer.issuer_epoch===issuer_epoch&&peer.permissions.includes('automation.prepare')&&
+  approved.body_digest===approvalRef.digest&&approval.id===approvalRef.object_id&&approval.revision===approvalRef.revision&&
+  approval.principal_id===principal_id&&same(approval.audiences,[audience])&&approval.permissions.includes('automation.prepare')&&
+  approval.device_ids.includes(source.binding.device_id)&&same(approval.automation_origin.pairing_ref,pairingRef)&&
+  same(approval.automation_origin.seamer_scope,origin.origin_scope)&&digest(approval.automation_origin.device_scope)===peer.object_scope_digest&&
+  subject.id===principal_id&&subject.issuer_id===issuer_id&&subject.issuer_epoch===issuer_epoch&&subject.purpose==='automation'&&
+  same(subject.approval_ref,{id:approval.id,revision:approval.revision,digest:approval.digest}),'finalization_authorization');
+ return {ref,binding:{issuer_id,issuer_epoch,audience,principal_kind:'service',principal_id,origin:'automation',session_id:null,
+  credential_id:peer.credential_id,subject_revision:subject.revision,session_revision:null,policy_revision:policyRef.revision,
+  scope_digest:peer.object_scope_digest,grant_id:ref.id,grant_revision:ref.revision,arm_generation:grant.arm_generation,
+  extension_instance_id:null,extension_approval_revision:null}};
+}
+export function readCommandPrincipalAuthorization(db,source,proof=null){
+ need(db.inTransaction,'finalization_writer');
+ if(source.metadata.origin==='automation')return automationAuthorization(db,source);
+ const token=row(db,'SELECT authorization_body,authorization_digest,state FROM access_token WHERE token_id=?',source.token_id);
+ need(token&&(!proof||token.state==='active')&&token.authorization_digest===source.authorization_digest,'finalization_authorization');
+ const grant=sealedAuthorization(token.authorization_body.toString(),token.authorization_digest);
+ if(proof){
+  need(proof.authorization_digest===grant.digest,'finalization_authorization');
+  for(const key of ['issuer_id','issuer_epoch','principal_id','session_id','credential_id','audience','policy_revision','scope_digest'])
+   need(grant[key]===proof[key],'finalization_authorization');
+ }
+ return {ref:{id:grant.id,revision:grant.revision,digest:grant.digest},binding:{issuer_id:grant.issuer_id,issuer_epoch:grant.issuer_epoch,audience:grant.audience,
+  principal_kind:'human',principal_id:grant.principal_id,origin:'manual',session_id:grant.session_id,credential_id:grant.credential_id,
+  subject_revision:grant.subject_revision,session_revision:grant.session_revision,policy_revision:grant.policy_revision,scope_digest:grant.scope_digest,
+  grant_id:null,grant_revision:null,arm_generation:null,extension_instance_id:null,extension_approval_revision:null}};
+}
 // T2的同步输入读取器。必须与最终写集共用writer；返回原件不等于已签发许可。
 // 不复用接收时的资格，也不把历史编码、缺失写结果或已关闭会话变成可采用输入。
 export function selectCommandFinalization(db,{id,provider,tick}){
@@ -166,18 +230,9 @@ export function selectCommandFinalization(db,{id,provider,tick}){
   need(write?.result==='complete','finalization_write');
   const actual=provider.current(encoding.value.command_id,encoding.value.identity_snapshot);
   need(same(encoding.request.frame.body,requestBody(actual,id,encoding.value.authorization.target.proposed_attempt_id)),'changed');
-  // Guard主体的修订来自刚通过当前资格核验的令牌授权原件，不能用控制修订或常量补齐。
-  const token=row(db,'SELECT authorization_body,authorization_digest,state FROM access_token WHERE token_id=?',actual.command.source.token_id);
-  need(token?.state==='active','finalization_authorization');
-  const grant=JSON.parse(token.authorization_body.toString()),{digest:grantDigest,...grantBody}=grant,p=actual.proof;
-  need(canonical(grant)===token.authorization_body.toString()&&digest(grantBody)===grantDigest&&
-   token.authorization_digest===grantDigest&&p.authorization_digest===grantDigest,'finalization_authorization');
-  for(const key of ['issuer_id','issuer_epoch','principal_id','session_id','credential_id','audience','policy_revision','scope_digest'])
-   need(grant[key]===p[key],'finalization_authorization');
-  const authorizationBinding={issuer_id:grant.issuer_id,issuer_epoch:grant.issuer_epoch,audience:grant.audience,
-   principal_kind:'human',principal_id:grant.principal_id,origin:'manual',session_id:grant.session_id,credential_id:grant.credential_id,
-   subject_revision:grant.subject_revision,session_revision:grant.session_revision,policy_revision:grant.policy_revision,scope_digest:grant.scope_digest,
-   grant_id:null,grant_revision:null,arm_generation:null,extension_instance_id:null,extension_approval_revision:null};
+  const source=actual.command.source;
+  need(source.metadata.origin==='automation'||actual.proof,'finalization_authorization');
+  const principal_authorization=readCommandPrincipalAuthorization(db,source,actual.proof);
   const ready=readInitialReady(db,actual.command.source.ready_ref.id),opening=ready.dispatch.plan,b=actual.execution.value.binding;
   need(same(ready.ref,actual.command.source.ready_ref)&&same(ready.value.binding,b)&&
    same(opening.access.binding,b)&&opening.access.purpose==='ordinary'&&opening.access.protection===null&&
@@ -188,8 +243,7 @@ export function selectCommandFinalization(db,{id,provider,tick}){
    BigInt(write.completed_tick)<=selected&&BigInt(actual.now.tick)<=selected&&selected<expires,'finalization_expired');
   // 时间窗沿用原授权的交集，不以本次读取时间续期。后续T2仍须末核再提交。
   const window={not_before_tick_ns:actual.snapshot.authentication_window.selected_tick_ns,before_tick_ns:String(expires)};
-  return {encoding,actual,ready,opening,principal_authorization:{ref:{id:grant.id,revision:grant.revision,digest:grantDigest},value:grant,binding:authorizationBinding},
-   selected_tick_ns:String(selected),send_window:window};
+  return {encoding,actual,ready,opening,principal_authorization,selected_tick_ns:String(selected),send_window:window};
  });
 }
 export function acceptCommandEncoding(db,{binding,decoded,provider,features,tick,receivedTick}){
@@ -203,8 +257,11 @@ export function acceptCommandEncoding(db,{binding,decoded,provider,features,tick
  need(typeof now==='bigint'&&now<=current&&attempt&&BigInt(attempt.started_tick)<=now,'write');let disposition=bytes?'prepared':'failed';
  if(current>=BigInt(saved.value.authorization.expires_tick_ns)||attempt.result==='unknown')disposition='historical';
  else try{currentCommandEncoding(db,{id,provider});}catch(error){
+  const code=error.code??'';
   if(['command_encoding_state','command_encoding_permission','command_encoding_identity','command_encoding_control','command_encoding_binding','command_encoding_deadline',
-   'command_encoding_changed','token_invalid','token_expired','authentication_window_expired','authentication_window_validity'].includes(error.code))disposition='historical';else throw error;
+   'command_encoding_changed','token_invalid','token_expired','authentication_window_expired','authentication_window_validity'].includes(code)||
+   saved.request.frame.body.request.origin==='automation'&&(/^(command_encoding_automation_|peer_pairing_(action_|preparation_|approval_))/.test(code)||
+    ['peer_pairing_activation','peer_pairing_changed','peer_pairing_configuration_changed'].includes(code)))disposition='historical';else throw error;
  }
  const item=preparedFrame(binding,frame,payload,'w2c',now,saved.request.record.record_id),committed=tick();
  if(committed>=BigInt(saved.value.authorization.expires_tick_ns))disposition='historical';

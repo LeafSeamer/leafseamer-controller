@@ -10,12 +10,14 @@ const root=process.env.LEAFSEAMER_CONTROLLER_PACKAGE_UNDER_TEST??fileURLToPath(n
 const {serviceSubscriptionStore}=await load('service-subscription-store.mjs'),{canonical,digest}=await load('auth-clock-value.mjs'),{sealSourceSnapshot}=await load('service-snapshot-content.mjs');
 const id=()=>crypto.randomUUID(),hash='a'.repeat(64),ref=()=>({id:id(),revision:'1',digest:'sha256:'+hash});
 export function snapshotFixture(t,schema=68){
- const db=new Database(':memory:');t.after(()=>db.close());db.pragma('foreign_keys=ON');db.exec('CREATE TABLE device_event_source(registration_id TEXT PRIMARY KEY); CREATE TABLE device_source_notification(sequence INTEGER PRIMARY KEY); INSERT INTO device_source_notification VALUES(7)');
+ const db=new Database(':memory:');t.after(()=>db.close());db.pragma('foreign_keys=ON');
+ db.exec('CREATE TABLE device_event_source(registration_id TEXT PRIMARY KEY); CREATE TABLE device_source_notification(sequence INTEGER PRIMARY KEY,entry_kind TEXT,registration_id TEXT,body_jcs TEXT,body_digest TEXT,event_id TEXT); INSERT INTO device_source_notification(sequence) VALUES(7); CREATE TABLE device_source_event(record_id TEXT PRIMARY KEY,registration_id TEXT,origin_jcs TEXT,origin_digest TEXT)');
  db.exec('CREATE TABLE service_event_subscription ('+fs.readFileSync(path.join(root,'dist/service-subscription.sql'),'utf8').split('CREATE TABLE service_event_subscription (')[1]);
  db.exec('DROP TRIGGER service_event_subscription_outbox_complete;'+fs.readFileSync(path.join(root,'dist/service-snapshot.sql'),'utf8').split('DROP TRIGGER service_event_subscription_outbox_complete;')[1]);
  if(schema>=69)db.exec('DROP TRIGGER service_snapshot_publish_complete;'+fs.readFileSync(path.join(root,'dist/service-subscription-channel.sql'),'utf8').split('DROP TRIGGER service_snapshot_publish_complete;')[1]);
  const registration=id();db.prepare('INSERT INTO device_event_source VALUES(?)').run(registration);
  if(schema>=70)db.exec('DROP TRIGGER service_snapshot_publish_complete;'+fs.readFileSync(path.join(root,'dist/service-snapshot-baseline.sql'),'utf8').split('DROP TRIGGER service_snapshot_publish_complete;')[1]);
+ if(schema>=71)db.exec('CREATE TABLE service_subscription_reconcile'+fs.readFileSync(path.join(root,'dist/service-subscription-delivery.sql'),'utf8').split('CREATE TABLE service_subscription_reconcile')[1]);
  const service={service_id:id(),database_instance_id:id(),schema_revision:String(schema)},bootId=id(),owner={kind:'service',issuer_id:id(),issuer_epoch:id(),principal_id:id(),consumer_service_id:id(),consumer_database_instance_id:id(),consumer_id:'events',pairing_id:id()};
  const object=kind=>({authority_service_id:service.service_id,database_instance_id:service.database_instance_id,entity_kind:kind,entity_id:id(),entity_epoch:id(),revision:'1',content_digest:hash});
  const scope={scope_id:id(),scope_revision:'1',projection_profile_ref:object('projection_profile'),collections:[{entity_kind:'sources',selector_ref:object('selector'),relation_policy:'authorized_reference',history_policy:'current'}]};

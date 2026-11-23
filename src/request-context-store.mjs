@@ -7,15 +7,23 @@ const fail = code => { throw new IdentityError(code); };
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
 const millisecond = 1000000n;
 const iso = value => new Date(Number(value / millisecond)).toISOString();
+const endorsementOperation='endorseRunApproval';
+const revocationOperation='revokeRunApprovalEndorsement';
+const internalGrantOperations=new Map([[endorsementOperation,{permission:'grant.manage',revision:73}],[revocationOperation,{permission:'grant.revoke',revision:75}]]);
 
 // 开发预算有界且不回收历史；完整生产容量profile与命令去重writer另行接入。
 export function requestContextService({db, binding, writer, time, authorizeToken, rows, pad,attachCurrent}) {
   const adapter = createHttpAdapter(selection);
   const available = () => { if (!binding) fail('request_context_migration_required'); };
   const deliver = result => { if (result.denied) fail(result.denied); return result; };
-  function operations(names, proof) {
+  function operations(names, proof, internalOperation) {
     if (!Array.isArray(names) || names.length < 1 || names.length > 32 || names.some(n => typeof n !== 'string') || new Set(names).size !== names.length) fail('request_context_invalid');
     for (const name of names) {
+      if (name===internalOperation&&internalGrantOperations.has(name)) {
+        const {permission,revision}=internalGrantOperations.get(name);
+        if(proof.principal_kind!=='human'||!proof.permissions.includes(permission)||Number(binding.service.schema_revision)<revision)fail('request_context_permission');
+        continue;
+      }
       let op;
       try { op = adapter.describe('controller', name); } catch { fail('request_context_operation'); }
       if (op.transport !== 'http-headers' || !op.security.some(group => Object.keys(group).some(k => k.endsWith('__bearerAuth')||k==='control__humanBearer'&&proof.principal_kind==='human')) ||
@@ -37,13 +45,12 @@ export function requestContextService({db, binding, writer, time, authorizeToken
     if (now.lower < BigInt(row.not_before_ns)) fail('request_context_time');
     const stored = JSON.parse(row.body.toString());
     if (digest(stored) !== row.body_digest || stored.authorization_digest !== proof.authorization_digest || stored.scope_digest !== proof.scope_digest) fail('request_context_binding');
-    operations(stored.context.operations, proof);
+    operations(stored.context.operations, proof, operation);
     if (operation !== undefined && !stored.context.operations.includes(operation)) fail('request_context_permission');
     return stored.context;
   }
   attachCurrent?.(current);
-  return {
-    createRequestContext(input, request) {
+  function create(input,request,internalOperation){
       available();
       if (!request || Object.keys(request).sort().join(',') !== 'audience,max_unique_requests,operations,selection,ttl_ms' ||
           !uuid(request.audience) || !Number.isSafeInteger(request.ttl_ms) || request.ttl_ms < 1 || request.ttl_ms > 86400000 ||
@@ -52,7 +59,7 @@ export function requestContextService({db, binding, writer, time, authorizeToken
       const result = writer(() => {
         const proof = authorizeToken(input, binding.service.service_id); if (proof.denied) return proof;
         if (request.audience !== binding.service.service_id || !proof.permissions.includes('request.create')) fail('request_context_permission');
-        const allowed = operations(request.operations, proof), now = time();
+        const allowed = operations(request.operations, proof,internalOperation), now = time();
         const before = now.lower - 60000000000n;
         if (db.prepare('SELECT count(*) FROM request_context').pluck().get() >= 4096 ||
             db.prepare('SELECT count(*) FROM request_context WHERE principal_id = ? AND not_before_ns >= ?').pluck().get(proof.principal_id, pad(before > 0n ? before : 0n)) >= 64) fail('request_context_capacity');
@@ -70,12 +77,21 @@ export function requestContextService({db, binding, writer, time, authorizeToken
             context.context_epoch, binding.bootId, proof.session_id, proof.credential_id, input.token_id, pad(now.lower), pad(expiry), context.max_unique_requests,
             bytes, digest(original), now.acquisition.id, crypto.randomUUID());
         // 同writer提交前再核凭据和上下文；任何失效回滚新签发。
-        const last = current(input, context.context_id);
+        const last = current(input, context.context_id,internalOperation);
         if (last.denied) fail(last.denied);
         return context;
       });
       return deliver(result);
-    },
+  }
+  function createGrantContext(input,options,operation){
+    available();
+    if(!options||Object.keys(options).sort().join(',')!=='max_unique_requests,ttl_ms')fail('request_context_invalid');
+    return create(input,{...options,audience:binding.service.service_id,operations:[operation],selection},operation);
+  }
+  return {
+    createRequestContext(input,request){return create(input,request);},
+    createEndorsementContext:(input,options)=>createGrantContext(input,options,endorsementOperation),
+    createEndorsementRevocationContext:(input,options)=>createGrantContext(input,options,revocationOperation),
     getRequestContext(input, id, operation) {
       available(); if (!uuid(id)) fail('request_context_invalid');
       return deliver(writer(() => current(input, id, operation)));

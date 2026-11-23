@@ -5,9 +5,12 @@ import {same} from './auth-clock-value.mjs';
 import {serviceEventChannel} from './service-event-channel.mjs';
 import {profile} from './sdk/runtime/panel-wire/decoder.mjs';
 const snapshotProfile=profile({max_message_bytes:8388608,max_depth:48,max_value_nodes:1048576,max_object_members:65536,max_string_utf8_bytes:8388608,parse_deadline_ms:5000});
-export function createSubscriptionEndpoint({store}){
+export function createSubscriptionEndpoint({store,readReferenceBundle=null,serviceBootId=null}){
  const adapter=createHttpAdapter(selection);
- return Object.freeze({channel:serviceEventChannel(store),sweep:()=>store.sweep(),async handle({bindingId,socket,method,path,headers,body}){
+ return Object.freeze({channel:serviceEventChannel(store),sweep:()=>store.sweep(),
+  sourceTime:{selection,read:(reference,_peer,binding,socket)=>store.sourceTime(binding,socket,reference)},
+  ...(readReferenceBundle&&serviceBootId&&{referenceBundle:{selection,serviceBootId,read:(reference,binding,socket)=>store.referenceBundle(binding,socket,reference,readReferenceBundle)}}),
+  async handle({bindingId,socket,method,path,headers,body}){
   const request=adapter.prepareRequest('controller',method,path,headers);
   let result,input;
   const current=()=>{const parameters=request.parameters,path=parameters.path,query=parameters.query;

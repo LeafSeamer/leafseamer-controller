@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {decodeExecutionPayload,DeviceExecutionError} from './device-execution-channel.mjs';
-import {authorizationRevoked} from './device-authorization-fence.mjs';
+import {authorizationRevoked,runGenerationMatches} from './device-authorization-fence.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError(code);};
 const digest=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 const same=(a,b)=>canonicalize(a)===canonicalize(b);
@@ -10,7 +10,7 @@ const maximum=99999999999999999999n;
 
 // 固定worker内每设备唯一所有者。会话接收器负责全设备共用的seq及原帧日志；
 // 本对象只处理设备闸，不签发Controller的持久授权、Ready或资源释放证明。
-// 当前支持普通首次传输的控制屏障与ordinary开放；取消、重传和拒绝快照须另行接入。
+// 处理普通首次传输的控制、授权和运行屏障。取消和重传须另行接入。
 export function deviceExecutionGate({binding,transmissions,tick,signal,failed,limits}){
  need(typeof tick==='function'&&signal instanceof AbortSignal&&typeof failed==='function','gate_configuration');
  need(transmissions===undefined||typeof transmissions==='function','gate_configuration');
@@ -34,8 +34,7 @@ export function deviceExecutionGate({binding,transmissions,tick,signal,failed,li
  function candidate(frame,type,body){return freeze({type,reply_to:frame.message_id,device_id:type==='CLOSE_GATE_ACK'?null:bound.device_id,body});}
  function self(value,field,code){const {[field]:hash,...body}=value;need(digest(body)===hash,code);}
  const runKey=selector=>canonicalize([selector.origin_scope.authority_service_id,selector.origin_scope.database_instance_id,selector.run_id]);
- function runMatches(intent,selector){const origin=intent.automation_binding;
-  return intent.origin==='automation'&&origin&&same(origin.origin_scope,selector.origin_scope)&&origin.run_id===selector.run_id&&BigInt(origin.arm_generation)<=BigInt(selector.deny_through_generation);}
+ const runMatches=(intent,selector)=>intent.origin==='automation'&&runGenerationMatches(intent.automation_binding,selector);
  function runProgress(entry,old){if(!old)return;
   need(BigInt(entry.deny_revision)>=BigInt(old.deny_revision)&&BigInt(entry.selector.deny_through_generation)>=BigInt(old.selector.deny_through_generation),'gate_run_deny_floor');
   if(entry.deny_revision===old.deny_revision)need(same(entry,old),'gate_deny_snapshot_conflict');

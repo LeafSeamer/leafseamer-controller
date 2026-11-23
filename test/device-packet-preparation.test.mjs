@@ -15,6 +15,12 @@ const raw=value=>Buffer.from(JSON.stringify(value));
 const ref=id=>({id,revision:'1',digest:hash(id)});
 const deferred=()=>{let resolve;const promise=new Promise(r=>{resolve=r;});return {promise,resolve};};
 const turn=()=>new Promise(resolve=>setImmediate(resolve));
+function automationOrigin(generation='2'){
+ const origin_scope={authority_service_id:'seamer',database_instance_id:'origin_database'};
+ return {origin_scope,run_id:'run',definition_version:'1',arm_generation:generation,execution_id:'execution',
+  execution_binding_ref:{kind:'execution_binding',scope:origin_scope,object_id:'execution',revision:'1',digest:hash('execution')},
+  step_id:'step',logical_action_id:'action',binding_version:'continuation-execution/0.1.0-draft.1',authorization_mode:'preparation',continuation:null};
+}
 function signCut(frame){const {barrier_id,attempt_binding,...body}=frame.body;
  frame.body.attempt_binding.cut_digest=hash({type:frame.type,target_exit_id:attempt_binding.target_exit_id,body});return frame;}
 async function fixture(options={}){
@@ -26,13 +32,16 @@ async function fixture(options={}){
  const executor={api_version:'leafseamer-device-primitives/1',async encodePrimitive(input){calls++;return options.encode?options.encode(input,module):module.execution.encodePrimitive(input);}};
  const cache=devicePacketPreparation({binding,profile,plan,capability,exit:{socket_instance_id:'socket',protocol_session:null},executor,tick:()=>tick,signal:abort.signal,failed:error=>errors.push(error),
   limits:options.limits??{max_entries:256,max_cached_bytes:1048576,max_metadata_bytes:16777216,max_encoders:4}});
- function encode(id='prepare',value=42){
+ function encode(id='prepare',value=42,origin=null){
   const request={context_id:'context',idempotency_key:'key.'+id,device_id:'device',action_id:'leafseamer.simulator.value.set',capability_version:'1.0.0',parameters:{value},
    expected_control:{epoch:'epoch',version:'1'},origin:'manual',automation_binding:null,required_completion:'effect_verified',preconditions:[],dispatch:{mode:'immediate',max_queue_ms:1000},evidence_timeout_ms:1000};
+  if(origin){const {run_id,definition_version,arm_generation,step_id,logical_action_id}=origin;
+   Object.assign(request,{origin:'automation',automation_binding:origin,run_binding:{run_id,definition_version,arm_generation,step_id,logical_action_id,grant_id:'grant',grant_revision:'1'}});
+  }
   const {context_id,idempotency_key,...content}=request;
   const authority={format_version:'encoding-authorization/0.1.0-draft.1',authorization_id:'authorization.'+id,revision:'1',binding,
    target:{kind:'ordinary',command_ref:ref('command_'+id),proposed_attempt_id:'attempt_'+id,cancellation_ref:null,execution_ref:null},
-   requester:{kind:'human',issuer_id:'issuer',issuer_epoch:'issuer.1',principal_id:'person'},admission_source_ref:ref('admission.'+id),authorization_snapshot_ref:ref('authorization.snapshot'),
+   requester:{kind:origin?'service':'human',issuer_id:'issuer',issuer_epoch:'issuer.1',principal_id:origin?'service':'person'},admission_source_ref:ref('admission.'+id),authorization_snapshot_ref:ref('authorization.snapshot'),
    capability_ref:capability,primitive_id:'simulator_value_set',primitive_plan_ref:plan,transport_profile_ref:profile,content_digest:hash(content),
    encoding_reservation_ref:ref('reservation.'+id),max_bytes:8,created_tick_ns:'1',expires_tick_ns:'100'};
   return envelope('ENCODE_PACKET','encode.'+id,{prepare_id:id,command_id:authority.target.command_ref.id,attempt_id:authority.target.proposed_attempt_id,primitive_id:authority.primitive_id,
@@ -53,12 +62,12 @@ async function fixture(options={}){
 }
 
 async function sending(options={}){
- const f=await fixture(),encoded=f.encode();await f.cache.prepare(raw(encoded));await f.cache.whenPrepared('prepare');
+ const origin=options.origin??null,f=await fixture(),encoded=f.encode('prepare',42,origin);await f.cache.prepare(raw(encoded));await f.cache.whenPrepared('prepare');
  const accessBody={format_version:'gate-access/0.1.0-draft.1',access_id:'access',revision:'1',purpose:'ordinary',binding:f.binding,
   control_authority_ref:ref('control'),control_epoch:'epoch',effective_version:'1',authorization_ref:ref('authorization'),resource_safety_ref:ref('resource'),gate_safety_ref:ref('gate'),
   protection:null,initial_assessment_ref:null,selected_tick_ns:'1',expires_tick_ns:'100'};
  let writer;
- const gateOwner=deviceExecutionGate({binding:f.binding,transmissions:()=>{const value=writer?.fenceSnapshot();return value&&options.transmissions?options.transmissions(value):value;},tick:f.clock,signal:f.abort.signal,failed:error=>f.errors.push(error),limits:options.gateLimits??{max_entries:32,max_metadata_bytes:1048576}});
+ const gateOwner=deviceExecutionGate({binding:f.binding,transmissions:()=>writer?.fenceSnapshot(),tick:f.clock,signal:f.abort.signal,failed:error=>f.errors.push(error),limits:options.gateLimits??{max_entries:32,max_metadata_bytes:1048576}});
  const fence=f.envelope('FENCE','fence_message',{barrier_id:'barrier',operation_id:'operation',control_epoch:'epoch',target_version:'1',target_gate_revision:'1',issued_cut_revision:'0',
   ledger_digest:hash([]),open_intents:[],attempt_binding:{cut_id:'cut',cut_digest:hash('cut'),target_exit_id:f.binding.writer_exit_id,attempt_ordinal:'1',previous_barrier_id:null},
   transmission_ledger_digest:hash([]),open_transmission_intents:[],cancel_transmissions:[],cancel_ledger_digest:hash([])});
@@ -76,10 +85,12 @@ async function sending(options={}){
  const ownership=ref('ownership'),accessRef={id:'access',revision:'1',digest:hash(accessBody)};
  const authorization={issuer_id:'issuer',issuer_epoch:'issuer.1',audience:'controller',principal_kind:'human',principal_id:'person',origin:'manual',session_id:'session',credential_id:'credential',
   subject_revision:'1',session_revision:'1',policy_revision:'1',scope_digest:hash('scope'),grant_id:null,grant_revision:null,arm_generation:null,extension_instance_id:null,extension_approval_revision:null};
+ if(origin)Object.assign(authorization,{principal_kind:'service',principal_id:'service',origin:'automation',session_id:null,session_revision:null,
+  grant_id:'grant',grant_revision:'1',arm_generation:origin.arm_generation});
  const guardBody={guard_id:'guard',permit_id:'permit',command_id:encoded.body.command_id,device_id:'device',controller_boot_id:f.binding.controller_boot_id,
   worker_boot_id:f.binding.worker_boot_id,ipc_session_id:f.binding.ipc_session_id,binding:authorization,authorization_revision:'1',authorization_deadline_tick_ns:'90',
   clock_domain_id:f.binding.clock_domain_id,time_required:false,capacity_reservation_id:'reservation',descriptor_digest:f.binding.descriptor_digest,
-  admission_origin:'non_panel',panel_binding:null,automation_binding:null,reference_time:null,gate_access_ref:accessRef,ownership_ref:ownership};
+  admission_origin:'non_panel',panel_binding:null,automation_binding:origin,reference_time:null,gate_access_ref:accessRef,ownership_ref:ownership};
  const guard={...guardBody,guard_digest:hash(guardBody)},contentDigest=encoded.body.encoding_authorization.content_digest;
  const install=f.envelope('GUARD_INSTALL','guard_message',{guard,content_digest:contentDigest,schedule_guard:null,reference_context:null});
  const packet=f.cache.describe('prepare').packet,packetRef={packet_id:packet.packet_id,packet_digest:packet.packet_digest};
@@ -87,12 +98,14 @@ async function sending(options={}){
  const intent={permit_id:'permit',command_id:packet.command_id,attempt_id:packet.attempt_id,dispatch_intent_id:'dispatch_intent',worker_boot_id:f.binding.worker_boot_id,
   device_session_id:f.binding.device_session_id,guard_id:guard.guard_id,guard_digest:guard.guard_digest,clock_domain_id:f.binding.clock_domain_id,descriptor_digest:f.binding.descriptor_digest,
   controller_boot_id:f.binding.controller_boot_id,ipc_session_id:f.binding.ipc_session_id,device_id:'device',admission_origin:'non_panel',panel_binding_digest:null,origin:'manual',automation_binding:null,automation_binding_digest:null};
+ if(origin)Object.assign(intent,{origin:'automation',automation_binding:origin,automation_binding_digest:hash(origin)});
  const permit={permit_id:'permit',command_id:packet.command_id,attempt_id:packet.attempt_id,dispatch_intent_id:'dispatch_intent',controller_boot_id:f.binding.controller_boot_id,
   worker_boot_id:f.binding.worker_boot_id,device_session_id:f.binding.device_session_id,control_epoch:'epoch',control_version:'1',authorization_revision:'1',origin:'manual',grant_revision:null,arm_generation:null,
   gate_revision:'1',deadline_policy:encoded.body.request.dispatch,content_digest:contentDigest,guard_id:guard.guard_id,guard_digest:guard.guard_digest,
   clock_domain_id:f.binding.clock_domain_id,descriptor_digest:f.binding.descriptor_digest,admission_origin:'non_panel',panel_binding_digest:null,automation_binding:null,
   transmission:{transmission_id:'transmission',packet_ref:packetRef,primitive_id:packet.primitive_id,intent,ordinal:'0',kind:'initial',cause:'dispatch',trigger_observation_ref:null,
    parent_dispatch_intent_id:'dispatch_intent',initial_permit_id:'permit',issued_revision:'1',send_window:window},budget_revision:'1',gate_access_ref:accessRef,ownership_ref:ownership};
+ if(origin)Object.assign(permit,{origin:'automation',automation_binding:origin,grant_revision:'1',arm_generation:origin.arm_generation});
  const template=JSON.parse(fs.readFileSync(new URL('../dist/simulator-control-capability.json',import.meta.url))),a=template.actions[0];
  const dispatch=f.envelope('DISPATCH','dispatch_message',{permit,gate_token:'token',send_window:window,request:encoded.body.request,parameters_schema_digest:a.parameters_schema.digest,
   guard_id:guard.guard_id,guard_digest:guard.guard_digest,prepare_id:'prepare',packet,resend_request_id:null});
@@ -163,12 +176,42 @@ function runFence(f,items=[],floor='2',revision='1'){
   attempt_binding:{cut_id:'run_cut',cut_digest:hash('cut'),target_exit_id:f.binding.writer_exit_id,attempt_ordinal:'1',previous_barrier_id:null}}));
 }
 function automationTransmission(f){
- const tx=structuredClone(f.dispatch.body.permit.transmission),origin_scope={authority_service_id:'seamer',database_instance_id:'origin_database'};
- const binding={origin_scope,run_id:'run',definition_version:'1',arm_generation:'2',execution_id:'execution',
-  execution_binding_ref:{kind:'execution_binding',scope:origin_scope,object_id:'execution',revision:'1',digest:hash('execution')},
-  step_id:'step',logical_action_id:'action',binding_version:'continuation-execution/0.1.0-draft.1',authorization_mode:'preparation',continuation:null};
+ const tx=structuredClone(f.dispatch.body.permit.transmission),binding=automationOrigin();
  Object.assign(tx.intent,{origin:'automation',automation_binding:binding,automation_binding_digest:hash(binding)});return tx;
 }
+
+test('worker写端按原运行代次隔离下界，更高代次和其他来源仍可写入内存模拟器',async()=>{
+ const other=automationOrigin();other.origin_scope.database_instance_id='other_database';
+ for(const [origin,blocked] of [[automationOrigin(),true],[automationOrigin('3'),false],[other,false]]){
+  const f=await sending({origin}),installed=await f.response(await f.writer.installGuard(raw(f.install)));
+  assert.equal(installed.body.automation_binding_digest,hash(origin));
+  const ack=await f.response(await f.gateOwner.receive(raw(runFence(f,blocked?[f.dispatch.body.permit.transmission]:[]))));
+  assert.equal(ack.body.coverage.length,Number(blocked));
+  const report=await f.response(await f.writer.dispatch(raw(f.dispatch)));
+  assert.equal(report.body.disposition,blocked?'not_sent':'in_flight');
+  assert.equal(f.writes(),Number(!blocked));assert.equal(f.gateOwner.state.open,true);
+ }
+});
+
+test('RUN_FENCE可在worker写端借用字节前完成，延迟放行后仍拒绝发送',async()=>{
+ const selected=deferred(),release=deferred(),f=await sending({origin:automationOrigin(),preparation:cache=>({describe:cache.describe,
+  async withPacket(...args){selected.resolve();await release.promise;return cache.withPacket(...args);}})});
+ await f.writer.installGuard(raw(f.install));const pending=f.writer.dispatch(raw(f.dispatch));await selected.promise;
+ const ack=await f.response(await f.gateOwner.receive(raw(runFence(f,[f.dispatch.body.permit.transmission]))));
+ assert.equal(ack.body.transmission_coverage[0].proof,'discarded_unconsumed');
+ release.resolve();const report=await f.response(await pending);
+ assert.equal(report.body.disposition,'not_sent');assert.equal(f.writes(),0);assert.equal(f.gateOwner.state.open,true);
+});
+
+test('OPEN的运行拒绝快照阻止旧Guard，许可也不能替换原授权修订',async()=>{
+ const denied=await sending({origin:automationOrigin(),snapshots:body=>{
+  body.run_deny_snapshot.entries=[{selector:{kind:'run_generation',origin_scope:automationOrigin().origin_scope,run_id:'run',deny_through_generation:'2'},deny_revision:'1'}];
+  body.run_deny_snapshot.snapshot_revision='1';body.run_deny_snapshot=signSnapshot(body.run_deny_snapshot);
+ }});
+ await assert.rejects(denied.writer.installGuard(raw(denied.install)),/transmission_run_denied/);assert.equal(denied.writes(),0);
+ const f=await sending({origin:automationOrigin()});await f.writer.installGuard(raw(f.install));
+ f.dispatch.body.permit.grant_revision='2';await assert.rejects(f.writer.dispatch(raw(f.dispatch)),/transmission_origin/);assert.equal(f.writes(),0);
+});
 
 test('RUN_FENCE安装来源运行下界且不撤销无关人工Guard，查询与STORED保留原确认',async()=>{
  const f=await sending();await f.writer.installGuard(raw(f.install));const before=f.gateValue(),cut=runFence(f),ack=await f.gateOwner.receive(raw(cut));await f.response(ack);
@@ -195,11 +238,12 @@ test('RUN_FENCE完整automation原件按来源和布防代次匹配，未收到�
 });
 
 test('RUN_FENCE不遗漏已知automation传输，原未知确认不因迟到观察改写',async()=>{
- // 此用例的automation账本是合成输入，未声称真实自动化派发已接通。
- let injected=null;const f=await sending({transmissions:value=>injected??value}),tx=automationTransmission(f),guard={...f.install.body.guard,automation_binding:tx.intent.automation_binding};
- injected={binding:f.binding,guards:[guard],transmissions:[{transmission:tx,consumed:true,report:null}]};
+ const entered=deferred(),release=deferred(),f=await sending({origin:automationOrigin(),async write(input,module){
+  entered.resolve();await release.promise;return module.execution.writePrimitive(input);
+ }}),tx=f.dispatch.body.permit.transmission;
+ await f.writer.installGuard(raw(f.install));const pending=f.writer.dispatch(raw(f.dispatch));await entered.promise;
  const cut=runFence(f,[tx]),ack=await f.gateOwner.receive(raw(cut));await f.response(ack);assert.equal(ack.body.coverage[0].disposition,'unknown');
- injected.transmissions[0].report={body:{disposition:'in_flight'}};
+ release.resolve();assert.equal((await pending).body.disposition,'in_flight');assert.equal(f.writes(),1);
  assert.equal((await f.gateOwner.receive(raw(cut))).body.coverage[0].disposition,'unknown');
  const next=structuredClone(cut);next.message_id='run_retry';next.body.barrier_id='run_retry_barrier';
  Object.assign(next.body.attempt_binding,{attempt_ordinal:'2',previous_barrier_id:cut.body.barrier_id});f.tick(12n);

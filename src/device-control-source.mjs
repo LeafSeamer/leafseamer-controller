@@ -1,4 +1,5 @@
 import canonicalize from 'canonicalize';
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import {protectControlAuthorization} from './device-authorization-state.mjs';
 import {assertInitialReadyTransition} from './device-initial-ready.mjs';
 import {controlNeed as need,controlHash as hash,controlRead as read,controlSeal as seal,controlSame as same} from './device-control-value.mjs';
@@ -13,6 +14,15 @@ function body(record,id,kind,domain){
   clock_domain_id:domain.ref.clock_domain_id,descriptor_digest:domain.ref.descriptor_digest,observed_tick_ns:domain.tick},'record_digest');
 }
 export {body as controlSourceBody};
+const readControlOriginal=cacheVerifiedDocument((...columns)=>{
+ const [sourceId,kind,clockId,descriptor,tick,text,digest,publicText,publicDigest,commitKind,device,revision]=columns;
+ const record=read(publicText,publicDigest),value=JSON.parse(text),{record_digest,...unsigned}=value;
+ const {record_digest:recordDigest,...publicBody}=record;
+ need(canonicalize(value)===text&&hash(publicBody)===recordDigest&&record.device_id===device&&record.revision===revision&&
+  hash(unsigned)===record_digest&&record_digest===digest&&same(value,body(record,sourceId,kind,
+   {ref:{clock_domain_id:clockId,descriptor_digest:descriptor},tick:String(BigInt(tick))}))&&commitKind===kind,'source_integrity');
+ return {value,ref:reference(value)};
+});
 export function saveControlSources(db,commit,kind,domain){
  need(db.inTransaction,'source_writer');
  const records=db.prepare('SELECT device_id,revision,body_jcs,body_digest FROM control_record_revision WHERE commit_id=?').raw().all(commit);
@@ -35,11 +45,8 @@ export function readControlSource(db,device,revision){
  const row=db.prepare(`SELECT s.source_id,s.change_kind,s.clock_domain_id,s.descriptor_digest,s.observed_tick,s.body_jcs,s.body_digest,r.body_jcs,r.body_digest,c.kind
   FROM control_state_source s JOIN control_record_revision r USING(device_id,revision) JOIN control_change_commit c ON c.commit_id=s.source_id
   WHERE s.device_id=? AND s.revision=? AND r.commit_id=s.source_id`).raw().get(device,Number(revision));
- need(row,'source_missing');const record=read(row[7],row[8]),value=JSON.parse(row[5]),{record_digest,...unsigned}=value;
- const {record_digest:publicDigest,...publicBody}=record;
- need(canonicalize(value)===row[5]&&hash(publicBody)===publicDigest&&record.device_id===device&&record.revision===String(revision)&&
-  hash(unsigned)===record_digest&&record_digest===row[6]&&same(value,body(record,row[0],row[1],{ref:{clock_domain_id:row[2],descriptor_digest:row[3]},tick:String(BigInt(row[4]))}))&&row[9]===row[1],'source_integrity');
- return {value,ref:reference(value)};
+ need(row,'source_missing');
+ return readControlOriginal(...row,device,String(revision));
 }
 export function currentControlSource(db,device){
  need(db.inTransaction,'source_writer');const revision=db.prepare('SELECT revision FROM control_record_head WHERE device_id=?').pluck().get(device);

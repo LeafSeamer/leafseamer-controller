@@ -24,10 +24,11 @@ export function selectedHandshake(db,runtime,hello){
  need(entry?.kind==='worker'&&entry.loader==='node_module'&&file?.role==='module'&&
   hello.body.module_id===manifest.extension_id&&hello.body.module_digest===file.digest,'execution_hello_module');
  // 固定内存模块和已接通的持久OPEN领域才选择普通组；其他入口仍须各自领域原件。
+ const schema=Number(db.pragma('user_version',{simple:true})),fixed=fixedWorkerExecutionAvailable({inventory},entry);
  return selectDeviceExecutionFeatures(hello.body.supported_features,[...deviceExecutionCapabilities.base,
-  ...(Number(db.pragma('user_version',{simple:true}))>=31?deviceExecutionCapabilities.initial_control:[]),
-  ...(Number(db.pragma('user_version',{simple:true}))>=47&&fixedWorkerExecutionAvailable({inventory},entry)?
-   [...deviceExecutionCapabilities.manual,...deviceExecutionCapabilities.without_reference]:[])]);
+  ...(schema>=31?deviceExecutionCapabilities.initial_control:[]),
+  ...(schema>=47&&fixed?[...deviceExecutionCapabilities.manual,...deviceExecutionCapabilities.without_reference]:[]),
+  ...(schema>=79&&fixed?deviceExecutionCapabilities.automation:[])]);
 }
 export function handshakeAck(binding,hello,selected){
  return {ipc_version:deviceExecutionVersion,type:'HELLO_ACK',message_id:crypto.randomUUID(),reply_to:hello.message_id,

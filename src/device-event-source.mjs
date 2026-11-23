@@ -9,8 +9,53 @@ const read=(body,hash)=>{const value=JSON.parse(body);need(canonical(value)===bo
 const payloadSchema={type:'object',additionalProperties:false,properties:{value:{type:'integer',minimum:-2147483648,maximum:2147483647},write_sequence:{type:'string',pattern:'^[1-9][0-9]{0,19}$(?![\\s\\S])'}},required:['value','write_sequence']};
 const frozen=value=>{if(value&&typeof value==='object'){Object.values(value).forEach(frozen);Object.freeze(value);}return value;};
 
+function sourceTimeEvidence(record,origin,qualified,moduleFrame,projection){
+ const {authority_service_id,database_instance_id}=origin.source_key;
+ const {provider_id,provider_boot_id}=origin.binding_ref;
+ const {object_id:id,revision,digest:runtimeDigest}=qualified.runtime_binding_ref;
+ const body={id:record,revision:'1',source_key:origin.source_key,binding_ref:origin.binding_ref,event_id:origin.event_id,
+  source_sequence:origin.source_sequence,payload_digest:digest(origin.payload),capture_semantics:'event_occurrence',
+  capture_evidence_ref:moduleFrame,capture_domain:{authority_service_id,database_instance_id,provider_id,provider_boot_id,
+   runtime_binding_ref:{id,revision,digest:runtimeDigest},...projection.runtime_domain_ref,clock_generation:'1'},
+  capture_start_tick_ns:projection.before_tick_ns,capture_end_tick_ns:projection.after_tick_ns,
+  elapsed_profile_ref:projection.elapsed_profile_ref,reference_context_ref:projection.reference_context_ref??null,
+  utc_interval:projection.reference_context_ref?{lower_ns:projection.lower_utc_ns,upper_ns:projection.upper_utc_ns}:null};
+ const value={...body,digest:digest(body)};validateEventTimeModel('SourceTimeEvidence',value);return value;
+}
+
+export function readDeviceSourceTime(db,reference){
+ const row=db.prepare(`SELECT o.body_jcs,e.origin_jcs,e.origin_digest,e.module_event_jcs,f.message_id,f.frame_digest,f.frame_jcs,s.body_jcs,s.body_digest
+  FROM device_source_event_outbox o JOIN device_source_event e USING(record_id,transaction_id)
+  JOIN device_module_frame f ON f.message_id=e.module_message_id JOIN device_event_source s USING(registration_id)
+  WHERE e.record_id=?`).raw().get(reference.id);
+ if(!row)return null;
+ const [outboxText,originText,originDigest,moduleEvent,frameId,frameDigest,frameText,sourceText,sourceDigest]=row;
+ const origin=read(originText,originDigest),expected=origin.source_time_ref;
+ if(expected?.object_id!==reference.id||expected.revision!==reference.revision||expected.digest!==reference.digest)return null;
+ const outbox=JSON.parse(outboxText),source=read(sourceText,sourceDigest),frame=read(frameText,frameDigest),original=outbox.reference_capture;
+ const capture=original?.body,projection=capture?.projection,interval=JSON.parse(moduleEvent).capture_interval;
+ need(canonical(outbox)===outboxText&&outbox.record_id===reference.id&&outbox.origin_digest===originDigest&&same(outbox.origin,origin)&&
+  capture?.format==='leafseamer-source-reference-capture/1'&&original.digest===digest(capture)&&capture.origin_digest===originDigest&&
+  same(capture.module_frame_ref,{id:frameId,revision:'1',digest:frameDigest})&&
+  frame.type==='EVENT_BATCH'&&frame.request_id===frameId&&frame.body.result.batch.events.some(event=>canonical(event)===moduleEvent)&&
+  same(capture.worker_runtime_ref,source.qualification.runtime_binding_ref)&&same(capture.capture_review_ref,source.qualification.review_ref)&&
+  projection?.before_tick_ns===interval.before_tick_ns&&projection?.after_tick_ns===interval.after_tick_ns,'source_time_integrity');
+ const {id:anchorId,revision:anchorRevision,digest:anchorDigest}=projection.anchor_ref;
+ const anchorRow=db.prepare('SELECT body_jcs,body_digest FROM time_provider_reference_anchor WHERE anchor_id=? AND body_digest=?').raw().get(anchorId,anchorDigest);
+ const {clock_domain_id,descriptor_digest}=source.qualification.clock_domain_descriptor;
+ need(anchorRevision==='1'&&anchorRow,'source_time_integrity');
+ const anchor=read(...anchorRow);
+ need(same(anchor.approval.profile_ref,projection.elapsed_profile_ref)&&
+  (!projection.reference_context_ref||same(projection.reference_context_ref,{id:anchorId,revision:'1',digest:anchor.reference_bundle?.digest}))&&
+  same(projection.runtime_domain_ref,{clock_domain_id,descriptor_digest}),'source_time_integrity');
+ const value=sourceTimeEvidence(reference.id,origin,source.qualification,capture.module_frame_ref,projection);
+ need(same(value,outbox.source_time_evidence)&&value.digest===reference.digest,'source_time_integrity');
+ return value;
+}
+
 // 核心闭包装配；来源资格、原消息及当前运行均来自同库，不接受调用方提交注册或时间证明。
-export function deviceEventSourceStore({db,current,catalog}){
+export function deviceEventSourceStore({db,current,catalog,projectReferenceCapture}){
+ const timeEvidence=Number(db.pragma('user_version',{simple:true}))>=94;
  const projections=Number(db.pragma('user_version',{simple:true}))>=67?deviceSourceProjectionStore(db):null;
  let channel=null;
  const tail=id=>db.prepare('SELECT source_sequence FROM device_source_event WHERE registration_id=? ORDER BY length(source_sequence) DESC,source_sequence DESC LIMIT 1').pluck().get(id)??'0';
@@ -49,22 +94,43 @@ export function deviceEventSourceStore({db,current,catalog}){
   },
   accept(frame){
    return db.transaction(()=>{
-    check();frameRecord(frame);const value=source(frame);qualification(value,frame);const result=frame.body.result,batch=result.batch,id=value.registration_id;
+    check();frameRecord(frame);const value=source(frame),qualified=qualification(value,frame);const result=frame.body.result,batch=result.batch,id=value.registration_id;
     const previous=db.prepare('SELECT body_jcs FROM device_source_batch WHERE message_id=?').pluck().get(frame.request_id);if(previous)return frozen(JSON.parse(previous));
     const priorFault=db.prepare('SELECT reason,body_jcs FROM device_source_fault WHERE registration_id=?').raw().get(id);
     if(priorFault){const old=JSON.parse(priorFault[1]);need(priorFault[0]==='capture_failed'&&same(old.failure,result.failure)&&old.highest_sequence===result.highest_sequence,'source_closed');}
     let sequence=BigInt(tail(id));need(BigInt(batch.after_sequence)<=sequence,'source_gap');const records=[];
     for(const event of batch.events){
-     const origin={source_key:value.source_key,binding_ref:value.binding_ref,event_id:event.event_id,source_sequence:event.sequence,
-      payload:{schema_ref:value.payload_schema_ref,value:event.payload},source_time_ref:null};validateEventTimeModel('Origin',origin);
-     const body=canonical(origin),hash=digest(origin),old=db.prepare('SELECT record_id,origin_jcs,origin_digest,module_event_jcs FROM device_source_event WHERE registration_id=? AND (event_id=? OR source_sequence=?)').raw().all(id,event.event_id,event.sequence);
-     if(old.length){need(old.length===1&&old[0][1]===body&&old[0][2]===hash&&old[0][3]===canonical(event),'source_conflict');records.push(old[0][0]);continue;}
+     const originBody={source_key:value.source_key,binding_ref:value.binding_ref,event_id:event.event_id,source_sequence:event.sequence,
+      payload:{schema_ref:value.payload_schema_ref,value:event.payload}};
+     const moduleEvent=canonical(event),old=db.prepare('SELECT record_id,origin_jcs,origin_digest,module_event_jcs FROM device_source_event WHERE registration_id=? AND (event_id=? OR source_sequence=?)').raw().all(id,event.event_id,event.sequence);
+     if(old.length){
+      need(old.length===1&&old[0][3]===moduleEvent,'source_conflict');
+      const original=read(old[0][1],old[0][2]);validateEventTimeModel('Origin',original);
+      const {source_time_ref,...fields}=original;
+      need(same(fields,originBody),'source_conflict');records.push(old[0][0]);continue;
+     }
      need(BigInt(event.sequence)===sequence+1n,'source_gap');
+     const record=crypto.randomUUID(),transaction=crypto.randomUUID();
+     const {clock_domain_id,descriptor_digest}=qualified.clock_domain_descriptor;
+     const projection=projectReferenceCapture?.({domain:{clock_domain_id,descriptor_digest},...event.capture_interval});
+     const moduleFrame={id:frame.request_id,revision:'1',digest:digest(frame)};
+     const valueTime=projection&&timeEvidence?sourceTimeEvidence(record,originBody,qualified,moduleFrame,projection):null;
+     const scope=value.payload_schema_ref.scope;
+     const origin={...originBody,source_time_ref:valueTime?{kind:'source_time_evidence',scope,object_id:valueTime.id,revision:valueTime.revision,digest:valueTime.digest}:null};
+     validateEventTimeModel('Origin',origin);
+     const body=canonical(origin),hash=digest(origin);
      const capacity=db.prepare('SELECT count(*),coalesce(sum(length(CAST(origin_jcs AS BLOB))),0) FROM device_source_event').raw().get();
      need(capacity[0]<16384&&capacity[1]+Buffer.byteLength(body)<=33554432,'source_capacity');
-     const record=crypto.randomUUID(),transaction=crypto.randomUUID();
-     need(db.prepare('INSERT INTO device_source_event VALUES(?,?,?,?,?,?,?,?,?)').run(record,id,event.event_id,event.sequence,body,hash,frame.request_id,canonical(event),transaction).changes===1,'source_storage');
-     need(db.prepare('INSERT INTO device_source_event_outbox VALUES(?,?,?)').run(record,transaction,canonical({record_id:record,origin,origin_digest:hash})).changes===1,'source_storage');
+     const outbox={record_id:record,origin,origin_digest:hash};
+     if(projection){
+      const capture={format:'leafseamer-source-reference-capture/1',origin_digest:hash,module_frame_ref:moduleFrame,
+       worker_runtime_ref:qualified.runtime_binding_ref,capture_review_ref:qualified.review_ref,projection};
+      const bytes=canonical(capture);need(Buffer.byteLength(bytes)<=4096,'source_capture_capacity');
+      outbox.reference_capture={body:capture,digest:digest(capture)};
+     }
+     if(valueTime)outbox.source_time_evidence=valueTime;
+     need(db.prepare('INSERT INTO device_source_event VALUES(?,?,?,?,?,?,?,?,?)').run(record,id,event.event_id,event.sequence,body,hash,frame.request_id,moduleEvent,transaction).changes===1,'source_storage');
+     need(db.prepare('INSERT INTO device_source_event_outbox VALUES(?,?,?)').run(record,transaction,canonical(outbox)).changes===1,'source_storage');
      records.push(record);sequence=BigInt(event.sequence);
     }
     if(result.state==='failed')fault(value,'capture_failed',{module_message_id:frame.request_id,failure:result.failure,highest_sequence:result.highest_sequence});

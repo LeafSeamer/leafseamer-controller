@@ -13,7 +13,7 @@ const written=v=>need(v.changes===1,'storage');
 const deliver=v=>{if(v.denied)throw new IdentityError(v.denied);return controlFrozen(v);};
 function authorizationFor(receipt,id){
  const selected=receipt.selection,references=[...Object.values(selected.source_refs),selected.context.control_authority_ref,selected.context.evaluator_policy_ref];
- const refs=[...new Map(references.map(v=>[canonicalize(v),v])).values()].sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:BigInt(a.revision)<BigInt(b.revision)?-1:BigInt(a.revision)>BigInt(b.revision)?1:a.digest<b.digest?-1:a.digest>b.digest?1:0);
+ const refs=[...new Map(references.filter(v=>v!==null).map(v=>[canonicalize(v),v])).values()].sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:BigInt(a.revision)<BigInt(b.revision)?-1:BigInt(a.revision)>BigInt(b.revision)?1:a.digest<b.digest?-1:a.digest>b.digest?1:0);
  need(refs.length>0&&refs.length<=16,'evidence');
  return controlSeal({format_version:'device-recovery-authorization/0.1.0-draft.1',authorization_id:id,revision:'1',operation_id:receipt.id,
   request_receipt_ref:ref(receipt),binding:selected.binding,protected_state_ref:selected.state_ref,control_authority_ref:selected.context.control_authority_ref,
@@ -41,7 +41,8 @@ function readOriginal(db,id){
    authorization.authorization_id===row[8]&&same(authorization.request_receipt_ref,ref(receipt))&&authorization.operation_id===receipt.id&&
    authorization.requester_kind==='human'&&same(authorization.requester,receipt.requester)&&authorization.purpose==='revalidate_device_authorization'&&
    same(authorization.protected_state_ref,receipt.request.expected_state_ref)&&authorization.proposed_context_digest===receipt.request.expected_context_digest&&
-   receipt.request.manual_source_ref.id===row[11]&&receipt.request.evaluator_source_ref.id===row[12]&&
+   (receipt.request.manual_source_ref?.id??null)===row[11]&&receipt.request.evaluator_source_ref.id===row[12]&&
+   (row[11]===null?receipt.selection.context.mode==='automatic'&&receipt.selection.context.holder===null:receipt.selection.context.mode==='manual')&&
    same(authorization.binding,receipt.selection.binding)&&same(authorization.control_authority_ref,receipt.selection.context.control_authority_ref),'integrity');
   need(canonicalize(commit)===row[13]&&commit.digest===row[14]&&commit.id===id&&same(commit.receipt_ref,ref(receipt))&&
    same(commit.authorization_ref,authorizationRef(authorization))&&commit.kind==='device_authorization_recovery_accepted','integrity');
@@ -62,13 +63,19 @@ export function deviceAuthorizationRecovery({db,service,writer,time,authorizeTok
   if(selected.denied)return selected;
   const state=currentDeviceAuthorization(db,request.device_id);
   need(state.value.status==='protected'&&same(state.ref,request.expected_state_ref)&&same(selected.state_ref,state.ref),'state');
-  need(selected.context_digest===request.expected_context_digest&&same(selected.context.holder,who(proof))&&
+  need(selected.context_digest===request.expected_context_digest,'context');
+  if(request.manual_source_ref===null){
+   need(selected.context.mode==='automatic'&&selected.context.holder===null&&selected.context.holder_lineage===null,'context');
+   return selected;
+  }
+  need(same(selected.context.holder,who(proof))&&
    selected.context.holder_lineage.session_id===proof.session_id&&selected.context.holder_lineage.credential_id===proof.credential_id,'context');
   const sourceToken=db.prepare('SELECT token_id FROM execution_manual_authority WHERE source_id=?').pluck().get(request.manual_source_ref.id);
   need(sourceToken===tokenId,'requester_binding');return selected;
  }
  function currentInside(input,id){
-  const p=authorize(input);if(p.denied)return p;const saved=original(id);need(same(saved.receipt.requester,who(p)),'requester');
+  const p=authorize(input);if(p.denied)return p;const saved=original(id);need(same(saved.receipt.requester,who(p))&&
+   (saved.receipt.request.manual_source_ref!==null||input.token_id===saved.receipt.token_id),'requester');
   if(Number(service.schema_revision)>=41)need(!db.prepare('SELECT 1 FROM device_recovery_consumption WHERE authorization_id=?').pluck().get(saved.authorization.authorization_id),'consumed');
   const selected=sources(saved.receipt.request,p,input.token_id);if(selected.denied)return selected;
   const a=saved.authorization;need(same(selected.context,saved.receipt.selection.context)&&same(selected.binding,a.binding)&&
@@ -78,7 +85,8 @@ export function deviceAuthorizationRecovery({db,service,writer,time,authorizeTok
  return Object.freeze({
   accept(input,request){
    need(request&&Object.keys(request).sort().join(',')==='device_id,evaluator_source_ref,expected_context_digest,expected_state_ref,manual_source_ref,request_id'&&
-    uuid(request.request_id)&&uuid(request.device_id)&&request.expected_state_ref&&request.manual_source_ref&&request.evaluator_source_ref&&
+    uuid(request.request_id)&&uuid(request.device_id)&&request.expected_state_ref&&
+    (request.manual_source_ref||request.manual_source_ref===null&&Number(service.schema_revision)>=96)&&request.evaluator_source_ref&&
     typeof request.expected_context_digest==='string'&&/^sha256:[0-9a-f]{64}$/.test(request.expected_context_digest),'input');
    return deliver(writer(()=>{
     const p=authorize(input);if(p.denied)return p;const {request_id,...content}=request;
@@ -94,7 +102,7 @@ export function deviceAuthorizationRecovery({db,service,writer,time,authorizeTok
     const commit=seal({format:'device-authorization-recovery-commit/1',id,revision:'1',kind:'device_authorization_recovery_accepted',receipt_ref:ref(receipt),authorization_ref:authorizationRef(authorization)});
     need(Buffer.byteLength(canonicalize(receipt))<=65536,'capacity');
     written(db.prepare('INSERT INTO device_recovery_request VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(id,keyDigest,requestDigest,content.device_id,p.principal_id,input.token_id,selected.state_ref.id,canonicalize(receipt),receipt.digest,aid,id));
-    written(db.prepare('INSERT INTO device_recovery_authorization VALUES(?,?,?,?,?,?,?,?)').run(aid,id,content.device_id,selected.state_ref.id,content.manual_source_ref.id,content.evaluator_source_ref.id,canonicalize(authorization),authorization.authorization_digest));
+    written(db.prepare('INSERT INTO device_recovery_authorization VALUES(?,?,?,?,?,?,?,?)').run(aid,id,content.device_id,selected.state_ref.id,content.manual_source_ref?.id??null,content.evaluator_source_ref.id,canonicalize(authorization),authorization.authorization_digest));
     written(db.prepare('INSERT INTO device_recovery_commit VALUES(?,?,?)').run(id,canonicalize(commit),commit.digest));
     const result=currentInside(input,id);need(!result.denied&&same(result,{receipt,authorization}),'readback');return result;
    }));

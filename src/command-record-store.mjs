@@ -10,6 +10,7 @@ import {memoExecutionRead,withExecutionReadView} from './execution-read-view.mjs
 import {readDispatchLifecycle} from './command-dispatch.mjs';
 import {readSettlementLifecycle} from './command-settlement.mjs';
 import {readCommandFinalAdmission} from './command-final-admission.mjs';
+import {verifyCommandReferenceAcceptance} from './reference-time-anchor.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('command_'+code);};
 const bytes=value=>Buffer.from(canonical(value));
 const reference=(id,value)=>({id,revision:'1',digest:digest(value)});
@@ -42,6 +43,15 @@ export function commandPolicyInput(value,execution){
    observation:{source:'correlated_module_result',value:p.value,sequence:'strict_successor',binding:'command_attempt_permit'}},
   release:{format:'fixed-memory-release/1',policy_id:'leafseamer.simulator.quiescent_write.1',transport_profile_ref:b.transport_profile_ref,
    automatic_resends:false,external_resources:[],required:'writer_consumption_and_module_completion',failure:'unresolved'},capacity};
+}
+export function automationActionPolicy(authority,execution){
+ const action=template.actions[0];
+ need(authority.parameter_schema_ref.digest===execution.value.action.parameters_schema_digest,'parameters_schema');
+ const selected={...authority.target,parameters:authority.parameters,preconditions:[],dispatch:{mode:'immediate'},
+  required_completion:action.completion.default,evidence_timeout_ms:action.evidence_timeout_ms};
+ const policies=commandPolicyInput(selected,execution);
+ return {required_completion:selected.required_completion,evidence_timeout_ms:selected.evidence_timeout_ms,
+  completion_policy_digest:digest(policies.completion),release_policy_digest:digest(policies.release)};
 }
 function publicRecord(source,policy,state,manifest,attempts=[],achieved=null){
  const sref=reference(source.command_id+'_state_'+state.revision,state);sref.revision=state.revision;
@@ -82,32 +92,90 @@ export function settledCommandProjection(initial,previous,evidence,succeeded){
   manifest={command_id:initial.source.command_id,revision:'5',members:evidence.map(v=>({source_ref:v.source_ref,kind:v.kind,view_digest:v.view_digest}))};
  return {state,manifest,record:publicRecord(initial.source,initial.record.policy,state,manifest,attempts,succeeded?'effect_verified':null)};
 }
-export function prepareCommandRecord({value,content,identity,current,domain,commitRef}){
+export function prepareCommandRecord({value,content,identity,current,domain,commitRef,referenceAcceptance=null}){
  const {execution,proof}=current,scope=identity.key.target_scope,policies=commandPolicyInput(value,execution),id=crypto.randomUUID();
  need(execution.ready&&same(domain.ref,{clock_domain_id:execution.value.binding.clock_domain_id,descriptor_digest:execution.value.binding.descriptor_digest}),'clock');
  const tick=BigInt(domain.tick),end=tick+BigInt(value.dispatch.max_queue_ms)*1000000n;
  need(tick<BigInt(execution.ready.value.expires_tick_ns)&&end<=18446744073709551615n,'deadline');
  const accepted={domain:domain.ref,tick_ns:String(tick)},deadline={format:'command-deadline/1',command_id:id,scope,accepted,
   dispatch:value.dispatch,queue_deadline_tick_ns:String(end),evidence_timeout_ms:value.evidence_timeout_ms};
- const initial={command_id:id,scope,revision:'1',request_identity:identity,content,actor:actor(proof),accepted_at:null,
-  accepted_monotonic:accepted,binding_ref:execution.ref,ready_ref:execution.ready.ref};
+ const acceptedReference=referenceAcceptance?.(accepted)??null, acceptedAt=acceptedReference?.accepted_at??null;
+ const initial={command_id:id,scope,revision:'1',request_identity:identity,content,actor:actor(proof),accepted_at:acceptedAt,
+  accepted_monotonic:accepted,binding_ref:execution.ref,ready_ref:execution.ready.ref,
+  ...(acceptedReference && {accepted_reference_ref:reference(id+'_reference_acceptance',acceptedReference)})};
  const initialRef={kind:'command',scope,object_id:id,revision:'1',digest:digest(initial)};
  const abody={contract_version:'command-admission/0.1.0-draft.1',adjudication_id:crypto.randomUUID(),revision:'1',identity,
   decision:'accepted',command_ref:initialRef,commit_ref:commitRef};
  const adjudication={...abody,adjudication_digest:digest(abody)},admissionRef={id:abody.adjudication_id,revision:'1',digest:adjudication.adjudication_digest};
- const policy={command_id:id,scope,device_id:value.device_id,admission_ref:admissionRef,required_completion:value.required_completion,
-  completion_policy_ref:reference(id+'_completion_policy',policies.completion),release_policy_ref:reference(id+'_release_policy',policies.release),
-  retry_policy_ref:null,max_attempts:1,original_deadline_ref:reference(id+'_deadline',deadline),conflict_scope:'whole_device'};
  const source={format:'command-admission-source/1',command_id:id,initial_ref:initialRef,admission_ref:admissionRef,
   binding_ref:execution.ref,binding:execution.value.binding,ready_ref:execution.ready.ref,context_id:value.context_id,
   token_id:current.token_id,authorization_digest:proof.authorization_digest,scope_digest:proof.scope_digest,policies,deadline,
+  ...(acceptedReference && {accepted_reference:acceptedReference}),
   metadata:{command_id:id,scope,initial_command_ref:initialRef,request_identity:identity,target:{device_id:value.device_id,action_id:value.action_id,capability_version:value.capability_version},
-   actor:initial.actor,origin:'manual',run_binding:null,automation_binding:null,accepted_at:null,dispatch:value.dispatch,control_binding:value.expected_control}};
+   actor:initial.actor,origin:'manual',run_binding:null,automation_binding:null,accepted_at:acceptedAt,dispatch:value.dispatch,control_binding:value.expected_control}};
+ return queuedRecord(id,initial,adjudication,source,value.required_completion);
+}
+function queuedRecord(id,initial,adjudication,source,requiredCompletion){
+ const {scope,target}=source.metadata,{policies,deadline,admission_ref}=source;
+ const policy={command_id:id,scope,device_id:target.device_id,admission_ref,required_completion:requiredCompletion,
+  completion_policy_ref:reference(id+'_completion_policy',policies.completion),release_policy_ref:reference(id+'_release_policy',policies.release),
+  retry_policy_ref:null,max_attempts:1,original_deadline_ref:reference(id+'_deadline',deadline),conflict_scope:'whole_device'};
  const state={command_id:id,scope,revision:'1',phase:'queued',outcome:'pending',effect_status:'not_sent',resource_status:'clear',
   automation_continuation:'eligible',reason_code:null,terminal_revision:null,resolution_ref:null,completion_evidence_refs:[],resource_evidence_refs:[],attempt_ids:[]};
- const manifest={command_id:id,revision:'1',members:[]},claim={format:'command-resource-claim/1',command_id:id,scope,device_id:value.device_id,
+ const manifest={command_id:id,revision:'1',members:[]},claim={format:'command-resource-claim/1',command_id:id,scope,device_id:target.device_id,
   conflict_scope:'whole_device',state:'queued',ownership_ref:null,hold_ref:null};
  return {id,initial,adjudication,source,policy,state,manifest,claim,record:publicRecord(source,policy,state,manifest)};
+}
+function automationRequest(initial,request){
+ const basis=initial.execution_basis,{origin,control_binding,action_policy,authentication_window:window}=basis;
+ const {execution_ref,run_id,definition_version,arm_generation,step_id,grant_ref}=origin;
+ // Worker 使用 SDK 的引用种类。ID、库范围和摘要仍指向同一个经配对核验的 Seamer 执行原件。
+ const execution_binding_ref={...execution_ref,kind:'execution_binding'};
+ const automation_binding={binding_version:'continuation-execution/0.1.0-draft.1',origin_scope:execution_ref.scope,
+  run_id,definition_version,arm_generation,execution_id:execution_ref.object_id,execution_binding_ref,
+  step_id,logical_action_id:step_id,authorization_mode:'preparation',continuation:null};
+ const run_binding={run_id,definition_version,arm_generation,step_id,logical_action_id:step_id,grant_id:grant_ref.object_id,grant_revision:grant_ref.revision};
+ const left=BigInt(window.before_tick_ns)-BigInt(window.selected_tick_ns);
+ need(left>0n&&left<=5000000000n,'automation_deadline');
+ return {context_id:request.action.preparation.lookup.preparation_id,idempotency_key:request.idempotency_key,...initial.target,
+  parameters:initial.authority.parameters,expected_control:control_binding,origin:'automation',run_binding,automation_binding,
+  required_completion:action_policy.required_completion,preconditions:[],dispatch:{mode:'immediate',max_queue_ms:Number((left+999999n)/1000000n)},
+  evidence_timeout_ms:action_policy.evidence_timeout_ms};
+}
+export function storeAutomationCommandRecord(db,{command:initial,adjudication,request,commit},execution){
+ need(db.inTransaction&&initial.format==='leafseamer.automation-command/2','writer');
+ const id=initial.command_id,{identity}=adjudication,scope=identity.key.target_scope,basis=initial.execution_basis,{authentication_window:window}=basis;
+ const value=automationRequest(initial,request),{context_id,idempotency_key,...executionContent}=value,policies=commandPolicyInput(value,execution);
+ need(same(basis.binding_ref,execution.ref)&&same(basis.ready_ref,execution.ready.ref)&&same(basis.binding,execution.value.binding)&&
+  digest(policies.completion)===basis.action_policy.completion_policy_digest&&digest(policies.release)===basis.action_policy.release_policy_digest,'automation_source');
+ commandCapacity(db,value.device_id);
+ const {issuer_id,issuer_epoch,principal_id,request_epoch}=identity.key,initialRef=adjudication.command_ref;
+ const source={format:'command-admission-source/2',command_id:id,initial_ref:initialRef,
+  admission_ref:{id:adjudication.adjudication_id,revision:'1',digest:adjudication.adjudication_digest},binding_ref:basis.binding_ref,binding:basis.binding,ready_ref:basis.ready_ref,
+  context_id:null,token_id:null,authorization_digest:digest(initial.authority),authentication_window:window,
+  execution_request:value,execution_content_digest:digest(executionContent),policies,
+  deadline:{format:'command-deadline/1',command_id:id,scope,accepted:{domain:window.domain_ref,tick_ns:window.selected_tick_ns},dispatch:value.dispatch,
+   queue_deadline_tick_ns:window.before_tick_ns,evidence_timeout_ms:value.evidence_timeout_ms},
+  metadata:{command_id:id,scope,initial_command_ref:initialRef,request_identity:identity,target:initial.target,
+   actor:{issuer_id,issuer_epoch,principal_id,local_subject_id:principal_id,session_id:null,authorization_revision:initial.authority.grant_ref.revision},
+   origin:'automation',run_binding:value.run_binding,automation_binding:value.automation_binding,accepted_at:null,dispatch:value.dispatch,control_binding:value.expected_control}};
+ const prepared=queuedRecord(id,initial,adjudication,source,value.required_completion),keyId=crypto.randomUUID(),written=result=>need(result.changes===1,'storage');
+ let namespace=db.prepare('SELECT namespace_id FROM ca_namespace WHERE issuer_id=? AND issuer_epoch=? AND principal_id=? AND request_epoch=?')
+  .pluck().get(issuer_id,issuer_epoch,principal_id,request_epoch);
+ if(!namespace){
+  namespace=crypto.randomUUID();
+  const original=db.prepare('SELECT request_jcs FROM run_preparation WHERE preparation_id=?').pluck().get(request_epoch);
+  need(original,'automation_source');
+  written(db.prepare('INSERT INTO ca_namespace VALUES(?,1,?,?,?,?,NULL,?)').run(namespace,issuer_id,issuer_epoch,principal_id,request_epoch,Buffer.from(original)));
+ }
+ written(db.prepare('INSERT INTO ca_request_key VALUES(?,?,?,?,?,?,?)').run(keyId,namespace,'createCommand',idempotency_key,identity.request_digest,value.device_id,bytes(request)));
+ written(db.prepare("INSERT INTO ca_adjudication VALUES(?,?,'1','accepted',?,?,'accept',?,?)")
+  .run(keyId,adjudication.adjudication_id,id,commit.commit_id,adjudication.adjudication_digest,bytes(adjudication)));
+ storeCommandRecord(db,prepared,keyId,commit.commit_id,null);
+ written(db.prepare("INSERT INTO ca_commit VALUES(?,?,'accept',?,NULL,?)").run(commit.commit_id,keyId,keyId,bytes(commit)));
+ written(db.prepare("INSERT INTO ca_audit VALUES(?,?,'accept',?)").run(commit.commit_id,keyId,bytes({identity,command_ref:initialRef,decision:'accepted'})));
+ written(db.prepare("INSERT INTO ca_notification VALUES(?,?,'accept',?,?)").run(commit.commit_id,keyId,crypto.randomUUID(),bytes({identity,adjudication})));
+ need(same(readOriginalRecord(db,id).adjudication,adjudication),'automation_source');
 }
 export function storeCommandRecord(db,prepared,keyId,commitId,beforeCount){
  need(db.inTransaction,'writer');const p=prepared,s=p.source,w=result=>need(result.changes===1,'storage');
@@ -116,9 +184,11 @@ export function storeCommandRecord(db,prepared,keyId,commitId,beforeCount){
  w(db.prepare('INSERT INTO ca_reservation VALUES(?,?,?,?)').run(keyId,p.id,bytes(reference(capacity.profile_id,capacity)),bytes(capacity.per_command)));
  w(db.prepare('INSERT INTO command_policy VALUES(?,?,?)').run(p.id,canonical(p.policy),digest(p.policy)));
  w(db.prepare('INSERT INTO command_resource_claim VALUES(?,?,?,?)').run(p.id,s.binding.device_id,canonical(p.claim),digest(p.claim)));
- w(db.prepare('UPDATE request_context SET used_count=used_count+1 WHERE context_id=? AND used_count=? AND used_count<max_unique_requests AND state=\'active\'')
-  .run(s.context_id,beforeCount));
- w(db.prepare('INSERT INTO command_context_charge VALUES(?,?,?,?)').run(p.id,s.context_id,beforeCount,beforeCount+1));
+ if(s.context_id!==null){
+  w(db.prepare('UPDATE request_context SET used_count=used_count+1 WHERE context_id=? AND used_count=? AND used_count<max_unique_requests AND state=\'active\'')
+   .run(s.context_id,beforeCount));
+  w(db.prepare('INSERT INTO command_context_charge VALUES(?,?,?,?)').run(p.id,s.context_id,beforeCount,beforeCount+1));
+ }
  w(db.prepare('INSERT INTO command_revision VALUES(?,1,?,?,?,?,?,?,?)').run(p.id,canonical(p.record),p.record.record_digest,canonical(p.state),digest(p.state),canonical(p.manifest),digest(p.manifest),commitId));
  w(db.prepare('INSERT INTO command_admission_source VALUES(?,?,?,?,?,?,?,?,?)').run(p.id,keyId,s.context_id,s.token_id,s.ready_ref.id,s.binding_ref.id,s.binding.device_id,canonical(s),digest(s)));
 }
@@ -140,41 +210,68 @@ function readInitialRecord(db,id){
   WHERE s.command_id=? AND r.revision=1`).raw().get(id);
  need(row,'record_missing');const [st,sh,ib,ih,ab,cb,ch,at,ah,pt,ph,rt,rh,sst,ssh,mt,mh,ht,hh,commit,admitCommit,ct,cr,dimensions]=row;
  const source=original(st,sh),initial=original(ib.toString(),ih),content=original(cb.toString(),ch),policy=original(pt,ph),state=original(sst,ssh),manifest=original(mt,mh),claim=original(ht,hh),adjudication=JSON.parse(at.toString());
- const {adjudication_digest,...a}=adjudication;
+ const {adjudication_digest,...a}=adjudication,automated=source.metadata.origin==='automation';
  need(canonical(adjudication)===at.toString()&&adjudication_digest===ah&&digest(a)===ah&&same(a.command_ref,source.initial_ref)&&
-  same(source.admission_ref,{id:a.adjudication_id,revision:'1',digest:ah})&&same(a.identity,initial.request_identity)&&same(initial.content,content)&&
+  same(source.admission_ref,{id:a.adjudication_id,revision:'1',digest:ah})&&a.identity.request_digest===ch&&
   same(JSON.parse(ab.toString()),{source_ref:reference(id,source)})&&source.initial_ref.digest===ih&&source.command_id===id&&initial.command_id===id&&
   commit===admitCommit&&a.commit_ref.digest===digest(JSON.parse(ct.toString())),'record_binding');
- need(same(initial.accepted_monotonic,source.deadline.accepted)&&same(initial.binding_ref,source.binding_ref)&&same(initial.ready_ref,source.ready_ref)&&
-  same(initial.actor,source.metadata.actor)&&source.metadata.accepted_at===null&&initial.accepted_at===null&&
-  same(source.metadata.request_identity,initial.request_identity)&&same(source.metadata.initial_command_ref,source.initial_ref)&&
-  same(source.metadata.control_binding,content.expected_control)&&same(source.metadata.dispatch,content.dispatch)&&
+ let accepted=initial.accepted_monotonic,value=content;
+ if(automated){
+  const row=db.prepare('SELECT body_jcs,body_digest FROM automation_command_adjudication WHERE command_id=?').raw().get(id);
+  need(row,'automation_source');const sealed=original(...row),basis=initial.execution_basis;
+  value=automationRequest(initial,content);const {context_id,idempotency_key,...body}=value;
+  accepted={domain:basis.authentication_window.domain_ref,tick_ns:basis.authentication_window.selected_tick_ns};
+  need(source.format==='command-admission-source/2'&&initial.format==='leafseamer.automation-command/2'&&
+   same(sealed,{command:initial,adjudication,commit:JSON.parse(ct.toString()),request:content})&&same(initial.identity,a.identity)&&
+   source.context_id===null&&source.token_id===null&&source.metadata.accepted_at===null&&
+   same(source.binding_ref,basis.binding_ref)&&same(source.binding,basis.binding)&&same(source.ready_ref,basis.ready_ref)&&
+   same(source.authentication_window,basis.authentication_window)&&
+   same(source.execution_request,value)&&source.execution_content_digest===digest(body)&&source.authorization_digest===digest(initial.authority)&&
+   same(source.deadline.accepted,accepted)&&source.deadline.queue_deadline_tick_ns===basis.authentication_window.before_tick_ns&&
+   same(source.metadata.target,initial.target)&&same(source.metadata.run_binding,value.run_binding)&&same(source.metadata.automation_binding,value.automation_binding)&&
+   same(source.metadata.actor,{issuer_id:a.identity.key.issuer_id,issuer_epoch:a.identity.key.issuer_epoch,principal_id:a.identity.key.principal_id,
+    local_subject_id:a.identity.key.principal_id,session_id:null,authorization_revision:initial.authority.grant_ref.revision}),'automation_source');
+ }else{
+  need(same(a.identity,initial.request_identity)&&same(initial.content,content),'record_binding');
+  need(same(initial.accepted_monotonic,source.deadline.accepted)&&same(initial.binding_ref,source.binding_ref)&&same(initial.ready_ref,source.ready_ref)&&
+  same(initial.actor,source.metadata.actor)&&source.metadata.accepted_at===initial.accepted_at&&
   same(source.metadata.target,{device_id:content.device_id,action_id:content.action_id,capability_version:content.capability_version})&&
   source.metadata.origin==='manual'&&source.metadata.run_binding===null&&source.metadata.automation_binding===null,'record_binding');
+ }
+ need(same(source.metadata.request_identity,a.identity)&&same(source.metadata.initial_command_ref,source.initial_ref)&&
+  same(source.metadata.control_binding,value.expected_control)&&same(source.metadata.dispatch,value.dispatch),'record_binding');
+ const observed=source.accepted_reference;
+ if(automated||initial.accepted_at===null)need(observed===undefined && initial.accepted_reference_ref===undefined,'reference_acceptance');
+ else need(observed?.accepted_at===initial.accepted_at && same(initial.accepted_reference_ref,reference(id+'_reference_acceptance',observed)) &&
+  verifyCommandReferenceAcceptance(db,observed,initial.accepted_monotonic,source.binding.ipc_session_id),'reference_acceptance');
  need(same(policy.admission_ref,source.admission_ref)&&same(policy.original_deadline_ref,reference(id+'_deadline',source.deadline))&&
   same(policy.completion_policy_ref,reference(id+'_completion_policy',source.policies.completion))&&same(policy.release_policy_ref,reference(id+'_release_policy',source.policies.release))&&
-  policy.required_completion===content.required_completion&&policy.max_attempts===1&&policy.retry_policy_ref===null&&policy.conflict_scope==='whole_device'&&
+  policy.required_completion===value.required_completion&&policy.max_attempts===1&&policy.retry_policy_ref===null&&policy.conflict_scope==='whole_device'&&
   same(JSON.parse(cr.toString()),reference(capacity.profile_id,capacity))&&same(JSON.parse(dimensions.toString()),capacity.per_command)&&same(source.policies.capacity,capacity),'record_policy');
  need(state.revision==='1'&&state.phase==='queued'&&state.outcome==='pending'&&state.effect_status==='not_sent'&&state.resource_status==='clear'&&
   state.attempt_ids.length===0&&state.completion_evidence_refs.length===0&&state.resource_evidence_refs.length===0&&
-  claim.command_id===id&&claim.state==='queued'&&claim.hold_ref===null&&claim.ownership_ref===null&&claim.device_id===content.device_id&&
+  claim.command_id===id&&claim.state==='queued'&&claim.hold_ref===null&&claim.ownership_ref===null&&claim.device_id===value.device_id&&
   same(manifest,{command_id:id,revision:'1',members:[]}), 'record_state');
  const record=publicRecord(source,policy,state,manifest);need(canonical(record)===rt&&record.record_digest===rh,'record_projection');
  const charge=db.prepare('SELECT context_id,before_count,after_count FROM command_context_charge WHERE command_id=?').raw().get(id);
- need(charge&&charge[0]===source.context_id&&charge[2]===charge[1]+1,'record_charge');
+ need(automated?!charge:charge&&charge[0]===source.context_id&&charge[2]===charge[1]+1,'record_charge');
  const ready=readInitialReady(db,source.ready_ref.id),bound=db.prepare('SELECT body_jcs,body_digest FROM device_execution_binding WHERE binding_id=?').raw().get(source.binding_ref.id);
  need(bound,'record_binding');const binding=original(...bound);
  need(same(ready.ref,source.ready_ref)&&same(source.binding,ready.value.binding)&&same(source.binding,binding.binding)&&
-  same(source.binding_ref,reference(binding.binding_id,binding))&&same(initial.accepted_monotonic.domain,{clock_domain_id:source.binding.clock_domain_id,descriptor_digest:source.binding.descriptor_digest})&&
-  BigInt(initial.accepted_monotonic.tick_ns)>=BigInt(ready.value.selected_tick_ns)&&BigInt(initial.accepted_monotonic.tick_ns)<BigInt(ready.value.expires_tick_ns)&&
-  BigInt(source.deadline.queue_deadline_tick_ns)===BigInt(initial.accepted_monotonic.tick_ns)+BigInt(content.dispatch.max_queue_ms)*1000000n,'record_source');
+  same(source.binding_ref,reference(binding.binding_id,binding))&&same(accepted.domain,{clock_domain_id:source.binding.clock_domain_id,descriptor_digest:source.binding.descriptor_digest})&&
+  BigInt(accepted.tick_ns)>=BigInt(ready.value.selected_tick_ns)&&BigInt(accepted.tick_ns)<BigInt(ready.value.expires_tick_ns)&&
+  (automated?BigInt(source.deadline.queue_deadline_tick_ns)<=BigInt(ready.value.expires_tick_ns):
+   BigInt(source.deadline.queue_deadline_tick_ns)===BigInt(accepted.tick_ns)+BigInt(value.dispatch.max_queue_ms)*1000000n),'record_source');
  return {source,record,adjudication,claim};
 }
 // 初始资格只接无attempt的排队claim；提交后路径须显式匹配唯一T2原件，调用方仍检查占用与全部出站帧。
-export function pendingInitialCommands(db,ready,preparedRef=null,retiredIds=[]){
- need(db.inTransaction,'writer');const ids=db.prepare('SELECT command_id FROM ca_command_initial ORDER BY command_id').pluck().all().filter(id=>!retiredIds.includes(id));
+export function pendingInitialCommands(db,ready,preparedRef=null,retiredIds=[],device=null){
+ need(db.inTransaction,'writer');
+ const commands=device===null?db.prepare('SELECT command_id FROM ca_command_initial ORDER BY command_id').pluck().all():
+  db.prepare('SELECT c.command_id FROM ca_command_initial c JOIN ca_request_key k USING(key_id) WHERE k.device_id=? ORDER BY c.command_id').pluck().all(device);
+ const ids=commands.filter(id=>!retiredIds.includes(id));
  if(!ids.length)return [];
- need([49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70].includes(Number(db.pragma('user_version',{simple:true})))&&ready,'resource_successor_required');
+ need([49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97].includes(Number(db.pragma('user_version',{simple:true})))&&ready,'resource_successor_required');
  return ids.map(id=>{const saved=readCommandRecord(db,id);
   const final=saved.lifecycle?.final_admission;
   const prepared=preparedRef&&final&&same(final.ref,preparedRef)&&saved.record.state.resource_status==='held'&&saved.record.attempts.length===1;

@@ -3,7 +3,7 @@ import canonicalize from 'canonicalize';
 import {IdentityError} from './identity-crypto.mjs';
 import {checked,ref as objectRef,digest} from './auth-clock-value.mjs';
 import {currentControlSource} from './device-control-source.mjs';
-import {currentControlReference} from './device-initial-ready.mjs';
+import {currentControlReference,readInitialReady} from './device-initial-ready.mjs';
 import {readDeviceRecoveryRequest} from './device-authorization-recovery.mjs';
 import {memoExecutionRead} from './execution-read-view.mjs';
 import {controlNeed as need,controlHash as hash,controlSeal as seal,controlSame as same} from './device-control-value.mjs';
@@ -13,10 +13,21 @@ const identity=(scope,device,revision)=>'device_auth_'+hash({scope,device_id:dev
 const context=v=>({scope:v.scope,device_id:v.device_id,control_authority_ref:sourceRef(v),control_epoch:v.control_epoch,
  control_version:v.effective_version,mode:v.mode,holder:v.holder?{issuer_id:v.holder.issuer_id,issuer_epoch:v.holder.issuer_epoch,principal_id:v.holder.principal_id}:null,
  purpose:'ordinary',evaluator_lineage:null,evaluator_policy_ref:null,device_scope_ref:null,holder_lineage:null,cancel_scope_ref:null,cancel_lineage_ref:null});
+const require=(value,code)=>{if(!value)throw new IdentityError('device_authorization_'+code);};
+
+function selectEvaluator(db,service,c,source){
+ const row=db.prepare('SELECT body_jcs,body_digest FROM device_evaluator_policy WHERE policy_id=?').raw().get(source.policy_ref.id);
+ require(row,'scope');const policy=checked(JSON.parse(row[0]));
+ require(canonicalize(policy)===row[0]&&policy.digest===row[1]&&same(objectRef(policy),source.policy_ref)&&
+  policy.device_ids.includes(c.device_id)&&policy.service_id===service.service_id&&policy.database_instance_id===service.database_instance_id,'scope');
+ c.evaluator_lineage={principal:{issuer_id:source.issuer_id,issuer_epoch:source.issuer_epoch,principal_id:source.principal_id},
+  principal_kind:'service',credential_id:source.credential_ref.id,session_id:null,subject_revision:source.subject_ref.revision,
+  session_revision:null,policy_revision:policy.revision,scope_digest:digest({scope:c.scope,device_ids:policy.device_ids})};
+ c.evaluator_policy_ref=source.policy_ref;c.device_scope_ref=source.policy_ref;
+}
 
 // 恢复采用者的受信输入读取器；不保存新状态，也不创建恢复授权或发送资格。
 export function currentManualAuthorizationContext(db,service,request,{manual,evaluator,coreSource}){
- const require=(value,code)=>{if(!value)throw new IdentityError('device_authorization_'+code);};
  require(db.inTransaction&&Number(service.schema_revision)>=39,'writer');
  require(request&&Object.keys(request).sort().join(',')==='device_id,evaluator_source_ref,manual_source_ref'&&
   typeof request.device_id==='string'&&request.manual_source_ref&&request.evaluator_source_ref,'input');
@@ -34,15 +45,8 @@ export function currentManualAuthorizationContext(db,service,request,{manual,eva
   session&&session[0]===holderRuntime.service_boot_id&&session[1]===holder.binding.controller_boot_id&&session[2]===holder.binding.worker_boot_id&&
   holderRuntime.core.receipt.member_boot_id===holder.binding.controller_boot_id&&same(holderRuntime.domain_ref,evaluatorRuntime.domain_ref)&&
   same(serviceSource.domain_ref,holderRuntime.domain_ref),'runtime');
- const row=db.prepare('SELECT body_jcs,body_digest FROM device_evaluator_policy WHERE policy_id=?').raw().get(serviceSource.policy_ref.id);
- require(row,'scope');const policy=checked(JSON.parse(row[0]));
- require(canonicalize(policy)===row[0]&&policy.digest===row[1]&&same(objectRef(policy),serviceSource.policy_ref)&&
-  policy.device_ids.includes(device)&&policy.service_id===service.service_id&&policy.database_instance_id===service.database_instance_id,'scope');
  const a=holder.authorization;
- c.evaluator_lineage={principal:{issuer_id:serviceSource.issuer_id,issuer_epoch:serviceSource.issuer_epoch,principal_id:serviceSource.principal_id},
-  principal_kind:'service',credential_id:serviceSource.credential_ref.id,session_id:null,subject_revision:serviceSource.subject_ref.revision,
-  session_revision:null,policy_revision:policy.revision,scope_digest:digest({scope:c.scope,device_ids:policy.device_ids})};
- c.evaluator_policy_ref=serviceSource.policy_ref;c.device_scope_ref=serviceSource.policy_ref;
+ selectEvaluator(db,service,c,serviceSource);
  c.holder_lineage={principal:holder.holder,principal_kind:'human',credential_id:holder.credential_id,session_id:holder.session_id,
   subject_revision:String(a.subject_revision),session_revision:a.session_revision,policy_revision:a.policy_revision,scope_digest:a.scope_digest};
  const windows=[{role:'evaluator',evidence_ref:e.ref,not_before_tick_ns:serviceSource.selected_tick_ns,before_tick_ns:serviceSource.expires_tick_ns},
@@ -54,6 +58,38 @@ export function currentManualAuthorizationContext(db,service,request,{manual,eva
   source_refs:{holder:m.ref,evaluator:e.ref,holder_runtime:holder.core_runtime_source_ref,evaluator_runtime:serviceSource.core_runtime_source_ref},
   windows,selected_tick_ns:now.tick,expires_tick_ns:String(expires),
   authorization_dependencies:[serviceSource.authorization_dependencies,holder.authorization_dependencies]};
+}
+
+export function currentAutomaticAuthorizationContext(db,service,request,{evaluator,coreSource,executionCurrent}){
+ require(db.inTransaction&&Number(service.schema_revision)>=96,'writer');
+ require(request&&Object.keys(request).sort().join(',')==='device_id,evaluator_source_ref,manual_source_ref'&&
+  typeof request.device_id==='string'&&request.evaluator_source_ref&&request.manual_source_ref===null,'input');
+ const device=request.device_id,e=evaluator(request.evaluator_source_ref);if(e.denied)return e;
+ const selected=e.value,control=currentControlSource(db,device),c=context(control.authority.value),state=currentDeviceAuthorization(db,device);
+ require(selected.device_id===device&&c.mode==='automatic'&&c.holder===null&&control.current.value.mode==='automatic'&&
+  control.current.value.holder===null&&control.current.value.pending_operation_id===null&&
+  ['protected','ready'].includes(control.current.value.gate_state),'control');
+ require(same(state.value.context.control_authority_ref,control.authority.ref),'control');
+ const {binding}=executionCurrent(device).value,runtime=coreSource.currentCoreSource(selected.core_runtime_source_ref).value;
+ const session=db.prepare('SELECT service_boot_id,controller_boot_id,worker_boot_id FROM execution_session WHERE ipc_session_id=?').raw().get(binding.ipc_session_id);
+ const domain={clock_domain_id:binding.clock_domain_id,descriptor_digest:binding.descriptor_digest},now=coreSource.domain();
+ require(binding.device_id===device&&same(binding.scope,c.scope)&&session&&session[0]===runtime.service_boot_id&&
+  session[1]===binding.controller_boot_id&&session[2]===binding.worker_boot_id&&runtime.core.receipt.member_boot_id===binding.controller_boot_id&&
+  same(runtime.domain_ref,domain)&&same(selected.domain_ref,domain)&&same(now.ref,domain),'runtime');
+ const {selected_tick_ns,expires_tick_ns}=selected;
+ require(BigInt(selected_tick_ns)<=BigInt(now.tick)&&BigInt(now.tick)<BigInt(expires_tick_ns),'expired');
+ selectEvaluator(db,service,c,selected);
+ let controlStateRef=control.current.ref;
+ if(control.current.value.gate_state==='ready'){
+  const id=db.prepare('SELECT ready_id FROM device_initial_ready WHERE control_source_id=?').pluck().get(control.current.ref.id);
+  require(id,'control');const {value}=readInitialReady(db,id);
+  require(same(value.control_after_ref,control.current.ref)&&same(value.binding,binding),'control');
+  controlStateRef=value.control_before_ref;
+ }
+ return {context:c,context_digest:digest(c),binding,state_ref:state.ref,control_state_ref:controlStateRef,
+  source_refs:{holder:null,evaluator:e.ref,evaluator_runtime:selected.core_runtime_source_ref},
+  windows:[{role:'evaluator',evidence_ref:e.ref,not_before_tick_ns:selected_tick_ns,before_tick_ns:expires_tick_ns}],
+  selected_tick_ns:now.tick,expires_tick_ns,authorization_dependencies:[selected.authorization_dependencies]};
 }
 function decode(text,digest,field){const value=JSON.parse(text);need(canonicalize(value)===text&&same(seal(value,field),value)&&value[field]===digest,'authorization_state_integrity');return value;}
 function original(db,id){

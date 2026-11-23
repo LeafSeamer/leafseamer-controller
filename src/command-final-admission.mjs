@@ -4,7 +4,8 @@ import crypto from 'node:crypto';
 import {withExecutionReadView,memoExecutionRead} from './execution-read-view.mjs';
 import {canonical,digest,same} from './auth-clock-value.mjs';
 import {DeviceExecutionError} from './device-execution-channel.mjs';
-import {selectCommandFinalization,readCommandEncoding} from './command-encoding-store.mjs';
+import {selectCommandFinalization,readCommandEncoding,readCommandPrincipalAuthorization} from './command-encoding-store.mjs';
+import {commandIssueHead} from './command-issue-order.mjs';
 import {readInitialReady} from './device-initial-ready.mjs';
 import {preparedCommandProjection,readCommandRecord} from './command-record-store.mjs';
 import {deviceExecutionVersion,assertDeviceExecutionFeatures} from './sdk/device-execution.mjs';
@@ -14,19 +15,14 @@ const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError('command_final_'+co
 const ref=(id,v)=>({id,revision:'1',digest:digest(v)});
 const signed=(v,key)=>({...v,[key]:digest(v)});
 const named=(v,id,key,revision='1')=>({id:v[id],revision,digest:v[key]});
-const parse=cacheVerifiedDocument((text,hash)=>{const v=JSON.parse(text);need(canonical(v)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===hash,'integrity');return v;});
+const parse=cacheVerifiedDocument((text,hash)=>{const v=JSON.parse(text);need(canonical(v)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===hash,'integrity');return v;},{immutable:true});
 const counter=v=>String(v).padStart(20,'0');
 const limits={format:'fixed-memory-transmission-budget/1',profile_id:'leafseamer.simulator.transmission.limits.1',max_transmissions:4096,max_bytes:32768,per_transmission:{attempts:1,transmissions:1,bytes:8}};
 const row=sqliteRow;
-function principal(db,encoding){
- const saved=row(db,'SELECT authorization_body,authorization_digest FROM access_token WHERE token_id=?',encoding.value.identity_snapshot.identity.token_id);
- need(saved,'authorization');const value=JSON.parse(saved.authorization_body.toString()),{digest:hash,...body}=value;
- need(canonical(value)===saved.authorization_body.toString()&&digest(body)===hash&&saved.authorization_digest===hash&&
-  hash===encoding.value.identity_snapshot.identity.authorization_digest,'authorization');
- return value;
-}
-function materialize({initial,encoding,ready,grant,ids,issue,previous,before,selected,sealed}){
+function materialize({initial,encoding,ready,principalAuthorization,ids,issue,previous,before,selected,sealed}){
  const source=initial.source,command=source.command_id,b=source.binding,opening=ready.dispatch.plan,access=opening.access,packet=encoding.response.reply.frame.body.packet;
+ const {binding:authorizationBinding}=principalAuthorization,{origin,grant_revision,arm_generation}=authorizationBinding;
+ const automation=source.metadata.automation_binding,contentDigest=encoding.value.authorization.content_digest;
  const expires=encoding.value.authorization.expires_tick_ns,window={not_before_tick_ns:selected,before_tick_ns:expires};
  need(BigInt(encoding.response.value.evidence.received_tick_ns)<=BigInt(selected)&&encoding.response.reply.committedTick<=BigInt(selected)&&
   BigInt(selected)<=BigInt(sealed)&&BigInt(sealed)<BigInt(expires),'deadline');
@@ -36,7 +32,7 @@ function materialize({initial,encoding,ready,grant,ids,issue,previous,before,sel
  const packetRef={packet_id:packet.packet_id,packet_digest:packet.packet_digest},packetRecordRef={id:packet.packet_id,revision:'1',digest:packet.packet_digest};
  const attempt={attempt_id:packet.attempt_id,command_id:command,ordinal:1,prepared_state_ref:stateRef,exit_ids:[exit.exit_id],packet_refs:[packetRef],encoding_ref:encoding.ref};
  const identity={kind:'ordinary',command_ref:{id:command,revision:'1',digest:source.initial_ref.digest},attempt_ref:ref(packet.attempt_id,attempt),
-  cancellation_ref:null,execution_ref:null,requester:{kind:'human',issuer_id:grant.issuer_id,issuer_epoch:grant.issuer_epoch,principal_id:grant.principal_id},origin:'manual',source_ref:source.admission_ref};
+  cancellation_ref:null,execution_ref:null,requester:encoding.value.authorization.requester,origin,source_ref:source.admission_ref};
  const hold={format:'command-risk-hold/1',hold_id:ids.hold,command_id:command,attempt_id:packet.attempt_id,binding:b,conflict_scope:'whole_device',created_tick_ns:selected,admission_ref:source.admission_ref},holdRef=ref(ids.hold,hold);
  const ownerFields={scope:b.scope,device_id:b.device_id,
   hold_ref:holdRef,identity,control_authority_ref:access.control_authority_ref,control_epoch:access.control_epoch,effective_version:access.effective_version,
@@ -47,22 +43,20 @@ function materialize({initial,encoding,ready,grant,ids,issue,previous,before,sel
  const ownership=signed({format_version:'hold-ownership/0.1.0-draft.1',ownership_id:ids.ownership,revision:'1',...ownerFields,
   source_receipt_ref:ref(ownerReceipt.receipt_id,ownerReceipt)},'ownership_digest');
  const ownershipRef=named(ownership,'ownership_id','ownership_digest'),accessRef=named(access,'access_id','access_digest',access.revision);
- const authorizationBinding={issuer_id:grant.issuer_id,issuer_epoch:grant.issuer_epoch,audience:grant.audience,principal_kind:'human',principal_id:grant.principal_id,origin:'manual',
-  session_id:grant.session_id,credential_id:grant.credential_id,subject_revision:grant.subject_revision,session_revision:grant.session_revision,policy_revision:grant.policy_revision,
-  scope_digest:grant.scope_digest,grant_id:null,grant_revision:null,arm_generation:null,extension_instance_id:null,extension_approval_revision:null};
  const guard=signed({guard_id:ids.guard,permit_id:ids.permit,command_id:command,device_id:b.device_id,controller_boot_id:b.controller_boot_id,worker_boot_id:b.worker_boot_id,
   ipc_session_id:b.ipc_session_id,binding:authorizationBinding,authorization_revision:access.authorization_ref.revision,authorization_deadline_tick_ns:expires,
   clock_domain_id:b.clock_domain_id,time_required:false,capacity_reservation_id:ids.budget,descriptor_digest:b.descriptor_digest,
-  admission_origin:'non_panel',panel_binding:null,automation_binding:null,reference_time:null,gate_access_ref:accessRef,ownership_ref:ownershipRef},'guard_digest');
+  admission_origin:'non_panel',panel_binding:null,automation_binding:automation,reference_time:null,gate_access_ref:accessRef,ownership_ref:ownershipRef},'guard_digest');
  const guardRef=named(guard,'guard_id','guard_digest'),wireWindow={clock_domain_id:b.clock_domain_id,descriptor_digest:b.descriptor_digest,earliest_tick_ns:selected,latest_tick_ns:expires};
  const intent={permit_id:ids.permit,command_id:command,attempt_id:packet.attempt_id,dispatch_intent_id:ids.intent,worker_boot_id:b.worker_boot_id,device_session_id:b.device_session_id,
   guard_id:ids.guard,guard_digest:guard.guard_digest,clock_domain_id:b.clock_domain_id,descriptor_digest:b.descriptor_digest,controller_boot_id:b.controller_boot_id,
-  ipc_session_id:b.ipc_session_id,device_id:b.device_id,admission_origin:'non_panel',panel_binding_digest:null,origin:'manual',automation_binding:null,automation_binding_digest:null};
+  ipc_session_id:b.ipc_session_id,device_id:b.device_id,admission_origin:'non_panel',panel_binding_digest:null,origin,
+  automation_binding:automation,automation_binding_digest:automation?digest(automation):null};
  const permit={permit_id:ids.permit,command_id:command,attempt_id:packet.attempt_id,dispatch_intent_id:ids.intent,controller_boot_id:b.controller_boot_id,worker_boot_id:b.worker_boot_id,
   device_session_id:b.device_session_id,control_epoch:access.control_epoch,control_version:access.effective_version,authorization_revision:access.authorization_ref.revision,
-  origin:'manual',grant_revision:null,arm_generation:null,gate_revision:ready.value.gate_after.gate_revision,deadline_policy:source.metadata.dispatch,
-  content_digest:source.metadata.request_identity.request_digest,guard_id:ids.guard,guard_digest:guard.guard_digest,clock_domain_id:b.clock_domain_id,descriptor_digest:b.descriptor_digest,
-  admission_origin:'non_panel',panel_binding_digest:null,automation_binding:null,
+  origin,grant_revision,arm_generation,gate_revision:ready.value.gate_after.gate_revision,deadline_policy:source.metadata.dispatch,
+  content_digest:contentDigest,guard_id:ids.guard,guard_digest:guard.guard_digest,clock_domain_id:b.clock_domain_id,descriptor_digest:b.descriptor_digest,
+  admission_origin:'non_panel',panel_binding_digest:null,automation_binding:automation,
   transmission:{transmission_id:ids.transmission,packet_ref:packetRef,primitive_id:packet.primitive_id,intent,ordinal:'0',kind:'initial',cause:'dispatch',trigger_observation_ref:null,
    parent_dispatch_intent_id:ids.intent,initial_permit_id:ids.permit,issued_revision:issue,send_window:wireWindow},budget_revision:issue,gate_access_ref:accessRef,ownership_ref:ownershipRef};
  const authority=signed({format_version:'permit-authority/0.1.0-draft.1',permit_id:ids.permit,issued_revision:issue,identity,binding:b,hold_ref:holdRef,ownership_ref:ownershipRef,
@@ -86,7 +80,8 @@ function materialize({initial,encoding,ready,grant,ids,issue,previous,before,sel
  const fields={origin:{command_state_ref:initial.record.state_ref},capability:{encoding_source_ref:sources.encoding},
   encoding:{packet_record_ref:packetRecordRef,packet_ref:packetRef,received_tick_ns:encoding.response.value.evidence.received_tick_ns,expires_tick_ns:expires},
   authorization:{not_before_tick_ns:encoding.value.authorization.created_tick_ns,before_tick_ns:expires},
-  control:{pending_operation_id:null,control_epoch:access.control_epoch,effective_version:access.effective_version,mode:'manual',holder:identity.requester},
+  control:{pending_operation_id:null,control_epoch:access.control_epoch,effective_version:access.effective_version,
+   mode:automation?'automatic':'manual',holder:automation?null:identity.requester},
   gate_commit:{access_ref:accessRef},gate_access:{purpose:'ordinary',restricted_identity:null,control_authority_ref:access.control_authority_ref,control_epoch:access.control_epoch,
    effective_version:access.effective_version,authorization_ref:access.authorization_ref,resource_safety_ref:access.resource_safety_ref,gate_safety_ref:access.gate_safety_ref,
    not_before_tick_ns:access.selected_tick_ns,before_tick_ns:access.expires_tick_ns},
@@ -107,7 +102,7 @@ function materialize({initial,encoding,ready,grant,ids,issue,previous,before,sel
  const inventory={format:'command-attempt-inventory/1',command_id:command,revision:'2',state_ref:stateRef,attempt,exit,packet_ref:packetRef,
   encoding_ref:encoding.ref,encoding_response_ref:encoding.response.ref,permit_ref:ref(ids.permit,permit),reports:[],evidence:[]};
  return {format:'command-final-admission/1',transaction_id:ids.transaction,command_id:command,prepare_id:encoding.value.prepare_id,commit_id:ids.commit,ids,
-  encoding_ref:encoding.ref,encoding_response_ref:encoding.response.ref,principal_authorization_ref:named(grant,'id','digest',grant.revision),
+  encoding_ref:encoding.ref,encoding_response_ref:encoding.response.ref,principal_authorization_ref:principalAuthorization.ref,
   hold,ownership_receipt:ownerReceipt,ownership,attempt,inventory,resource_after:after,transmission_charge:charge,guard,permit,permit_authority:authority,time,projections,seal};
 }
 function validatePayloads(value,encoding,ready,features){
@@ -127,26 +122,31 @@ function validatePayloads(value,encoding,ready,features){
 }
 export function commitCommandFinalAdmission(db,options){return withExecutionReadView(db,()=>commitFinalAdmission(db,options));}
 function commitFinalAdmission(db,{id,provider,tick,features}){
- need(db.inTransaction&&Number(db.pragma('user_version',{simple:true}))>=52,'writer');
+ const schema=Number(db.pragma('user_version',{simple:true}));
+ need(db.inTransaction&&schema>=52,'writer');
  const old=db.prepare('SELECT command_id FROM command_final_admission WHERE prepare_id=?').pluck().get(id);
  if(old)return {saved:readCommandRecord(db,old),replay:true};
  const current=selectCommandFinalization(db,{id,provider,tick}),initial=current.actual.command,encoding=current.encoding;
  need(!db.prepare(`SELECT 1 FROM command_device_hold h WHERE device_id=?
   ${Number(db.pragma('user_version',{simple:true}))>=57?'AND NOT EXISTS(SELECT 1 FROM command_hold_release r WHERE r.hold_id=h.hold_id)':''}`).pluck().get(initial.source.binding.device_id),'resource_busy');
- const before=db.prepare('SELECT count(*) FROM command_transmission_issue').pluck().get(),previous=String(BigInt(db.prepare('SELECT max(issued_revision) FROM command_transmission_issue').pluck().get()??'0'));
+ const before=db.prepare('SELECT count(*) FROM command_transmission_issue').pluck().get(),previous=commandIssueHead(db);
  need(before<limits.max_transmissions,'budget');
  const ids=Object.fromEntries(['transaction','commit','hold','ownership','guard','budget','intent','permit','transmission','resource','time','seal'].map(k=>[k,crypto.randomUUID()]));
- const input={initial,encoding,ready:current.ready,grant:current.principal_authorization.value,ids,issue:String(BigInt(previous)+1n),previous,before,selected:current.selected_tick_ns};
+ const input={initial,encoding,ready:current.ready,principalAuthorization:current.principal_authorization,ids,
+  issue:String(BigInt(previous)+1n),previous,before,selected:current.selected_tick_ns};
  let value=materialize({...input,sealed:String(tick())});
  validatePayloads(value,encoding,current.ready,features);
  const projection=preparedCommandProjection(initial,value.inventory),write=result=>need(result.changes===1,'storage');
  // 当前资格在生成完整正文后重核，随后只进行本T2的同步写入，不跨IPC等待。
- const last=selectCommandFinalization(db,{id,provider,tick});need(same(last.encoding.ref,encoding.ref)&&same(last.actual.command.record.state_ref,initial.record.state_ref),'changed');
+ const last=selectCommandFinalization(db,{id,provider,tick});need(same(last.encoding.ref,encoding.ref)&&same(last.actual.command.record.state_ref,initial.record.state_ref)&&
+  same(last.principal_authorization,current.principal_authorization),'changed');
  value=materialize({...input,sealed:String(tick())});
  write(db.prepare('INSERT INTO command_final_admission VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(ids.transaction,value.command_id,id,initial.source.binding_ref.id,ids.permit,ids.hold,value.attempt.attempt_id,ids.seal,ids.intent,canonical(value),digest(value),ids.commit));
  write(db.prepare('INSERT INTO command_device_hold VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(ids.hold,ids.transaction,value.command_id,initial.source.binding.device_id,ids.ownership,
   value.ownership_receipt.receipt_id,canonical(value.ownership_receipt),digest(value.ownership_receipt),canonical(value.hold),digest(value.hold),canonical(value.ownership),value.ownership.ownership_digest));
  write(db.prepare('INSERT INTO command_transmission_issue VALUES(?,?,?,?,8,?,?)').run(ids.permit,ids.transaction,counter(value.seal.issued_revision),counter(previous),canonical(value.transmission_charge),digest(value.transmission_charge)));
+ if(schema>=92)need(db.prepare("SELECT 1 FROM command_issue_order WHERE issued_revision=? AND permit_id=? AND kind='ordinary'")
+  .pluck().get(counter(value.seal.issued_revision),ids.permit)===1,'storage');
  write(db.prepare('INSERT INTO command_attempt_inventory VALUES(?,2,?,?,?,?)').run(value.command_id,ids.transaction,value.attempt.attempt_id,canonical(value.inventory),digest(value.inventory)));
  const commit={format:'command-final-admission-commit/1',commit_id:ids.commit,command_id:value.command_id,revision:'2',transaction_ref:ref(ids.transaction,value),
   previous_state_ref:initial.record.state_ref,record_digest:projection.record.record_digest,state_digest:digest(projection.state)};
@@ -163,11 +163,16 @@ export function readCommandFinalAdmission(db,initial,reference){return memoExecu
 function readFinalAdmission(db,initial,reference){
  need(db.inTransaction,'writer');const r=row(db,'SELECT * FROM command_final_admission WHERE command_id=?',initial.source.command_id);need(r,'missing');
  const value=parse(r.body_jcs,r.body_digest);need(same({id:r.transaction_id,revision:'1',digest:r.body_digest},reference),'reference');
- const encoding=readCommandEncoding(db,r.prepare_id),ready=readInitialReady(db,initial.source.ready_ref.id),grant=principal(db,encoding);
- const issue=row(db,'SELECT * FROM command_transmission_issue WHERE transaction_id=?',r.transaction_id),hold=row(db,'SELECT * FROM command_device_hold WHERE transaction_id=?',r.transaction_id),
+ const encoding=readCommandEncoding(db,r.prepare_id),ready=readInitialReady(db,initial.source.ready_ref.id),
+  principalAuthorization=readCommandPrincipalAuthorization(db,initial.source);
+ const issue=Number(db.pragma('user_version',{simple:true}))>=92
+  ? row(db,`SELECT i.* FROM command_transmission_issue i JOIN command_issue_order o USING(issued_revision,previous_revision,permit_id)
+      WHERE i.transaction_id=? AND o.kind='ordinary'`,r.transaction_id)
+  : row(db,'SELECT * FROM command_transmission_issue WHERE transaction_id=?',r.transaction_id);
+ const hold=row(db,'SELECT * FROM command_device_hold WHERE transaction_id=?',r.transaction_id),
   inventory=row(db,'SELECT * FROM command_attempt_inventory WHERE transaction_id=?',r.transaction_id);need(issue&&hold&&inventory,'write_set');
- const before=db.prepare('SELECT count(*) FROM command_transmission_issue WHERE issued_revision<?').pluck().get(issue.issued_revision),previous=db.prepare('SELECT max(issued_revision) FROM command_transmission_issue WHERE issued_revision<?').pluck().get(issue.issued_revision)??'0';
- const expected=materialize({initial,encoding,ready,grant,ids:value.ids,issue:String(BigInt(issue.issued_revision)),previous:String(BigInt(previous)),before,
+ const before=db.prepare('SELECT count(*) FROM command_transmission_issue WHERE issued_revision<?').pluck().get(issue.issued_revision),previous=commandIssueHead(db,issue.issued_revision);
+ const expected=materialize({initial,encoding,ready,principalAuthorization,ids:value.ids,issue:String(BigInt(issue.issued_revision)),previous,before,
   selected:value.seal.selected_tick_ns,sealed:value.seal.sealed_tick_ns});
  need(r.body_jcs===canonical(expected)&&r.transaction_id===value.ids.transaction&&r.commit_id===value.ids.commit&&r.command_id===value.command_id&&r.permit_id===value.ids.permit&&
   r.hold_id===value.ids.hold&&r.attempt_id===value.attempt.attempt_id&&r.seal_id===value.ids.seal&&r.dispatch_intent_id===value.ids.intent&&r.binding_id===initial.source.binding_ref.id,'binding');
@@ -208,7 +213,7 @@ export function observeCommandFinalAdmission(db,{commandId,binding,tick,readOnly
 
 // T2之后的当前资格与封存历史分离。只能采用原占用、原许可和原窗口，不续期、不重新签发。
 export function currentPreparedCommand(db,{id,binding,provider,tick}){
- need(db.inTransaction&&[52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70].includes(Number(db.pragma('user_version',{simple:true}))),'prepared_writer');
+ need(db.inTransaction&&[52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97].includes(Number(db.pragma('user_version',{simple:true}))),'prepared_writer');
  return withExecutionReadView(db,()=>{
   const saved=readCommandRecord(db,id),final=saved.lifecycle?.final_admission;need(final,'prepared_source');
   const v=final.value,b=v.seal.binding;

@@ -23,3 +23,31 @@ test('JSON键无法区分的参数不共享校验结果',()=>{
  assert.equal(read('x',undefined).parameter,'default');assert.equal(read('x',null).parameter,null);
  assert.equal(read('x',undefined).parameter,'default');assert.equal(calls,3);
 });
+
+test('原文和校验参数中的换行及引号不能合并缓存条目',()=>{
+ let calls=0;
+ const read=cacheVerifiedDocument((text,...parameters)=>({text,parameters,call:++calls}));
+ const first=read('正文\n["依据"]','前缀');
+ const second=read('正文','前缀\n["依据"]');
+ assert.equal(first.call,1);
+ assert.equal(second.call,2);
+ assert.deepEqual(read(first.text,...first.parameters),first);
+ assert.deepEqual(read(second.text,...second.parameters),second);
+});
+
+test('只读原件深层冻结，原文或校验参数变化必须重新校验',()=>{
+ let calls=0;
+ const read=cacheVerifiedDocument((text,digest)=>{
+  calls++;
+  assert.equal(digest,'valid');
+  return JSON.parse(text);
+ },{immutable:true});
+ const text='{"content":{"files":[{"id":"one"}]}}';
+ const loaded=read(text,'valid');
+ assert.throws(()=>{loaded.content.files[0].id='changed';},TypeError);
+ assert.equal(read(text,'valid'),loaded);
+ assert.equal(calls,1);
+ assert.throws(()=>read(text,'changed'));
+ assert.equal(read(text.replace('one','two'),'valid').content.files[0].id,'two');
+ assert.equal(calls,3);
+});

@@ -34,11 +34,13 @@ function prepareProcessHost() {
 // 显式本机开发安装，不覆盖已有日志；不产生生产宿主或运行域批准。
 export async function initializeProcessHost(dataDir) { return configureJournal(dataDir, false); }
 export async function upgradeProcessHost(dataDir) { return configureJournal(dataDir, true); }
-async function configureJournal(dataDir, upgrade) {
+export async function upgradeTimeProviderJournal(dataDir) { return configureJournal(dataDir, true, true); }
+async function configureJournal(dataDir, upgrade, timeProvider = false) {
   const {executable, env} = prepareProcessHost();
   check(typeof dataDir === 'string' && path.isAbsolute(dataDir), 'process_host_options');
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, [upgrade ? '--upgrade' : '--initialize', dataDir], {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env});
+    const mode = timeProvider ? '--upgrade-time-provider' : upgrade ? '--upgrade' : '--initialize';
+    const child = spawn(executable, [mode, dataDir], {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env});
     let output = '', failed = null;
     const timer = setTimeout(() => { failed = 'process_host_startup_timeout'; child.kill(); }, 10000);
     child.stdin.on('error', () => {}); child.stdin.end(); child.stderr.resume();
@@ -51,7 +53,8 @@ async function configureJournal(dataDir, upgrade) {
         const frame = JSON.parse(output);
         if (code !== 0) throw new ProcessHostError(typeof frame.code === 'string' && /^[a-z_]{1,64}$/.test(frame.code) ? frame.code : 'process_host_failed');
         check(frame.event === (upgrade ? 'process_journal_upgraded' : 'process_journal_initialized') && frame.runtime_admitted === false &&
-          (!upgrade || (frame.schema_revision === '5' && typeof frame.changed === 'boolean')), 'process_host_protocol'); resolve(Object.freeze(frame));
+          (!upgrade || ((timeProvider ? frame.schema_revision === '6' : ['5','6'].includes(frame.schema_revision)) &&
+            typeof frame.changed === 'boolean')), 'process_host_protocol'); resolve(Object.freeze(frame));
       } catch (error) { reject(error instanceof ProcessHostError ? error : new ProcessHostError('process_host_protocol')); }
     });
   });
@@ -64,8 +67,16 @@ export function installedCoreDigest() {
     node_sha256: hash(fs.readFileSync(path.join(root, 'runtime/node.exe')))}));
 }
 
+export function installedTimeProviderDigest() {
+  const {root} = prepareProcessHost();
+  const build = JSON.parse(fs.readFileSync(path.join(root, 'build-manifest.json')));
+  const digest = build.artifacts['runtime/reference-time-provider.exe'];
+  check(typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest), 'time_provider_artifact');
+  return 'sha256:' + digest;
+}
+
 // bootstrapPolicy仅由可信本机装配选择；状态帧不替代持久化AdmissionReceipt或生产profile批准。
-export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, onCoreOutput = () => {}, bootstrapPolicy = null,installationPeer=null} = {}) {
+export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, onCoreOutput = () => {}, bootstrapPolicy = null,installationPeer=null,timeProviderPolicy=null,pairingProfile=null} = {}) {
   const {root, executable, env} = prepareProcessHost();
   const policy = bootstrapPolicy === null ? null : validateBootstrapPolicy(bootstrapPolicy);
   if (policy) check(policy.artifact_manifest_ref.digest === installedCoreDigest(), 'bootstrap_artifact');
@@ -74,6 +85,20 @@ export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, o
   const args = [dataDir, fs.realpathSync(process.execPath), path.join(root, 'cli.mjs'), policy ? 'contained-core-auth' : 'contained-core',
     '--host', host, '--port', String(port)];
   if (policy) args.push('--bootstrap-policy', canonicalize(policy));
+  if (pairingProfile !== null) {
+    check(policy && typeof pairingProfile === 'string' && path.isAbsolute(pairingProfile), 'pairing_profile_path');
+    args.push('--pairing-profile', pairingProfile);
+  }
+  if (timeProviderPolicy !== null) {
+    const format = 'leafseamer-time-provider-bootstrap-policy/1';
+    check(policy && timeProviderPolicy?.format === format, 'time_provider_policy');
+    const checked = validateBootstrapPolicy({...timeProviderPolicy, format: policy.format});
+    check(checked.service_id === policy.service_id && checked.database_instance_id === policy.database_instance_id &&
+      checked.clock_backend_revision === policy.clock_backend_revision &&
+      canonicalize(checked.platform_profile_ref) === canonicalize(policy.platform_profile_ref), 'time_provider_scope');
+    check(checked.artifact_manifest_ref.digest === installedTimeProviderDigest(), 'time_provider_artifact');
+    args.push('--time-provider-policy', canonicalize({...checked, format}));
+  }
   if(installationPeer!==null){check(policy&&typeof installationPeer==='object','process_host_options');const config=canonicalize(installationPeer);
     check(Buffer.byteLength(config)<=8192,'process_host_options');args.push('--installation-peer',config);}
   const child = spawn(executable, args, {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env});
@@ -99,10 +124,15 @@ export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, o
         if (!first) {
           check(frame.event === 'process_contained' && /^[0-9a-f]{32}$/.test(frame.containment_id) && frame.supervisor_pid === child.pid &&
             Number.isInteger(frame.core_pid) && frame.core_pid > 0 && frame.bootstrap_authenticated === Boolean(policy), 'process_host_protocol');
+          check(timeProviderPolicy === null ? frame.time_provider_pid === undefined :
+            Number.isInteger(frame.time_provider_pid) && frame.time_provider_pid > 0 && frame.time_provider_pid !== frame.core_pid,
+          'process_host_protocol');
           first = Object.freeze(frame); clearTimeout(startupTimer); startedResolve(first);
         } else {
           check(!last && frame.event === 'process_group_empty' && frame.containment_id === first.containment_id && frame.active_processes === 0 &&
             Number.isInteger(frame.core_exit_code) && typeof frame.stop_requested === 'boolean' && typeof frame.forced === 'boolean' && typeof frame.control_failed === 'boolean', 'process_host_protocol');
+          check(timeProviderPolicy === null ? frame.time_provider_exit_code === undefined :
+            Number.isInteger(frame.time_provider_exit_code) && frame.time_provider_exit_code >= 0, 'process_host_protocol');
           last = Object.freeze(frame);
         }
       } catch (error) { fail(error instanceof ProcessHostError ? error.code : 'process_host_protocol'); }

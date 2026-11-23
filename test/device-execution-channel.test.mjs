@@ -79,3 +79,17 @@ test('执行载荷有独立帧预算，不接受空正文或只读模块帧',asy
  assert.throws(()=>executionWire(Buffer.alloc(0)),/execution_frame_size/);
  await assert.rejects(decodeExecutionPayload(Buffer.from('{"type":"CAPTURE","version":"device-module/2"}'),'c2w'));
 });
+test('重复原字节复用不可变语法结果，变字节、错方向和重复键仍验证',async()=>{
+ const raw=payload(91),first=await decodeExecutionPayload(raw,'c2w');
+ assert.ok(Object.isFrozen(first.frame.body));
+ first.payload.fill(0);
+ const copy=await decodeExecutionPayload(Buffer.from(raw),'c2w');
+ assert.strictEqual(copy.frame,first.frame);
+ assert.deepEqual(copy.payload,raw);
+ await assert.rejects(decodeExecutionPayload(raw,'w2c'));
+ const duplicate=Buffer.from('{"seq":"91",'+raw.toString().slice(1));
+ await assert.rejects(decodeExecutionPayload(duplicate,'c2w'));
+ const next=await decodeExecutionPayload(payload(92),'c2w');
+ assert.equal(next.frame.seq,'92');
+ assert.notStrictEqual((await decodeExecutionPayload(raw,'c2w')).frame,first.frame);
+});

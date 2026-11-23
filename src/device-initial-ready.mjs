@@ -19,7 +19,8 @@ function source(db,reference,device){const value=readControlSource(db,device,ref
 function transition(before,after){
  const expected=controlSourceBody({...before,revision:String(BigInt(before.revision)+1n),pending_change:null,gate_state:'ready'},after.change_id,'ready',
   {ref:{clock_domain_id:before.clock_domain_id,descriptor_digest:before.descriptor_digest},tick:after.observed_tick_ns});
- need(before.gate_state==='protected'&&before.pending_operation_id===null&&before.mode==='manual'&&before.holder&&
+ need(before.gate_state==='protected'&&before.pending_operation_id===null&&
+  (before.mode==='manual'&&before.holder||before.mode==='automatic'&&before.holder===null)&&
   BigInt(after.observed_tick_ns)>=BigInt(before.observed_tick_ns)&&same(after,expected),'control_transition');
 }
 function body(id,dispatch,before,after,gateId,tick){

@@ -10,20 +10,27 @@ import canonicalize from 'canonicalize';
 import {openNativeClock} from './native-clock.mjs';
 import {BootstrapError, validateBootstrapPolicy, createCoreBootstrapChannel, verifyCoreAssignment, verifyCoreAdmission} from './core-bootstrap.mjs';
 import {connectCoreSupervisor, SupervisorError} from './supervisor-control.mjs';
+import {openTrustedPairingClock, readTrustedPairingProfile} from './trusted-pairing-profile.mjs';
+import {LocalPairingError, runLocalPairingAdmin} from './local-pairing-admin.mjs';
 const authenticatedCore = process.argv[2] === 'contained-core-auth';
 const emit = value => (authenticatedCore ? process.stderr : process.stdout).write(JSON.stringify(value) + '\n');
+const pairingStartupError = code => /^pairing_(profile|clock)_[a-z_]+$/.test(code);
 let app;
 try {
   const [command, ...args] = process.argv.slice(2);
-  const allowed = ['init-storage', 'init-process-host', 'upgrade-process-host', 'migrate-storage', 'enroll-admin', 'identity-status', 'register-device'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel'] : [])] : [];
+  const allowed = command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile'] : [])] : [];
   if (!allowed.length || args.length % 2) throw new Error('arguments');
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
     if (!allowed.includes(args[i]) || Object.hasOwn(options, args[i])) throw new Error('arguments');
     options[args[i]] = args[i + 1];
   }
-  if (!options['--data-dir'] || !path.isAbsolute(options['--data-dir'])) throw new Error('arguments');
-  if (command === 'upgrade-process-host') {
+  if (command !== 'pairing-admin' && (!options['--data-dir'] || !path.isAbsolute(options['--data-dir']))) throw new Error('arguments');
+  if (command === 'pairing-admin') {
+    requirePrivatePipes();
+    const bytes = await runLocalPairingAdmin({origin: options['--origin'], caFile: options['--ca-file'], input: await readEnrollmentInput()});
+    process.stdout.write(bytes);
+  } else if (command === 'upgrade-process-host') {
     emit(await upgradeProcessHost(options['--data-dir']));
   } else if (command === 'init-process-host') {
     emit(await initializeProcessHost(options['--data-dir']));
@@ -31,7 +38,9 @@ try {
     const identity = initializeStorage(options['--data-dir']);
     emit({event: 'storage_initialized', ...identity, ready: false});
   } else if (command === 'migrate-storage') {
-    emit({event: 'storage_migrated', ...await migrateStorage(options['--data-dir']), ready: false});
+    const target = options['--to-revision'];
+    if (target !== undefined && !/^[1-9][0-9]?$/.test(target)) throw new Error('arguments');
+    emit({event: 'storage_migrated', ...await migrateStorage(options['--data-dir'], target === undefined ? undefined : Number(target)), ready: false});
   } else if (command === 'register-device') {
     requireLocalAdministrator(); requirePrivatePipes();
     const storage = openStorage(options['--data-dir']);
@@ -55,8 +64,11 @@ try {
     const rawPort = options['--port'] ?? '0';
     if (!/^(0|[1-9][0-9]{0,4})$/.test(rawPort)) throw new Error('arguments');
     const launch = {dataDir: options['--data-dir'], host: options['--host'] ?? '127.0.0.1', port: Number(rawPort)};
+    const profilePath = options['--pairing-profile'];
+    const profile = profilePath === undefined ? null : readTrustedPairingProfile(profilePath, launch.host, launch.port);
     if (command === 'supervise') {
-      app = await startProcessHost({...launch, onCoreOutput: chunk => process.stderr.write(chunk)});
+      app = await startProcessHost({...launch, onCoreOutput: chunk => process.stderr.write(chunk),
+        ...(profile && {bootstrapPolicy: profile.policy, pairingProfile: profilePath})});
       emit(app.containment);
       const stop = () => { app.close().catch(() => {}); };
       process.once('SIGINT', stop); process.once('SIGTERM', stop);
@@ -71,6 +83,27 @@ try {
       if (typeof rawPolicy !== 'string' || Buffer.byteLength(rawPolicy) > 8192) throw new BootstrapError('bootstrap_policy');
       const policy = validateBootstrapPolicy(JSON.parse(rawPolicy));
       if (canonicalize(policy) !== rawPolicy || policy.artifact_manifest_ref.digest !== installedCoreDigest()) throw new BootstrapError('bootstrap_artifact');
+      if (profile && canonicalize(profile.policy) !== rawPolicy) throw new BootstrapError('pairing_profile_bootstrap');
+      let admittedCore;
+      if (profile) {
+        launch.tls = profile.tls;
+        launch.pairing = profile.pairing;
+        launch.localPairingManagement = true;
+        if (profile.gui) {
+          launch.guiDirectory = profile.gui.directory;
+          launch.guiManifestSha256 = profile.gui.manifest_sha256;
+        }
+        launch.authenticationProvider = async input => {
+          try { return await openTrustedPairingClock(profile, input, admittedCore.binding, admittedCore.supervision, emit); }
+          catch (error) {
+            const reason = error.code ?? error.message;
+            // 核心关闭控制通道前交付诊断，此后由宿主确认退役。
+            await new Promise(resolve => process.stderr.write(JSON.stringify({event: 'authentication_clock_rejected',
+              reason: pairingStartupError(reason) ? reason : 'pairing_clock_evidence_invalid'}) + '\n', resolve));
+            throw error;
+          }
+        };
+      }
       channel = createCoreBootstrapChannel(process.stdin, process.stdout, {timeoutMs: policy.bootstrap_timeout_ms});
       launch.coreBootstrap = async identity => {
         const source = openNativeClock();
@@ -86,8 +119,10 @@ try {
         const binding = await verifyCoreAdmission(assignment, receipt, policy);
         current(); assignment = null;
         channel.release();
-        const supervision = await connectCoreSupervisor({pipe: options['--supervisor-pipe'], channelId: options['--supervisor-channel'], binding, policy});
-        return {binding, policy, supervision};
+        const supervision = await connectCoreSupervisor({pipe: options['--supervisor-pipe'], channelId: options['--supervisor-channel'],
+          binding, policy, timeProviderIntent: options['--time-provider-intent'] ?? null});
+        admittedCore = {binding, policy, supervision};
+        return admittedCore;
       };
     }
     try { app = await startController(launch); }
@@ -111,11 +146,15 @@ try {
       process.stdin.resume();
     }
     emit({event: 'listening', host: app.address.address, port: app.address.port, service_id: app.identity.service_id,
-      database_instance_id: app.identity.database_instance_id, service_boot_id: app.serviceBootId, ready: false});
+      database_instance_id: app.identity.database_instance_id, service_boot_id: app.serviceBootId,
+      ...(profile && {pairing_origin: app.pairing.transport.origin}), ready: false});
     }
   }
 } catch (error) {
   if (app) await app.close().catch(() => {});
-  process.stderr.write(JSON.stringify({error: error instanceof StorageError || error instanceof IdentityError || error instanceof ProcessHostError || error instanceof BootstrapError || error instanceof SupervisorError ? error.code : 'startup_failed'}) + '\n');
+  const code = error.code ?? error.message;
+  const known = error instanceof StorageError || error instanceof IdentityError || error instanceof ProcessHostError ||
+    error instanceof BootstrapError || error instanceof SupervisorError || error instanceof LocalPairingError || pairingStartupError(code);
+  process.stderr.write(JSON.stringify({error: known ? code : 'startup_failed'}) + '\n');
   process.exitCode = 1;
 }

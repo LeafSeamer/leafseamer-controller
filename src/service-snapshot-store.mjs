@@ -61,8 +61,8 @@ export function serviceSnapshotStore({db,bootId,writer,time,domain,sourceCut,rea
   },
   // 仅由共享writer调用；进程中断留下的预留绝不重新采集补页。
   sweep(){for(const [snapshot,key]of db.prepare('SELECT snapshot_id,subscription_id FROM service_snapshot_build WHERE snapshot_id NOT IN(SELECT snapshot_id FROM service_snapshot_end)').raw().all()){if(snapshot===pending?.build.snapshotId)continue;invalidate(snapshot,'abandoned');terminate(read(key),'resync_required');}
-   for(const key of db.prepare("SELECT subscription_id FROM service_event_subscription_revision JOIN service_event_subscription_head USING(subscription_id,revision) WHERE state IN('snapshot_ready','catching_up')").pluck().all()){
-    const saved=read(key);try{publishedCurrent(saved,saved.view.state==='snapshot_ready');}catch(error){if(!known(error)&&!(error instanceof SyntaxError))throw error;terminate(saved,'resync_required');}
+   for(const key of db.prepare("SELECT subscription_id FROM service_event_subscription_revision JOIN service_event_subscription_head USING(subscription_id,revision) WHERE state IN('snapshot_ready','catching_up','live')").pluck().all()){
+    const saved=read(key);try{publishedCurrent(saved,saved.view.state==='snapshot_ready');}catch(error){if(!known(error)&&!(error instanceof SyntaxError))throw error;terminate(saved,'resync_required',error.code??error.name);}
    }
   },
   // 每次调度只推进一个阶段；阶段之间释放writer与读取连接，保留原预留截止。

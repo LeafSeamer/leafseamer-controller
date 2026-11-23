@@ -1,17 +1,17 @@
 import crypto from 'node:crypto';
 import {IdentityError, validateLogin, hashPassword, verifyPassword, createOpaqueSecret, verifyOpaqueSecret} from './identity-crypto.mjs';
 import {clockInteger} from './native-clock.mjs';
-import {seal, ref, canonical} from './auth-clock-value.mjs';
+import {seal, ref, canonical, same} from './auth-clock-value.mjs';
 import {accessTokenService} from './access-token-store.mjs';
 import {requestContextService} from './request-context-store.mjs';
 import {commandAdmissionStore} from './command-admission-store.mjs';
 import {commandLifecycle} from './command-lifecycle.mjs';
-import {commandEncodingSource} from './command-encoding-source.mjs';
+import {automationCommandExecutionSource,commandEncodingSource} from './command-encoding-source.mjs';
 import {deviceRegistryReader} from './device-registry-store.mjs';
 import {deviceControlStore} from './device-control-store.mjs';
 import {manualExecutionAuthority} from './device-manual-authority.mjs';
 import {serviceIdentityStore} from './service-identity-store.mjs';
-import {currentManualAuthorizationContext} from './device-authorization-state.mjs';
+import {currentAutomaticAuthorizationContext,currentManualAuthorizationContext} from './device-authorization-state.mjs';
 import {deviceAuthorizationRecovery} from './device-authorization-recovery.mjs';
 import {deviceAuthorizationEvidence} from './device-authorization-evidence.mjs';
 import {deviceInitialResource} from './device-initial-resource.mjs';
@@ -34,7 +34,7 @@ function rows(db, sql, ...args) {
 }
 
 // 内部人员会话服务；clock由同服务认证时钟装配，HTTP Cookie与Origin边界另由传输层落实。
-export function sessionStore(db, serviceId, clock, authority = null, tokensEnabled = false, contextBinding = null, createExtensionManagement = null,controlBarrier=null,executionCurrent=null,attachOpeningSource=null,attachEncodingSource=null,queueCommand=null,capabilityCurrent=null,eventScopes=null) {
+export function sessionStore(db, serviceId, clock, authority = null, tokensEnabled = false, contextBinding = null, createExtensionManagement = null,controlBarrier=null,executionCurrent=null,attachOpeningSource=null,attachEncodingSource=null,queueCommand=null,capabilityCurrent=null,eventScopes=null,deviceAutomationCurrent=null,referenceAcceptance=null) {
   let stopped = false, dummy = null;
   const buckets = new Map(), global = {start: process.hrtime.bigint(), failed: 0, pending: 0};
   const salt = crypto.randomBytes(32);
@@ -126,24 +126,57 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
   const {authorizeToken,currentRecordedToken, ...tokens} = accessTokenService({db, serviceId, authority:tokenAuthority, enabled: tokensEnabled, writer, time, authenticated, terminal, rows, pad});
   let contextCurrent;
   const contexts = requestContextService({db, binding: contextBinding, writer, time, authorizeToken, rows, pad,attachCurrent:current=>{contextCurrent=current;}});
+  function authorizeEndorsement(token,permission,contextId=null){
+    const proof=authorizeToken(token,serviceId);
+    if(proof.denied)fail(proof.denied);
+    if(proof.principal_kind!=='human'||(permission!==null&&!proof.permissions.includes(permission)))fail('run_endorsement_permission');
+    if(permission==='grant.manage'||permission==='grant.revoke'){
+      const context=contextCurrent(token,contextId,permission==='grant.manage'?'endorseRunApproval':'revokeRunApprovalEndorsement');
+      if(context.denied)fail(context.denied);
+      const recent=db.prepare('SELECT recent_before_ns FROM auth_session WHERE session_id=?').pluck().get(proof.session_id);
+      if(!recent||time().upper>=BigInt(recent))fail('run_endorsement_recent');
+    }
+    return {actor:{issuer_id:proof.issuer_id,issuer_epoch:proof.issuer_epoch,principal_id:proof.principal_id},
+      evidence:{session_id:proof.session_id,credential_id:proof.credential_id,authorization_digest:proof.authorization_digest,scope_digest:proof.scope_digest}};
+  }
+  function authorizeArmInitiator(credential,actor,audience){
+    const proof=currentRecordedToken(credential.token_id,audience);
+    if(proof.denied||proof.principal_kind!=='human'||credential.issuer_service_id!==serviceId||!proof.permissions.includes('run.arm')||
+      !same([proof.issuer_id,proof.issuer_epoch,proof.principal_id,proof.session_id,proof.credential_id,proof.policy_revision,proof.scope_digest],
+        [actor.issuer_id,actor.issuer_epoch,actor.principal_id,credential.session_id,credential.credential_id,credential.policy_revision,credential.scope_digest]))fail('run_initiator_authorization');
+    const session=db.prepare("SELECT revision,recent_before_ns FROM auth_session WHERE session_id=? AND state='active'").raw().get(credential.session_id);
+    const now=time();
+    if(!session||String(session[0])!==credential.session_revision||now.upper>=BigInt(session[1])||now.upper>=BigInt(credential.recent_before_ns))fail('run_initiator_recent');
+    return [proof.expires_ns,proof.session_expires_ns,proof.session_idle_before_ns,session[1],credential.recent_before_ns].map(BigInt).reduce((a,b)=>a<b?a:b);
+  }
   const devices = deviceRegistryReader(db, contextBinding?.service);
+  const automationExecution=Number(contextBinding?.service.schema_revision)>=96&&controlBarrier&&executionCurrent&&deviceAutomationCurrent&&
+   (Number(contextBinding.service.schema_revision)<97||queueCommand)?
+   automationCommandExecutionSource({db,service:contextBinding.service,devices,executionCurrent,deviceAutomationCurrent,coreSource:controlBarrier,time,queueCommand}):null;
   if(Number(contextBinding?.service.schema_revision)>=51&&attachEncodingSource&&controlBarrier&&executionCurrent)
-    attachEncodingSource(commandEncodingSource({db,service:contextBinding.service,currentRecordedToken,devices,executionCurrent,coreSource:controlBarrier}));
+    attachEncodingSource(commandEncodingSource({db,service:contextBinding.service,currentRecordedToken,devices,executionCurrent,coreSource:controlBarrier,automationExecution}));
   let manualCurrent,evaluatorCurrent,evidenceCurrent;
   const serviceIdentities=Number(contextBinding?.service.schema_revision)>=36&&authority?.current?
-    serviceIdentityStore({db,service:contextBinding.service,bootId:contextBinding.bootId,writer,time,authenticated,authority,coreSource:controlBarrier,attachEvaluatorCurrent:current=>{evaluatorCurrent=current;},pairings:()=>peerPairings,eventScopes,durationSample:()=>{if(typeof clock.durationSample!=='function')fail('session_clock_duration_unavailable');return clock.durationSample();}}):{};
+    serviceIdentityStore({db,service:contextBinding.service,bootId:contextBinding.bootId,writer,time,authenticated,authority,coreSource:controlBarrier,attachEvaluatorCurrent:current=>{evaluatorCurrent=current;},pairings:()=>peerPairings,eventScopes,deviceAutomationCurrent,authorizeEndorsement,
+     authorizeArmInitiator,automationExecution,pairingSample:()=>clock.pairingSample(),durationSample:()=>{if(typeof clock.durationSample!=='function')fail('session_clock_duration_unavailable');return clock.durationSample();}}):{};
   const commandStates=commandLifecycle({db,service:contextBinding?.service,bootId:contextBinding?.bootId,writer,domain:()=>controlBarrier?.domain()??null});
   const commands = commandAdmissionStore({db, binding: contextBinding, writer, time, authorizeToken, rows,contextCurrent,devices,executionCurrent,
-    domain:()=>controlBarrier.domain(),assertCurrentProjection:()=>commandStates.assertAvailable(),queueCommand});
+    domain:()=>controlBarrier.domain(),assertCurrentProjection:()=>commandStates.assertAvailable(),queueCommand,referenceAcceptance});
   const manualAuthority=Number(contextBinding?.service.schema_revision)>=33&&controlBarrier&&executionCurrent?manualExecutionAuthority({db,service:contextBinding.service,
     writer,authorizeToken,currentRecordedToken,authority,executionCurrent,domain:()=>controlBarrier.domain(),coreSource:controlBarrier,attachCurrent:current=>{manualCurrent=current;}}):null;
   const controls=Number(contextBinding?.service.schema_revision)>=26&&controlBarrier?deviceControlStore({db,service:contextBinding.service,bootId:contextBinding.bootId,
    writer,time,authorizeToken,contextCurrent,authority,devices,barriers:controlBarrier}):null;
+  const automaticAuthorization=Number(contextBinding?.service.schema_revision)>=96&&controlBarrier&&executionCurrent&&evaluatorCurrent?
+   request=>currentAutomaticAuthorizationContext(db,contextBinding.service,request,{evaluator:evaluatorCurrent,coreSource:controlBarrier,executionCurrent}):null;
+  const currentDeviceContext=request=>{
+   if(request?.manual_source_ref===null){if(!automaticAuthorization)fail('device_authorization_unavailable');return automaticAuthorization(request);}
+   return currentManualAuthorizationContext(db,contextBinding.service,request,{manual:manualCurrent,evaluator:evaluatorCurrent,coreSource:controlBarrier});
+  };
   const recovery=Number(contextBinding?.service.schema_revision)>=40&&manualCurrent&&evaluatorCurrent?deviceAuthorizationRecovery({db,service:contextBinding.service,
-    writer,time,authorizeToken,currentContext:request=>currentManualAuthorizationContext(db,contextBinding.service,request,{manual:manualCurrent,evaluator:evaluatorCurrent,coreSource:controlBarrier})}):null;
+    writer,time,authorizeToken,currentContext:currentDeviceContext}):null;
   const evidence=Number(contextBinding?.service.schema_revision)>=43&&manualCurrent&&evaluatorCurrent?deviceAuthorizationEvidence({db,service:contextBinding.service,
     writer,manual:manualCurrent,evaluator:evaluatorCurrent,executionCurrent,domain:()=>controlBarrier.domain(),attachCurrent:current=>{evidenceCurrent=current;},
-    currentContext:request=>currentManualAuthorizationContext(db,contextBinding.service,request,{manual:manualCurrent,evaluator:evaluatorCurrent,coreSource:controlBarrier})}):null;
+    currentContext:currentDeviceContext}):null;
   let initialResourceCurrent,initialResourceRead;
   const initialResources=Number(contextBinding?.service.schema_revision)>=44&&evidenceCurrent?deviceInitialResource({db,service:contextBinding.service,
     writer,evidenceCurrent,executionCurrent,domain:()=>controlBarrier.domain(),attachCurrent:current=>{initialResourceCurrent=current;},attachRead:read=>{initialResourceRead=read;}}):null;
@@ -187,6 +220,7 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
       if(!manualCurrent||!evaluatorCurrent||Number(contextBinding?.service.schema_revision)<39)fail('device_authorization_unavailable');
       return deliver(writer(()=>currentManualAuthorizationContext(db,contextBinding.service,request,{manual:manualCurrent,evaluator:evaluatorCurrent,coreSource:controlBarrier})));
     },
+    ...(automaticAuthorization&&{currentAutomaticAuthorizationContext:request=>deliver(writer(()=>automaticAuthorization(request)))}),
     requestDeviceAuthorizationRecovery(input,request){if(!recovery)fail('device_recovery_unavailable');return recovery.accept(input,request);},
     currentDeviceAuthorizationRecovery(input,id){if(!recovery)fail('device_recovery_unavailable');return recovery.current(input,id);},
     consumeDeviceAuthorizationRecovery(input,id){if(!recovery)fail('device_recovery_unavailable');return recovery.consume(input,id);},

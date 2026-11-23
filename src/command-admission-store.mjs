@@ -14,7 +14,7 @@ const version = 'command-admission/0.1.0-draft.1';
 // 只排除具名顶层运输字段，嵌套同名业务字段仍参与摘要。
 export function commandContent({context_id, idempotency_key, correlation_id, ...content}) { return content; }
 
-export function commandAdmissionStore({db, binding, writer, time, authorizeToken, rows,contextCurrent,devices,executionCurrent,domain,assertCurrentProjection=()=>{},queueCommand=null}) {
+export function commandAdmissionStore({db, binding, writer, time, authorizeToken, rows,contextCurrent,devices,executionCurrent,domain,assertCurrentProjection=()=>{},queueCommand=null,referenceAcceptance=null}) {
   const adapter = createHttpAdapter(selection), service = binding?.service;
   const scope = service && {authority_service_id: service.service_id, database_instance_id: service.database_instance_id};
   const available = () => { if (!service || Number(service.schema_revision) < 9) fail('command_admission_unavailable'); };
@@ -171,7 +171,7 @@ export function commandAdmissionStore({db, binding, writer, time, authorizeToken
         const k=identity.key,owner=ownership(current.proof,k),commitId=crypto.randomUUID(),keyId=crypto.randomUUID();
         const commit={kind:'controller_commit',scope,object_id:commitId,revision:'1',operation:'accept',identity,acquisition_ref:time().acquisition};
         const commitRef={kind:commit.kind,scope,object_id:commitId,revision:'1',digest:digest(commit)};
-        const prepared=prepareCommandRecord({value,content:commandContent(value),identity,current,domain:domain(),commitRef});
+        const prepared=prepareCommandRecord({value,content:commandContent(value),identity,current,domain:domain(),commitRef,referenceAcceptance});
         let namespace=rows(db,'SELECT namespace_id FROM ca_namespace WHERE issuer_id=? AND issuer_epoch=? AND principal_id=? AND request_epoch=?',
           k.issuer_id,k.issuer_epoch,k.principal_id,k.request_epoch)[0];
         const written=result=>{if(result.changes!==1)fail('command_storage');};
@@ -192,6 +192,8 @@ export function commandAdmissionStore({db, binding, writer, time, authorizeToken
         const active=executionCurrent(value.device_id,{requireReady:true});if(canonical(active.ref)!==canonical(current.execution.ref)||canonical(active.ready.ref)!==canonical(current.execution.ready.ref))fail('command_execution_unavailable');
         const now=domain();if(canonical(now.ref)!==canonical(prepared.source.deadline.accepted.domain)||
           BigInt(now.tick)>=BigInt(current.execution.ready.value.expires_tick_ns)||BigInt(now.tick)>=BigInt(prepared.source.deadline.queue_deadline_tick_ns))fail('command_deadline');
+        const original=prepared.source.accepted_reference;
+        if(original && canonical(referenceAcceptance(prepared.source.deadline.accepted))!==canonical(original))fail('command_reference_changed');
         created=true;return a;
         });
       }));

@@ -3,19 +3,51 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
+const buildOptions = process.argv.slice(2);
+const referenceTimeProvider = buildOptions[0] === '--reference-time-provider' ? buildOptions[1] : null;
+if (buildOptions.length && (buildOptions.length !== 2 || !referenceTimeProvider || !path.isAbsolute(referenceTimeProvider) ||
+    process.platform !== 'win32' || process.arch !== 'x64')) throw new Error('controller_build_arguments');
 const names = ['authority-source-window.mjs', 'supervisor-control.mjs', 'core-bootstrap.mjs', 'core-runtime.sql', 'cli.mjs', 'server.mjs', 'storage.mjs', 'storage.sql', 'identity.sql', 'identity-crypto.mjs', 'identity-store.mjs', 'local-admin.mjs', 'native-clock.mjs', 'clock-monitor.mjs', 'clock.sql', 'auth-clock.sql', 'auth-clock.mjs', 'auth-clock-value.mjs', 'auth-clock-store.mjs', 'session-store.mjs', 'session.sql', 'access-token-store.mjs', 'access-token.sql'];
+names.push('trusted-pairing-profile.mjs', 'local-pairing-admin.mjs', 'clock-evidence.mjs');
 const files = await Promise.all(names.map(async name => [name, await fs.readFile(path.join(root, 'src', name))]));
-for(const name of ['device-event-source.sql','device-event-source.mjs','device-event-qualification.mjs','simulator-event-review.json'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
+for(const name of ['device-event-source.sql','device-event-source.mjs','device-source-time.sql','device-event-qualification.mjs','simulator-event-review.json'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
+for (const name of ['time-provider-runtime.sql', 'time-provider-link.mjs', 'time-provider-polls.sql', 'time-provider-polls.mjs',
+  'time-provider-capture.sql', 'time-provider-capture.mjs', 'time-provider-poll-release.sql', 'time-provider-source-recovery.sql',
+  'time-provider-poll-control.sql', 'reference-time-anchor.sql', 'reference-time-anchor.mjs', 'reference-time-bundle.mjs', 'reference-time-scheduler.mjs',
+  'command-reference-acceptance.sql', 'reference-time-invalidation.sql', 'reference-time-invalidation.mjs',
+  'reference-time-exits.sql', 'reference-time-exits.mjs', 'reference-time-exit-recovery.sql',
+  'command-issue-order.sql', 'command-issue-order.mjs']) {
+  files.push([name, await fs.readFile(path.join(root, 'src', name))]);
+}
+for(const name of ['first-pairing-authorization.mjs','first-pairing-issue.sql'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
+for(const name of ['peer-action-admission.mjs','peer-action-binding.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
+for(const name of ['automation-command-adjudication.mjs','automation-command-adjudication.sql','peer-automation-command.mjs','automatic-device-gate.sql','automation-command-encoding.sql'])
+ files.push([name,await fs.readFile(path.join(root,'src',name))]);
 files.push(['peer-device-events.mjs',await fs.readFile(path.join(root,'src/peer-device-events.mjs'))]);
 files.push(['service-snapshot-context.mjs',await fs.readFile(path.join(root,'src/service-snapshot-context.mjs'))]);
 files.push(['service-consumer-scope.mjs',await fs.readFile(path.join(root,'src/service-consumer-scope.mjs'))]);
 for(const name of ['device-event-scope.mjs','device-event-scope.sql'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
-for(const name of ['service-snapshot-baseline.sql','service-subscription-channel.mjs','service-subscription-channel.sql','service-event-channel.mjs','peer-event-websocket.mjs','service-snapshot-content.mjs','service-snapshot-store.mjs','service-snapshot.sql','device-source-projection.mjs','device-source-projection.sql','database-owner.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
+for(const name of ['service-subscription-delivery.sql','service-subscription-reconcile.mjs','service-snapshot-baseline.sql','service-subscription-channel.mjs','service-subscription-channel.sql','service-event-channel.mjs','peer-event-websocket.mjs','service-snapshot-content.mjs','service-snapshot-store.mjs','service-snapshot.sql','device-source-projection.mjs','device-source-projection.sql','database-owner.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 for(const name of ['service-subscription-store.mjs','service-subscription-http.mjs','service-subscription.sql'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 for(const name of ['device-footprint-qualification.mjs','simulator-control-footprint.json','simulator-control-footprint-v1.json','simulator-control-bindings-v1.json','simulator-control-footprint-v2.json','simulator-control-bindings-v2.json'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 for(const name of ['device-automation-binding.mjs','simulator-control-bindings.json'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 for(const name of ['device-module-events.sql','session-denial.sql','session-denial-store.mjs','session-denial-delivery.mjs','peer-session-denial.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 for(const name of ['issuer-authorization-watermark.sql','token-introspection.mjs','introspection-http.mjs','remote-permission.sql','remote-permission-store.mjs','peer-pairing.sql','peer-pairing-store.mjs','peer-pairing-value.mjs','peer-pairing-transport.mjs','peer-device-bindings.mjs','identity-error.mjs','opaque-secret.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
+files.push(['peer-automation-approval.mjs',await fs.readFile(path.join(root,'src/peer-automation-approval.mjs'))]);
+files.push(['peer-run-approval-proposal.mjs',await fs.readFile(path.join(root,'src/peer-run-approval-proposal.mjs'))]);
+files.push(['peer-run-approval-endorsement.mjs',await fs.readFile(path.join(root,'src/peer-run-approval-endorsement.mjs'))]);
+files.push(['peer-run-approval.mjs',await fs.readFile(path.join(root,'src/peer-run-approval.mjs'))]);
+files.push(['peer-run-initiator.mjs',await fs.readFile(path.join(root,'src/peer-run-initiator.mjs'))]);
+files.push(['peer-run-arm-plan.mjs',await fs.readFile(path.join(root,'src/peer-run-arm-plan.mjs'))]);
+files.push(['peer-run-preparation.mjs',await fs.readFile(path.join(root,'src/peer-run-preparation.mjs'))]);
+files.push(['peer-run-approval-protection.mjs',await fs.readFile(path.join(root,'src/peer-run-approval-protection.mjs'))]);
+for(const name of ['run-endorsement-policy.mjs','run-endorsement-policy.sql','run-endorsement-scope.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
+for(const name of ['run-approval-endorsement.mjs','run-approval-endorsement.sql'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
+files.push(['run-approval-rejection.sql',await fs.readFile(path.join(root,'src/run-approval-rejection.sql'))]);
+files.push(['run-endorsement-revocation.sql',await fs.readFile(path.join(root,'src/run-endorsement-revocation.sql'))]);
+files.push(['run-endorsement-revocation-receipt.sql',await fs.readFile(path.join(root,'src/run-endorsement-revocation-receipt.sql'))]);
+for(const name of ['run-preparation-store.mjs','run-preparation.sql','run-generation-denial.mjs','run-generation-denial.sql','execution-run-fence.mjs','execution-run-fence.sql','run-protection-exits.mjs',
+ 'run-approval-protection-completion.mjs','run-approval-protection-completion.sql'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 files.push(['process-host.mjs', await fs.readFile(path.join(root, 'src/process-host.mjs'))]);
 files.push(['worker-bootstrap.mjs', await fs.readFile(path.join(root, 'src/worker-bootstrap.mjs'))]);
 for (const name of ['worker-launch-store.mjs','worker-launch.sql','worker-runtime-store.mjs','worker-runtime.sql','worker-dependencies.mjs','worker-dependencies.sql','extension-plan-store.mjs','extension-plan.sql','extension-activation-store.mjs','extension-activation.sql','worker-authorization-store.mjs','worker-authorization.sql']) files.push([name,await fs.readFile(path.join(root,'src',name))]);
@@ -88,6 +120,8 @@ if (process.platform === 'win32') {
   const host = JSON.parse(hostManifest), hostBinary = await fs.readFile(path.join(nativeDir, 'leafseamer_process_host.exe'));
   if (host.format !== 'leafseamer-process-host/1' || host.platform !== process.platform || host.arch !== process.arch ||
       host.binary_sha256 !== hash(hostBinary) || host.source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-host.cc'))) ||
+      host.time_provider_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-time-provider.h'))) ||
+      host.journal_time_provider_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-journal-time-provider.sql'))) ||
       host.worker_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-worker.h'))) ||
       host.creation_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-creation.h'))) ||
       host.module_link_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-module-link.h'))) ||
@@ -123,6 +157,16 @@ if(process.platform==='win32'){
  if(process.versions.node!==runtimeLock.node_version||process.arch!==runtimeLock.arch||runtimeLock.platform!==process.platform||
    runtimeHash(node)!==runtimeLock.node_sha256||runtimeHash(license)!==runtimeLock.node_license_sha256)throw new Error('worker_runtime_node');
  files.push(['runtime/node.exe',node],['runtime/NODE_LICENSE',license]);
+  if (referenceTimeProvider !== null) {
+    const provider = await fs.readFile(referenceTimeProvider);
+    if (provider.length < 64 || provider.length > 16777216 || provider.toString('ascii',0,2) !== 'MZ') throw new Error('time_provider_artifact');
+    // Win32 GUI subsystem keeps the inherited pipes without adding a console process to the provider Job.
+    const pe = provider.readUInt32LE(60), optionalHeader = pe + 24;
+    if (pe < 64 || optionalHeader + 70 > provider.length || provider.readUInt32LE(pe) !== 0x4550 ||
+        provider.readUInt16LE(pe + 4) !== 0x8664 || provider.readUInt16LE(pe + 20) < 70 ||
+        provider.readUInt16LE(optionalHeader) !== 0x20b || provider.readUInt16LE(optionalHeader + 68) !== 2) throw new Error('time_provider_artifact');
+    files.push(['runtime/reference-time-provider.exe', provider]);
+  }
 }
 const output = path.resolve(root, 'dist');
 if (path.dirname(output) !== path.resolve(root)) throw new Error('output_path');

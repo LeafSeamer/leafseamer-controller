@@ -17,7 +17,7 @@ npm test
 npm run build
 ```
 
-原生构建输入来自 [Node 24.22.0 官方发行目录](https://nodejs.org/dist/v24.22.0/) 的 headers 和 Windows x64 `node.lib`，下载后先核对官方 SHASUMS256.txt。构建脚本再按 `native-inputs.json` 校验四个 N-API 头文件和导入库，当前只接受 Node 24.22.0、x64。Windows 使用 CMake 与 Visual Studio 2022 C++ 工具链；Linux 使用 CMake/C++17，并省略 `--node-library`。先构建原生模块，再运行普通 build/test；源码摘要或制品摘要不符时拒绝打包，不静默退回 JavaScript 时钟。实际验证工具链为 Windows x64、CMake 4.2.1、MSVC 19.44.35222.0、Windows SDK 10.0.26100.0；Linux 构建尚未验证。原生构建清单仅证明本地制品与输入一致，不代替发行签名或运行域批准。
+原生构建输入来自 [Node 24.22.0 官方发行目录](https://nodejs.org/dist/v24.22.0/) 的 headers 和 Windows x64 `node.lib`，下载后先核对官方 SHASUMS256.txt。构建脚本再按 `native-inputs.json` 校验四个 N-API 头文件和导入库，当前只接受 Node 24.22.0、x64。Windows 使用 CMake 与 Visual Studio 2022 C++ 工具链；Linux 使用 CMake 和 C++17，并省略 `--node-library`。原生构建每次重新探测工具链，源码及制品摘要仍由打包入口校验。既有 Windows 制品使用 CMake 4.2.1、MSVC 19.44.35222.0 和 Windows SDK 10.0.26100.0。Linux x64 在 Debian Bookworm 隔离环境使用 CMake 4.2.1 和 GNU 12.2.0 完成原生构建、打包和保护态运行检查。正式发行及运行域资格继续使用独立批准与验收。
 
 首次显式创建业务库，再启动本机服务。`--data-dir` 必须是绝对路径；以下路径需替换为自己控制的独立目录。
 
@@ -67,6 +67,113 @@ SQLite 固定引擎为 3.53.4，并核对 source id；启用外键、WAL、FULL 
 业务库运行 `migrate-storage` 显式升级至当前schema 70，每步保留备份；worker启动准备至少要求schema 12。已有监督日志v1至v4使用 `upgrade-process-host --data-dir <绝对目录>` 显式升级至5。监督日志升级在核DDL、完整性、目录及所有者和无未决尝试后创建唯一备份并同事务新增缺少的bootstrap／admission、启动快照、worker登记、组保留／退役及一次创建／实际观察原件表，既有记录不变；重复升级返回changed=false。host_meta的format继续标识未改变的身份布局，PRAGMA user_version标识schema 5。普通监督启动拒绝v1至v4，不自动修复；未决尝试不能借升级、PID消失或新的挑战绕过旧域恢复。迁移不为旧登记伪造创建原件、Job句柄或退役证据。
 
 当前真实Windows集成覆盖双库绑定后监听、正常退出、错误制品／服务、旧业务库、HMAC／角色／重复帧／EOF／超时拒绝、写入故障、历史迁移和重放拒绝。完整RuntimeBinding、worker子域、保护配置来源、旧域退役恢复、Linux、生产profile及设备验收继续实施。
+
+### Windows 时间提供者启动
+
+使用 Suite 的 `native/reference-time` 模块和固定 Go 1.27.2，在 Windows amd64 下构建 `./cmd/reference-time-provider`，构建参数使用 `-mod=readonly -trimpath -buildvcs=false -ldflags=-H=windowsgui`。Controller 打包时可向 `scripts/build.mjs` 提供 `--reference-time-provider <绝对制品路径>`。该选项核对 x64 无控制台制品并将其纳入安装清单，启动前的制品固定与核心资产共用原生检查。
+
+本机可信装配可显式调用 `upgradeTimeProviderJournal(dataDir)` 将监督日志从 v5 升至 v6，再向 `startProcessHost` 提供 `timeProviderPolicy`。时间提供者政策采用 `leafseamer-time-provider-bootstrap-policy/1`，沿核心政策字段，使用相同服务、数据库、平台 profile 和计时后端版本。其制品摘要由 `installedTimeProviderDigest()` 对应的安装清单项绑定。宿主在同一监督时钟域创建独立单进程 Job，先保存实际容纳与进程观察，再保存关闭态准入。退出时关闭继承输入，确认进程退出及 Job 为空后登记退出原件。
+
+启用提供者前须显式将 Controller 业务库迁至 schema 81。核心在监听前经原私有监督连接查询完整启动意图、关闭态回执和实际进程观察。监督器从已提交日志读回原件，并复核进程存活及私有 Job 归属。核心将时间提供者绑定与本次核心绑定在同一事务写入。旧启动的原件可从业务库查回，新启动重新建立绑定。核心可按原连接查询短期观察，原连接失效、观察到期或获得替代观察后，旧观察即失效。
+
+启用提供者的核心须在监听前使用专用 Windows 本地管道完成 `time-provider-link/1` 绑定。监督器按本次启动的核心及提供者 PID 核验两端，只在两端之间转发有界字节。核心以已提交正文发出 `BIND`，提供者复核自己的准入原件、进程身份、核心回执、数据库范围和绑定摘要，经下述认证桥读取后答复 `BOUND`。管道断连后失效，监督器清理进程组。
+
+认证桥采用 `time-provider-auth/1`。核心每次响应前复核监督连接与认证时钟的当前资格，只交付共享域的区间、采集与来源原件引用、原截止及误差界。缺少当前资格时返回空结果，提供者保持关闭态。Go 端核对请求、运行绑定和域，在接收及 NTS 使用时按单调经过量、漂移和量化误差向外外推，原截止持续有效。启动读取用于确认桥接。实际授时环境批准、持续采集调度及 UTC 锚点仍待交付。
+
+显式迁移到 schema 82 后，可信本机装配可以向 `startController` 提供 `referenceTimeAuthorization`。装配须提供批准的总预约容量和当前来源解析器，并启用已绑定的提供者和合格认证时钟。核心固定稳定来源槽、配置及批准引用、认证采集引用和原截止。相同来源槽及其别名共享未决预约。首次发送尝试先写入不可变记录，再复核授权。提交后失去资格时，该尝试仍已消费，新启动也只能查回其原件。持续采集发送路由、退役核销及 UTC 资格另有独立交付条件。
+
+显式迁移到 schema 84 后，本机装配可同时提供 `readEndpoint` 与 `captureProtection`，启用内部 `referenceTimePolls.collect(pollRef)`。数字端点配置必须匹配预约中端点引用的摘要。可信网络使用 `authentication: "trusted_network"` 与 `endpoint`。NTS 使用 `authentication: "nts"`、`key_endpoint`、`server_name`、`root_der`、`default_target` 与批准的 `targets`。核心提交发送尝试后才把请求交给专用管道。提供者发送前再次读取相同尝试的实时授权，处理结果也受原截止约束。
+
+`captureProtection.currentKey(scope)` 与 `readKey(scope,id)` 由可信本机装配提供当前及历史归档密钥。两者使用服务和库范围内的专用 32 字节密钥 `KeyObject`。装配只有在确认完整 nonce 历史时才给当前密钥 `writable: true`。核心在加密前提交唯一 nonce，使用 AES-256-GCM 将原 UDP 和可用的 NTS 密钥协商报文密文写入同一 SQLite 记录。记录绑定原预约、尝试和收发时刻。受信本机 `readCapture(pollRef)` 在确认标签后交付原件。 [Node.js 加密接口](https://nodejs.org/docs/latest-v24.x/api/crypto.html)
+
+归档提交后，核心沿专用管道发送 `POLL_STORED`。提供者核对采样序号、尝试、收发时刻及明文摘要，释放对应的暂存原件并确认。核心持久保存精确确认后释放活动槽，`collect` 随后返回归档回执。归档失败、确认丢失或释放写入失败时，当前启动内继续占用预约。已用存储预算保留累计计费。当前来源解析器必须提供至少 16 秒的 `minimum_poll_interval_ns`，同域下一次采样从原收包时刻遵守旧配置及当前配置的较长间隔。
+
+业务库显式迁移到 schema 85 后，可信核心可调用 `referenceTimePolls.recover(sourceSlot)`。原生监督器须证明旧核心和旧提供者均已退出且各自进程组为空。核心核对旧绑定原件后，保存本次启动首次收到证据的单调时刻。新请求按当前时钟的漂移及量化界限，等待旧配置和当前配置中较长的间隔。旧尝试的退避上界未知时，来源继续拒绝预约。旧预约、发送尝试、归档和计费均保留，查询同一恢复记录沿用首次等待起点。
+
+schema 86 将已关联的 `RATE` 和停采结果写入不可变账本。核心先保存原控制结果，再发送 `POLL_CONTROL_STORED`。提供者核对本次序号、原尝试与原控制摘要并确认后，核心才释放活动槽。`RATE` 提高同一稳定来源的有效最小间隔，后续正常采样、改用来源别名或重启均沿用该下限。`DENY` 等停采结果继续阻止新预约。写入失败保留原尝试和未决槽。
+
+schema 87 允许受信启动装配在 `referenceTimeAuthorization.referenceAuthority` 中固定一个来源，以同步的 `readApproval` 和 `readEvidence` 提供精确批准、认证、独立时代、误差及上游年龄原件。核心从已校验的响应字节解析时间戳，用整数向外取整，并在原截止内复核证据。合格锚点和加密采样在同一事务保存。证据缺失只归档采样。`referenceTimePolls.currentReference()` 在本机可信调用中按当前单调时刻重评区间和年龄，撤回或重启后历史锚点不恢复当前资格。正式证据和密钥装载、对外授时与 TIME 保护仍待交付。
+
+本机可信调用可用 `referenceTimePolls.projectReferenceCapture({domain, before_tick_ns, after_tick_ns})` 将已捕获的同域区间换算成保守 UTC 界。返回值附精确锚点引用和原捕获区间。两端都须落在当前合格锚点发布以后且已经发生，任一条件失效时返回 `null`。
+
+模拟器来源事件首次入库时从已核验的模块帧取得区间和运行域。合格投影连同锚点、模块帧、运行绑定和采集审阅引用保存于同一笔待发送记录。重复批次沿用原件，缺少时间资格时只保存事件。
+
+显式迁移到 schema 94 后，首次入库的合格捕获同时保存 `SourceTimeEvidence`，`Origin.source_time_ref` 精确引用该原件。Seamer 可用配对 mTLS 在 `GET /internal/events/source-times/{id}/{revision}?digest=…` 查询，需当前 `events.internal.read` 权限、同一 product9 选择，以及覆盖精确来源的当前订阅授权。原件记录事件捕获区间和时长档案引用。锚点已封存完整参考证据包时，原件同时固定 `reference_context_ref` 和保守 UTC 界。历史事件沿用首次写入的引用。
+
+可信本机参考时间装配可提供 `referenceAuthority.readBundleOriginals` 解析完整已签发原件。核心核对同一 NTP 数据报的字节摘要、真实运行绑定、当前批准、认证／误差／时代原件，以及从实际采集重算的锚点与评估。通过后，证据包与原采集、锚点同事务保存。规范原文在 32 KiB 解压上限内使用有界压缩，仍服从原锚点和预约容量。`referenceTimePolls.readReferenceBundle({id, revision, digest})` 供可信本机精确查原。配对 `GET /internal/reference-time/bundles/{id}/{revision}?digest=…` 要求 `clock.internal.read` 及覆盖引用事件来源的当前订阅授权。证据包 ID 沿用锚点 ID，摘要独立计算。历史查原权限与当前授时资格各自裁决。
+
+受信启动装配可用 `referenceTimeAuthorization.schedule.sourceSlots` 显式启用一至四个固定来源的自动采样。调度与手动采样共用预约、一次发送尝试、采样间隔、退役、退避和归档核销。每次发包都按当前授权复核，停采、来源变化和结果未知会阻止该来源继续预约。`referenceTimePolls.scheduleStatus()` 返回本机调度状态。关闭时取消后续唤醒并停止接收当前轮结果，已经提交的未决尝试留待后续按退役规则处理。
+
+schema 88 将同一单调域的合格参考锚点用于即时命令受理。核心在原受理 tick 计算条件 UTC 区间，将区间中点向下取整到毫秒作为 `accepted_at`，并同事务保存锚点引用及区间原件。受理切点没有合格锚点时保存 `null`。后来撤回锚点时，历史命令仍按原件读回。定时派发仍须完整的 TIME 保护和发送守卫。
+
+schema 89 持久记录已发布参考资格的撤回。核心先锁住当前启动的参考资格和同源采样，再在同一事务保存原锚点、未决采样清单及待处理的保护记录。`referenceTimePolls.referenceProtectionStatus()` 区分本机关闭和已落盘。写失败时保留本机关闭，状态仍为未落盘。设备端 TIME 确认、保护完成和定时派发尚待接入。
+
+schema 90 在同一事务冻结同一启动、同一时钟域的已绑定设备出口清单。核心可查询当前监督器的原启动记录，对照出口绑定后采用 `confirmed_empty` 退役证据。保护状态继续为待处理，状态中另列已冻结和已确证退役的出口数。
+
+schema 91 可在重启后通过当前已认证的本机监督连接，追认原监督日志中完整的执行器退役记录。查询固定旧核心回执、执行器启动 ID 和意图摘要，核对旧核心组已空、原执行器准入回执与其组退役证据。入库分别保留原退役时钟域和本次接收时钟域。新核心尚无参考时间提供者时也可追认。缺少任一证明时保留待办。
+
+schema 92 为许可签发建立一套不可变序列。新普通许可与序号同事务写入，人员控制切点和运行围栏从该序列读取水位，新参考失效待办在提交时冻结该水位。显式迁移按原签发顺序登记旧许可，保留其原件和旧待办。取消保护许可签发、存活出口的 `TIME_FENCE` 确认及定时派发尚待接入。
+
+schema 93 接通首次配对授权的 Controller 签发。受信本机装配从已有配对 API 调用 `exportFirstPairingAuthorization`，提供当前人员会话和指定待配对记录的 ID、摘要。只有登记该配对且仍具 `auth.manage` 和近期认证的人员可签发，期限取原配对尝试、会话和证书链中最早的截止。授权绑定完整配对正文及该人员，由当前配置的 Controller 配对证书私钥签名。签发原件同事务保存，有效期内重投读回相同字节。
+
+### Windows 受信配对启动
+
+在受保护的安装目录和数据目录准备业务库、首位人员及监督日志后，可以显式启动认证核心。
+
+```text
+node --disallow-code-generation-from-strings dist/cli.mjs supervise --data-dir <绝对目录> --port 8443 --pairing-profile <配置绝对路径>
+```
+
+配置使用 JSON，`format` 为 `leafseamer.controller-pairing-profile/1`。由安装方保护配置和密钥所在目录的 ACL，文件引用均使用绝对路径。
+
+| 字段 | 内容 |
+| --- | --- |
+| `bootstrap` | 当前安装包、服务、数据库及平台批准对应的原生核心引导策略 |
+| `https` | 与命令行回环主机及固定端口一致的 `origin`，以及 `certificate_file`、`private_key_file` |
+| `local` | 本方 `credential_id`、`host`、固定 `port`、`certificate_file`、`private_key_file` 和 1 到 8 个 PEM CA 路径的 `ca_files`。默认回环监听，可选 `network` 和 `server_name` |
+| `seamer` | 对端 `identity`，包括服务、数据库、服务种类、签发者、签发纪元和凭据 ID。另含 `origin`、`server_name`、`certificate_file` 及 `trust_bundle_digest` |
+| `clock` | 已批准的 `policy_digest`、外部证据提供者写入的 `evidence_file` 和固定的 Ed25519 `public_key_file` |
+| `gui` | 可选。填写已配置 GUI 产物的绝对 `directory` 和 `gui-manifest.json` 原字节的 `manifest_sha256`，格式为 `sha256:<小写十六进制>` |
+
+核心收到原生准入后在 stderr 输出 `authentication_clock_challenge`，包含本次启动、原生时钟制品、连续性、单调刻度及实际监督域标识和摘要。外部提供者原子写入 `leafseamer.authentication-clock-evidence/1` 规范 JSON 包络。签名覆盖格式标识、一个 NUL 字节及规范 `evidence`，使用无填充 base64url。核心核对签名、原批准策略、本次启动和实际监督域后才监听。证据读取或验证失败时输出 `authentication_clock_rejected`，最终进程退役以宿主状态为准。
+
+直接跨主机配对时，两端在各自受保护的 `local` 设置 `network: true`，并使用本机固定单播 IP 和端口。可用 `server_name` 固定证书 SAN 的精确名称，省略时使用本机 IP。对端登记的 `origin`、`server_name`、证书和信任包必须与该监听器一致。变更端点后需按新配置配对。该监听器仍使用双向 TLS 1.3，校验固定证书、当前配对状态和操作用途，并拒绝通配绑定、目标不符及代理转发头。人员认证、工作台和本机配对管理继续使用独立回环 HTTPS。
+
+受信部署方可在对应服务的宿主和单调时间域内调用安装制品中的签发工具。配置及输入为规范 JSON，路径均为绝对路径。将私钥、签发配置和输出目录的写权限保留给本机受信签发方，服务只需读取签发公钥及结果。
+
+```powershell
+node --disallow-code-generation-from-strings dist/clock-evidence.mjs --profile C:\protected\clock-signer.json --statement C:\protected\clock-statement.json
+```
+
+签发配置使用 `format: "leafseamer.authentication-clock-signing-profile/1"`，固定 `service_id`、`database_instance_id`、`policy_digest`、`native_binary_digest`、`private_key_file` 和 `evidence_file`。签发输入为 `{challenge, evidence}`，其中 `challenge` 是实际启动记录，`evidence` 包含部署方已批准的 `policy`、本次运行的 `runtime` 和当前 `health` 原件。环境误差界、健康观察和各自截止由部署批准及实际监测提供。Seamer 可在自身宿主用同一工具签发自身证据，Controller 的挑战另含监督域及描述符摘要。
+
+签发工具重核实例、启动、制品、连续性、证据引用和原截止，再用固定 Ed25519 私钥签名并原子替换配置的目标文件。仅完整成功时返回 `published`。刷新健康状态时继续提供本次运行的原 `policy` 和 `runtime`，并提交当前健康监测原件。证据失效后按既定维护流程恢复宿主授时、关闭旧域并启动新认证域。
+
+配置 `gui` 后，Controller 在 `https.origin` 的根路径提供工作台。启动先核对清单、SDK 选择、各资产摘要以及站点的 Controller 实例。站点若配置了 Seamer，其服务和数据库身份必须与本受信配置的对端一致。
+
+#### 签发与激活首次配对
+
+启动受信核心后，从本机调用操作员命令。以独立 HTTPS 监听的地址和信任根作为参数，由受保护的进程管道传入单个 JSON 对象 `{login, password, operation, request}`，并从 stdout 管道读取结果。把输出写入授权文件时保留原字节。命令使用现有人员会话，操作要求 `auth.manage` 和近期认证。
+
+```text
+node --disallow-code-generation-from-strings dist/cli.mjs pairing-admin --origin https://127.0.0.1:8443 --ca-file <HTTPS CA绝对路径>
+```
+
+| 操作 | 请求和结果 |
+| --- | --- |
+| `stage` | `request_id`、经双方核对的 `transcript`。返回 Controller 的原登记记录、`binding_id` 和 `transcript_digest` |
+| `export` | `binding_id`、`transcript_digest`。由原登记人员导出签名授权，原字节供 Seamer 本机导入 |
+| `prove` | `binding_id`。Seamer 导入、启动并输出 `first_pairing_staged` 后发起实际双向 TLS 证明，返回本端状态 |
+| `inspect` | `binding_id`。读回当前配对状态和修订 |
+| `activate` | `request_id`、`binding_id`、`expected_revision`、`transcript_digest`。在本端达到 `proved` 后提交批准 |
+| `read-audience` | `principal_id`、Seamer 的服务 ID `audience`。读取签发方的当前定向权限上限 |
+| `grant-audience` | `request_id`、`principal_id`、`audience`、`expected_revision`、已激活 Controller 配对的 `pairing_ref`、`permissions`、`not_before_ns` 和 `expires_ns`。首次批准用 `expected_revision: null` |
+
+`transcript` 使用 `leafseamer.peer-pairing/1`，含一次性的 `pair_attempt_id` 和两个 `parties`。每方固定服务与数据库身份、签发者和凭据、证书 DER 和 SPKI 的 SHA-256、信任根与端点配置摘要、本方绑定 ID、排序后的用途、范围摘要及起止纳秒。对端材料来自部署者事先核对的配置。信任包摘要取配置 CA 证书 DER 摘要排序后的规范 JSON，端点摘要取 `{origin, server_name}` 的规范 JSON，摘要格式均为 `sha256:<小写十六进制>`。
+
+用原请求标识查回已提交结果可区分响应中断和新的操作。Controller 激活后，在 Seamer 管道读取 `first_pairing_completed`，确认授权消费和首位管理员批准。
+
+要签发 Seamer 定向令牌，先通过 `grant-audience` 登记人员的权限上限，期限须位于该配对的窗口内。首位管理员需要 `auth.read` 和 `auth.manage` 管理 Seamer 本地授权。草稿等业务权限还须由 Seamer 本地批准。
 
 `bootstrapDeviceWorker`提供Windows设备worker的子进程校验入口。可信启动装配须提供固定完整意图、预期时钟描述、服务／数据库身份及监督器定向继承管道；不能从Assignment反向构造这些预期值。入口在首次等待前复制输入，按SDK核完整扩展意图与设备范围，再核挑战的意图摘要、成员、制品、监督域和profile。HMAC沿既定bootstrap投影；收到ADMISSION后逐项核回执、原子组和原生绝对截止，发proof不会延长窗口。返回深冻结的意图／描述／回执且gate_state仍为closed，不返回挑战秘密、不建立RuntimeBinding或开始设备业务。
 
@@ -621,6 +728,24 @@ Schema 60 增加签发方远端人员权限的不可变修订、CAS当前指针�
 
 返回的 `application.pairing` 仅是进程内可信管理入口，含既有 `api`、`transport`、`remotePermissions` 和 `sessionDenials`，没有新增公共HTTP管理路径或绕过人员权限。可在启动时提供固定peers，或使用transport.bindPeers完成一次绑定后自动启动调度；配置并不激活配对，双方证明与人员批准仍分别执行。内部通道的认证时间和响应释放继续检查当前监督资格。
 
+受信本机装配可使用 `application.pairing.automationApprovals` 建立专用自动化主体并批准它。批准由具备 `auth.manage` 和近期认证的人员提交，与原请求结果同事务保存。它固定签发 Controller 的本机 audience、已登记设备集合、Seamer 服务与库身份、配对原修订及有限期限。设备集合须落在配对范围内，权限须经配对明确授予。已配对 Seamer 可用 `transport.readAutomationServiceApproval` 在独立双向 TLS 通道按完整主体身份及批准引用读取当前原件。读取要求 `automation.prepare.read`，释放响应前再次核验主体、配对和原期限。设备写仍须另行取得组织运行批准、逐目标认可及有效 RunGrant。
+
+Schema 72 增加 Controller 本地可授策略，停机后显式迁移启用。受信本机装配用 `application.pairing.runEndorsementPolicies.replace` 为指定人员与服务主体保存当前策略。配置要求 `auth.manage` 和近期认证，固定精确服务批准、配对、设备动作、能力版本、注册与参数 Schema 引用、参数范围和有限期限。使用当前策略引用，可提交空动作集撤回资格。执行 `runEndorsementPolicies.check` 需另行获得 `grant.manage` 和近期认证。Controller 经配对双向 TLS 读取引用指向的提案，并在本机核验当前策略和签发方批准能否覆盖完整目标。校验结果供随后提交正式认可使用。
+
+Schema 73 增加正式认可。停机后运行 `leafseamer-controller migrate-storage --data-dir <绝对路径> --to-revision 73`。受信本机装配使用 `application.pairing.runApprovalEndorsements`。签发 `createContext` 需要本机人员 Bearer 的 `request.create` 与 `grant.manage`，`endorse` 另需有效的专用上下文及近期认证。每份 Seamer 提案在同一目标 Controller 只能保存一份认可，原件、当前状态、审计、通知和请求额度一起提交。`get` 和 `lookup` 由持有 `grant.read` 的原认可人员使用，过期后仍可查原。
+
+内部配对监听提供 `GET /internal/automation/run-approval-endorsements/{endorsement_id}`。持有 `automation.prepare.read` 的原 Seamer 服务与数据库域可按原摘要查询。Controller 在响应释放前复核源批准、原策略、当前设备注册、配对及截止时间。失效时仍可向有权对端提供原件和当前状态，只有当前合格才返回有效期限。
+
+受信装配可调用 `application.pairing.runApprovalEndorsements.checkRunApproval`，从配对 Seamer 读回固定 RunApproval，并核对其与本地认可、源批准、原可授策略及当前注册的绑定。内部准备证据在原配对和单调时钟域内最多保留至读取发起后的两秒，并受批准窗口约束。诊断结果确认本次检查，后续准备事务须使用原证据复核。撤销传播及 RunGrant 签发待接入。
+
+停机后显式迁移至 Schema 74 可接收配对 Seamer 的撤销通知。回读核对原批准、撤销操作引用和本目标认可后，Controller 持久拒绝该批准并保存原回执。相同请求可重送查原，内容发生变化则拒绝。目标事务复核既有批准证据时同时检查这条拒绝记录。涉及已有准备、Grant 或代次的撤销仍需接入实际围栏。
+
+停机后显式迁移至 Schema 75 可由目标 Controller 主动撤销本机认可。受信装配使用 `runApprovalEndorsements.createRevocationContext`、`revoke`、`getRevocation` 和 `lookupRevocation`。撤销要求本机人员 Bearer 的 `grant.revoke`、近期认证及专用上下文，查原要求当前 `grant.read`。同一事务保存目标拒绝状态、原操作、授权审计及发往原 Seamer 的通知。配对读回已撤销中的认可时会返回原件、撤销引用和阻断状态。
+
+受信装配可用 `runApprovalEndorsements.deliverRevocation(bindingId, operationId)` 交付固定通知。Controller 需在配对内获准 `automation.protect`，Seamer 需获准 `automation.prepare.read` 以核对认可状态。相同通知重送可查回 Seamer 原回执。
+
+停机后显式迁移至 Schema 76 可启用反向撤销的自动重送和回执采用。Controller 启动后根据原队列目标选择当前有效配对，重试缺少回执的操作，复核配对后保存 Seamer 原回执。`getRevocation` 会显示 `applying` 和原目标回执引用，目标仍待围栏。`lookupRevocation` 返回首次受理原件。实际资源围栏待接入。
+
 `close()` 等待公共监听和内部通道／在途调度结束，再停止两个采样器、关闭数据库与监督器，重复调用返回同一关闭结果。身份未初始化、内部端口占用或配置失败时执行同一清理。实际进程测试覆盖正式启动器的HTTPS令牌签发、内部核验、注销自动交付，以及子进程仍存活时两端口关闭、采样与调度停止；首次Seamer管理和环境资格仍是测试提供者，不能据此声明首次部署或生产批准。
 
 ### 人员会话的拒绝通知与回执
@@ -701,7 +826,7 @@ Schema 65显式增加固定设备来源范围登记。可信核心调用 `worker
 
 Schema 66提供规范服务订阅的初始持久生命周期。人员管理入口 `approveLocalSubscriptionPolicy` 独立保存 `local-service-receiver-policy/2`，固定组织主体与批准引用、接收服务、消费者槽、设备及 `event.internal.subscribe`／`status.read` 交集。实际订阅仅接受已激活配对的TLS 1.3服务证书，owner由持久主体生成，session为null；不接收Bearer或人员Cookie，普通服务令牌轮换不参与这条mTLS授权链。组织批准和本地政策均须当前有效，任一缺失、撤销、范围不符或到期均拒绝。
 
-配对内部监听器提供 `POST /internal/subscriptions`、`GET /internal/subscriptions/{subscription_id}` 和 `DELETE /internal/subscriptions/{subscription_id}?expected_revision=...`，使用固定product8 SDK及选择头，响应为无缓存的订阅视图。当前仅接收已登记范围的 `canonical_trigger`。新建返回202／building，同owner、用途及request_id重投返回原件，异正文或已占用槽返回409／conflict。关闭采用修订CAS；终态保留墓碑，新请求可使用释放的槽。每槽最多一个活动订阅，全库最多64个活动订阅和1024条历史记录；68版将snapshot_ready纳入活动计数。
+配对内部监听器提供 `POST /internal/subscriptions`、`GET /internal/subscriptions/{subscription_id}` 和 `DELETE /internal/subscriptions/{subscription_id}?expected_revision=...`，使用固定product9 SDK及选择头，响应为无缓存的订阅视图。当前仅接收已登记范围的 `canonical_trigger`。新建返回202／building，同owner、用途及request_id重投返回原件，异正文或已占用槽返回409／conflict。关闭采用修订CAS；终态保留墓碑，新请求可使用释放的槽。每槽最多一个活动订阅，全库最多64个活动订阅和1024条历史记录；68版将snapshot_ready纳入活动计数。
 
 订阅、原授权引用、来源登记水位pin、当前修订、审计及outbox同事务保存，缺写整笔回滚。后台定期核验当前资格，不依赖失权客户端DELETE；原到期界限转expired，授权撤销转revoked，来源失效或重启转resync_required，恢复条件不能复活原订阅。66版不生成快照；68版增加下述持久发布。69版提供attach，70版提供快照基线确认；增量ACK、live与完整durable_ingest仍未接通，返回building或snapshot_ready均不能作为自动化运行资格；首次可信引导和完整接收端摄取仍待完成。
 
@@ -731,4 +856,26 @@ product8增加 `POST /internal/subscriptions/{subscription_id}/snapshot-context`
 
 Schema 70显式增加快照基线确认，保留旧身份、迁移、订阅、快照和连接原件。当前连接收到固定SDK的 `client.snapshot.applied` 后，核对完整DeliveryBinding、固定snapshot_ref、用途、原采用截止及当前授权；同一writer保存基线到内部日志的映射、独立marker摘要、ACK水位、catching_up修订、审计和outbox，缺写全部回滚。确认帧不带客户端自证持久化字段，其承诺由已批准canonical_trigger用途决定。
 
-重复同绑定确认只返回既有状态；客户端通过GET订阅查原，必须核对snapshot_ref、ack_cursor和独立baseline marker的ack_payload_digest。已确认基线不再受下载截止清除，但撤权、原订阅授权到期、运行域变化、重启和内容损坏仍关闭资格。确认不会进入live、释放来源资格或恢复运行；断线resume、reconcile、sync.ready和增量ACK仍待接通，catching_up不能以空resume重新附着。
+重复同绑定确认返回既有状态。客户端通过 GET 查询订阅，核对 snapshot_ref、ack_cursor 和基线标记的 ack_payload_digest。Schema 70 支持从已确认基线断线重连。恢复帧须匹配持久映射的游标、摘要与 durable_ingest 确认类型。新代际附着后保留原基线并进入 catching_up。原订阅授权到期、撤权、运行域变化、重启或内容损坏会关闭资格。增量追赶、sync.ready 和增量 ACK 仍待接通。
+
+Schema 71 支持持久增量追赶。停机后可显式运行 `leafseamer-controller migrate-storage --data-dir <绝对路径> --to-revision 71`。迁移保留旧行和原基线确认。新确认与追赶区间同事务提交，区间从快照内部日志位置之后开始，止于确认时的日志头。Controller 每批准备最多 16 个获准来源条目，按连续游标逐帧通过配对 WebSocket 发送。传输回调成功后记录当前代际的发送事实，收到匹配的 durable_ingest ACK 才提交确认水位。区间内条目全部确认后，最后一个游标交付 `server.sync.ready`，空区间也交付检查点。重连从已确认水位继续，重放复用原游标和正文摘要。接收端需采用 Schema 5。每个连接代际固定自己的追赶终点。确认本代检查点后订阅进入 live，空闲连接随获准日志追加主动发送。重连先交付断线期间的历史；新代确认自己的检查点后，后续新条目标为 live。
+
+### 配对自动化命令裁决
+
+停机后使用 `leafseamer-controller migrate-storage --data-dir <绝对路径> --to-revision 95` 启用自动化命令裁决账本。配对 Seamer 使用内部 `/internal/automation/commands`、`/internal/automation/commands/lookup` 和 `/internal/automation/commands/reject`，分别提交、查原和永久拒收。提交额外要求 `automation.prepare`，拒收要求 `automation.protect`。
+
+Controller 用原准备回执确定命令主体和请求命名空间。受理时在同一个事务中封存请求、命令、资格和裁决，命令初始为排队状态。同一执行步骤只保留一次裁决，异内容或更换幂等键会冲突。查无原件表示当前账本尚未记录裁决。首次永久拒收一经提交即挡住迟到的同一请求。排队命令的实际发送仍需逐动作最终准入和结果核对。
+
+### 自动模式设备门控
+
+停机后可显式执行 `leafseamer-controller migrate-storage --data-dir <绝对路径> --to-revision 96`。自动模式使用当前受监督内部评估器、批准的设备范围、凭据和认证窗口。受信本机恢复调用使用 `manual_source_ref: null`，仍需人员持有 `device.recover` 和 `device.command` 并通过近期认证。恢复采用后核对基线、拒绝快照和 FENCE 确认。只有原 OPEN 写入和 ACK 已持久采用、当前资格仍成立时才记录设备 Ready。评估器资格撤回或到期时，监督检查关闭出口并恢复保护态。
+
+新的 RunGrant 准备从受保护的自动控制来源开始。已准备的原授权可核验同一控制来源的精确 Ready 后继，资格仍受原配对、撤销水位、运行代次和时限约束。Ready 为设备级状态，排队动作需继续完成自身授权、最终发送许可和结果证据。
+
+Schema 96 下新受理的配对自动化命令固定实际设备绑定、Ready 引用、控制版本、当前设备动作登记、参数 Schema 和已批准模拟器完成／释放策略。自动化资格与裁决在同一 SQLite 事务中提交。受理时用认证时钟把原 RunGrant、Seamer 动作截止与当前 Ready、核心运行来源交集封存为单调期限，提交前重新核对。资格缺失、撤回或达到原截止时，事务回滚。Schema 95 的历史裁决仍可按原请求查回。
+
+停机后显式迁移至 Schema 97，可将新受理的自动化命令与原裁决一并写入命令账本。两处沿用同一 `CommandRef`，自动化来源绑定 RunGrant，人员来源继续绑定请求上下文及令牌。工作进程按同一命令完成编码、最终准入、Guard 安装、发送和结算。自动化最终准入从原 RunGrant、配对记录和服务批准重建权限绑定，在发送前重核当前资格并使用编码时封存的截止。临时库的原生模拟器回归覆盖两笔手动命令在升级后的原样查回和升级冲突回滚。已记录的 Schema 95 与 96 自动化裁决继续按原请求查回。
+
+配对结果读取使用 `/internal/automation/commands/result`。Controller 根据原请求和当前配对的 `automation.prepare.read` 权限查回原裁决。命令已进入持久终态时，响应附原命令引用、持久终态引用和已有的完成及资源证据引用，并要求精确匹配受理时的配对。排队、永久拒收及未建立命令账本的历史裁决返回空终态。实际自动化发送至 Seamer 采用终态的原生组合验收仍开放。
+
+Schema 97 新建的设备资源快照按目标设备读取命令和出站记录，继续核对无设备归属的会话帧及持久运行撤销水位。既有快照按封存的历史范围读取。原生双设备模拟器已验证来源设备的两笔命令结算后，另一台设备能独立进入自动 Ready。

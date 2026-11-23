@@ -3,8 +3,12 @@ import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {seal,ref,same,checked} from './auth-clock-value.mjs';
 import {IdentityError} from './identity-crypto.mjs';
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('core_runtime_source_'+code);};
 const freeze=value=>{if(value&&typeof value==='object'){Object.values(value).forEach(freeze);Object.freeze(value);}return value;};
+const verifiedBody=cacheVerifiedDocument((text,checksum)=>{
+ const value=checked(JSON.parse(text));need(canonicalize(value)===text&&value.digest===checksum,'integrity');return value;
+},{immutable:true});
 // 持久记录仅从当前受监督连接取得，完整观察持有身份仍由该连接复核；历史原件不恢复运行资格。
 export function coreRuntimeSource({db,service,bootId,core,connected,observe,assertObservation,domain}){
  const held=new Map();
@@ -30,8 +34,8 @@ export function coreRuntimeSource({db,service,bootId,core,connected,observe,asse
  function original(reference){
   need(reference?.revision==='1','reference');const row=db.prepare(`SELECT s.service_boot_id,s.response_id,s.body_jcs,s.body_digest,c.audit_jcs,s.selected_tick,s.expires_tick
    FROM core_runtime_source s JOIN core_runtime_source_commit c USING(source_id) WHERE s.source_id=? AND c.body_digest=s.body_digest`).raw().get(reference.id);
-  need(row,'missing');const value=checked(JSON.parse(row[2]));
-  need(canonicalize(value)===row[2]&&value.digest===row[3]&&same(ref(value),reference)&&value.service_boot_id===row[0]&&
+  need(row,'missing');const value=verifiedBody(row[2],row[3]);
+  need(same(ref(value),reference)&&value.service_boot_id===row[0]&&
    value.observation.response.message_id===row[1]&&value.format==='leafseamer-core-runtime-source/1'&&
    value.selected_tick_ns.padStart(20,'0')===row[5]&&value.expires_tick_ns.padStart(20,'0')===row[6]&&
    row[4]===canonicalize({kind:'core_runtime_source',source_ref:reference}),'integrity');return value;
@@ -43,7 +47,7 @@ export function coreRuntimeSource({db,service,bootId,core,connected,observe,asse
    same(value.core,parent)&&same(value.observation,observation)&&same(value.domain_ref,now.ref)&&
    BigInt(value.selected_tick_ns)<=BigInt(now.tick)&&BigInt(now.tick)<BigInt(value.expires_tick_ns),'not_current');
   need(sourceWindowContains(observation,observation.issued_tick_ns,observation.expires_tick_ns)&&value.expires_tick_ns===observation.expires_tick_ns,'window');
-  currentObservation(observation);return freeze({ref:reference,value});
+  currentObservation(observation);return Object.freeze({ref:freeze(reference),value});
  }
  return Object.freeze({current,
   select(){

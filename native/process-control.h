@@ -7,6 +7,7 @@ class CoreControl {
   bootstrap::Domain coreDomain;
   HANDLE rootJob=nullptr;
   DWORD corePid=0;
+  TimeProviderProcess* timeProvider=nullptr;
   std::string coreBoot;
   loading::Store loads;
   std::unique_ptr<installation::Client> installer;
@@ -100,8 +101,10 @@ class CoreControl {
       const auto requestedKey = object({{"launch_id", string(target)}, {"launch_intent_digest", string(requestedDigest)}});
       frame["payload"] = requestedKey;
       require(object(frame) == request, "control_binding");
-      const auto stored = target == launch ? nullptr : journal.worker(launch, target);
-      if ((target == launch && requestedDigest != intentDigest) || (stored && stored->digest != requestedDigest)) error("identity_conflict");
+      const bool providerTarget=timeProvider&&target==timeProvider->launchId();
+      const auto stored = target == launch || providerTarget ? nullptr : journal.worker(launch, target);
+      if ((target == launch && requestedDigest != intentDigest) || (stored && stored->digest != requestedDigest) ||
+          (providerTarget && requestedDigest!=timeProvider->launchDigest())) error("identity_conflict");
       else {
         frame["type"] = string("LAUNCH_RESULT"); std::string record = "null";
         if (target == launch) {
@@ -109,15 +112,80 @@ class CoreControl {
           record = object({{"key", key}, {"supervisor_instance_id", string(supervisor)}, {"state", string("admitted_closed")},
             {"creation_attempted", "true"}, {"admission_receipt", original}, {"retirement_evidence", "null"}, {"gate_state", string("closed")}});
         }
-        if (target != launch) record = workerRecord(target, requestedDigest);
+        if (providerTarget) {
+          const auto original=timeProvider->currentRecord();
+          if(!original.receipt.empty())record=object({{"key",requestedKey},{"supervisor_instance_id",string(supervisor)},{"state",string("admitted_closed")},
+            {"creation_attempted","true"},{"admission_receipt",original.receipt},{"retirement_evidence","null"},{"gate_state",string("closed")}});
+        } else if (target != launch) record = workerRecord(target, requestedDigest);
         frame["payload"] = object({{"key", requestedKey}, {"record", record}});
       }
+    } else if(type=="TIME_PROVIDER_EVIDENCE_QUERY"){
+      const auto target=id(value("$.payload.launch_id")),requestedDigest=digestValue(value("$.payload.launch_intent_digest"));
+      const auto requestedKey=object({{"launch_id",string(target)},{"launch_intent_digest",string(requestedDigest)}});
+      frame["version"]=string("time-provider-evidence/1");
+      frame["payload"]=requestedKey;
+      require(object(frame)==request,"control_binding");
+      std::string evidence="null";
+      if(timeProvider&&target==timeProvider->launchId()&&requestedDigest==timeProvider->launchDigest()){
+        const auto original=timeProvider->currentRecord();
+        if(!original.receipt.empty()){
+          const auto process=object({{"observation_id",string(target)},{"provider_pid",original.pid},
+            {"creation_time_filetime",string(original.creationTime)},{"image_id",string(original.imageId)},
+            {"observed_tick_ns",string(original.observedTick)}});
+          evidence=object({{"launch_intent",original.intent},{"admission_receipt",original.receipt},{"process_observation",process}});
+        }
+      }
+      frame["type"]=string("TIME_PROVIDER_EVIDENCE_RESULT");
+      frame["payload"]=object({{"key",requestedKey},{"record",evidence}});
+    } else if(type=="TIME_PROVIDER_RETIREMENT_QUERY"){
+      const auto target=id(value("$.payload.launch_id")), requestedDigest=digestValue(value("$.payload.launch_intent_digest"));
+      const auto requestedKey=object({{"launch_id",string(target)},{"launch_intent_digest",string(requestedDigest)}});
+      frame["version"]=string("time-provider-evidence/1");frame["payload"]=requestedKey;
+      require(object(frame)==request,"control_binding");
+      const auto retired=journal.timeProviderRetirement(launch,target,service,databaseId);
+      std::string evidence="null";
+      if(!retired.original.receipt.empty()&&bootstrap::digest(retired.original.intent)==requestedDigest){
+        const auto& original=retired.original;
+        const auto process=object({{"observation_id",string(target)},{"provider_pid",original.pid},
+          {"creation_time_filetime",string(original.creationTime)},{"image_id",string(original.imageId)},
+          {"observed_tick_ns",string(original.observedTick)}});
+        const auto retiredGroup=[](const std::string& exit,const std::string& forced){
+          return object({{"active_processes","0"},{"exit_code",exit},{"forced",forced=="1"?"true":"false"}});
+        };
+        evidence=object({{"launch_intent",original.intent},{"admission_receipt",original.receipt},{"process_observation",process},
+          {"core_receipt_id",string(retired.coreReceiptId)},{"provider_exit",retiredGroup(retired.providerExit,retired.providerForced)},
+          {"core_exit",retiredGroup(retired.coreExit,retired.coreForced)}});
+      }
+      frame["type"]=string("TIME_PROVIDER_RETIREMENT_RESULT");
+      frame["payload"]=object({{"key",requestedKey},{"record",evidence}});
+    } else if(type=="WORKER_RETIREMENT_QUERY"){
+      const auto coreReceiptId=id(value("$.payload.core_receipt_id")), target=id(value("$.payload.launch_id"));
+      const auto requestedDigest=digestValue(value("$.payload.launch_intent_digest"));
+      const auto workerKey=object({{"launch_id",string(target)},{"launch_intent_digest",string(requestedDigest)}});
+      const auto requestedKey=object({{"core_receipt_id",string(coreReceiptId)},
+        {"launch_id",string(target)},{"launch_intent_digest",string(requestedDigest)}});
+      frame["version"]=string("worker-retirement-evidence/1");frame["payload"]=requestedKey;
+      require(object(frame)==request,"control_binding");
+      const auto retired=journal.workerRetirement(launch,coreReceiptId,target,requestedDigest,service,databaseId);
+      std::string evidence="null";
+      if(!retired.receipt.empty()&&bootstrap::digest(retired.intent)==requestedDigest){
+        const auto previousSupervisor=id(retired.supervisor);
+        const auto record=object({{"key",workerKey},{"supervisor_instance_id",string(previousSupervisor)},
+          {"state",string("retired")},{"creation_attempted","true"},{"admission_receipt",retired.receipt},
+          {"retirement_evidence",retired.retirement},{"gate_state",string("closed")}});
+        const auto coreExit=object({{"active_processes","0"},{"exit_code",retired.exitCode},
+          {"forced",retired.forced=="1"?"true":"false"}});
+        evidence=object({{"core_receipt",retired.coreReceipt},{"core_exit",coreExit},{"worker_record",record}});
+      }
+      frame["type"]=string("WORKER_RETIREMENT_RESULT");
+      frame["payload"]=object({{"key",requestedKey},{"record",evidence}});
     } else if (type == "LAUNCH_REGISTER") {
       WorkerInput worker(raw, request, service, databaseId, supervisor, generation, launch, rootMember, manifest, policyRevision, domain);
       frame["payload"] = object({{"intent", worker.intent}, {"authorization", worker.authorization}});
       require(object(frame) == request, "control_binding");
       std::string failure;
-      if (!worker.authorized) failure = "unauthorized";
+      if(timeProvider&&worker.launch==timeProvider->launchId())failure="identity_conflict";
+      else if (!worker.authorized) failure = "unauthorized";
       else if (worker.expired) failure = "expired";
       else if (!fenceSynchronized) failure = "stale_fence";
       else failure = journal.registerWorker(launch, worker.launch, worker.intentDigest, worker.intent, worker.member, worker.group, worker.groupGeneration, worker.authorization, worker.fenceRevision);
@@ -374,7 +442,9 @@ public:
   ~CoreControl() {
     if (pending && !connectedInline) { CancelIoEx(pipe.value, &io); DWORD ignored = 0; GetOverlappedResult(pipe.value, &io, &ignored, TRUE); }
   }
-  void activate(const std::string& receipt) { require(!admitted, "control_state"); receiptBody = receipt; admitted = true; deadline = GetTickCount64() + 5000; }
+  void activate(const std::string& receipt,TimeProviderProcess* provider) {
+    require(!admitted,"control_state");receiptBody=receipt;timeProvider=provider;admitted=true;deadline=GetTickCount64()+5000;
+  }
   void poll(HANDLE process, DWORD pid, HANDLE job, ProcessJournal& journal) {
     require(admitted && GetTickCount64() < deadline, "control_timeout");
     BOOL belongs = FALSE;

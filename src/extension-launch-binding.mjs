@@ -1,21 +1,24 @@
-import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {pinLaunchContent} from './launch-content.mjs';
 import {IdentityError} from './identity-crypto.mjs';
-import {memoExecutionRead} from './execution-read-view.mjs';
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('extension_launch_'+code);};
-const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 const same=(a,b)=>canonicalize(a)===canonicalize(b);
 // 核心内部启动准备的固定来源；不接受调用者传入审批、角色或安装提供者。
 export function extensionLaunchBinding({db,service,available,source,currentApproval,currentResolution,reference}){
+ const installationOriginal=cacheVerifiedDocument((body,digest)=>{
+  const content=JSON.parse(body);
+  const installationRef=reference('installation',content.installation_id,1,content);
+  need(canonicalize(content)===body&&installationRef.digest===digest,'installation');
+  return {content,installationRef};
+ },{immutable:true});
  function select(approvalRef){
   need(db.inTransaction,'writer_required');const approved=currentApproval(approvalRef);
   need(approved.status==='approved','revoked');const record=approved.record;
   const row=db.prepare('SELECT content_jcs,content_digest FROM extension_candidate WHERE installation_id=?').raw().get(record.installation_ref.object_id);
-  need(row,'installation');const content=memoExecutionRead(db,'extension-document',row,()=>{
-   const value=JSON.parse(row[0]);need(canonicalize(value)===row[0]&&'sha256:'+crypto.createHash('sha256').update(row[0]).digest('hex')===row[1],'installation');return value;
-  });
-  need(same(record.installation_ref,reference('installation',content.installation_id,1,content)),'installation');
+  need(row,'installation');
+  const {content,installationRef}=installationOriginal(...row);
+  need(same(record.installation_ref,installationRef),'installation');
   const receipt=content.receipt;
   need(same(record.platform_profile_ref,receipt.platform_profile_ref)&&
    record.manifest_digest===receipt.manifest_digest&&record.artifact_set_digest===receipt.artifact_set_digest,'content_binding');

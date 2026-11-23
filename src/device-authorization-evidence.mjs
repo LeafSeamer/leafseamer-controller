@@ -5,6 +5,7 @@ import {IdentityError} from './identity-crypto.mjs';
 import {checked,seal,ref,digest,same} from './auth-clock-value.mjs';
 import {currentDeviceAuthorization,readDeviceAuthorizationState} from './device-authorization-state.mjs';
 import {memoExecutionRead,withExecutionReadView} from './execution-read-view.mjs';
+import {readControlSource} from './device-control-source.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('device_evidence_'+code);};
 const namedRef=v=>({id:v.evidence_id,revision:v.revision,digest:v.evidence_digest});
 const freeze=v=>{if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Object.freeze(v);}return v;};
@@ -18,9 +19,11 @@ function body(db,sql,...args){const row=db.prepare(sql).raw().get(...args);need(
   const v=JSON.parse(row[0]);need(canonicalize(v)===row[0]&&'sha256:'+crypto.createHash('sha256').update(row[0]).digest('hex')===row[1],'source_integrity');return v;
  });}
 
-// 本机ordinary/manual设备资格的完整适用集合；不复用单条命令的授权使用或RunGrant。
+// 设备资格和单条动作的 RunGrant 分别核验。
 function revocationCut(db,service,selected,execution){
- need(db.inTransaction&&selected.context.mode==='manual'&&selected.context.purpose==='ordinary','scope');
+ const {mode,holder}=selected.context;
+ need(db.inTransaction&&selected.context.purpose==='ordinary'&&
+  (mode==='manual'&&holder||Number(service.schema_revision)>=96&&mode==='automatic'&&holder===null),'scope');
  need(same(execution.value.binding,selected.binding),'runtime_binding');
  const runtime=body(db,'SELECT body_jcs,body_digest FROM worker_runtime_binding WHERE runtime_id=?',execution.value.runtime_binding_ref.object_id);
  const binding=runtime.launch_intent.extension_binding;
@@ -36,11 +39,11 @@ function revocationCut(db,service,selected,execution){
  const denied=db.prepare('SELECT deny_id,body_jcs,body_digest FROM extension_approval_deny WHERE approval_id=?').raw().all(binding.approval_ref.object_id);
  need(denied.length===0&&!db.prepare('SELECT 1 FROM worker_launch_denial WHERE launch_id=?').pluck().get(runtime.launch_intent.launch_id)&&
   !db.prepare('SELECT 1 FROM worker_runtime_withdrawal WHERE runtime_id=?').pluck().get(runtime.runtime_binding_id),'revoked');
- need(selected.authorization_dependencies.length===2&&selected.authorization_dependencies.every(v=>v.result==='no_matching_denial'),'revoked');
+ need(selected.authorization_dependencies.length===(mode==='manual'?2:1)&&selected.authorization_dependencies.every(v=>v.result==='no_matching_denial'),'revoked');
  // local_issuer原件在本库不可改写；跨服务issuer必须由独立提供者接入，不能继承这个集合。
  const issuer=db.prepare('SELECT issuer_id,issuer_epoch,initialization_tx_id FROM identity_issuer').raw().get();need(issuer,'issuer');
  need(selected.authorization_dependencies.every(v=>v.identity.issuer_id===issuer[0]&&v.identity.issuer_epoch===issuer[1]),'issuer');
- return {format:'local-manual-device-revocation-cut/1',scope:selected.binding.scope,binding:selected.binding,context_digest:selected.context_digest,
+ return {format:mode==='manual'?'local-manual-device-revocation-cut/1':'local-automatic-device-revocation-cut/1',scope:selected.binding.scope,binding:selected.binding,context_digest:selected.context_digest,
   source_refs:{holder:selected.source_refs.holder,evaluator:selected.source_refs.evaluator},identity_dependencies:selected.authorization_dependencies,
   extension:{runtime_ref:execution.value.runtime_binding_ref,installation_ref:binding.installation_ref,approval_ref:binding.approval_ref,
    review_ref:binding.review_ref,configuration_ref:binding.configuration_ref,role_resolution_ref:binding.role_resolution_ref,permissions_digest:binding.permissions_digest},
@@ -51,10 +54,11 @@ function revocationCut(db,service,selected,execution){
 }
 function requirement(selected,m,e,cut,id,tick){
  return namedSeal({format_version:'open-authorization-requirement/0.1.0-draft.1',requirement_id:id,revision:'1',binding:selected.binding,
-  purpose:'ordinary',control_mode:'manual',control_state_ref:m.value.control_state_ref,control_authority_ref:m.value.control_authority_ref,holder:m.value.holder,
+  purpose:'ordinary',control_mode:m?'manual':'automatic',control_state_ref:m?m.value.control_state_ref:selected.control_state_ref,
+  control_authority_ref:m?m.value.control_authority_ref:selected.context.control_authority_ref,holder:m?m.value.holder:null,
   evaluator:{runtime_ref:e.value.core_runtime_source_ref,policy_ref:e.value.policy_ref,authority_response_ref:e.ref,scope_proof_ref:e.value.policy_ref,validity_ref:ref(e.value.authentication_window)},
-  holder_evidence:{principal:m.value.holder,session_id:m.value.session_id,credential_id:m.value.credential_id,
-   challenge_ref:m.value.challenge_ref,response_ref:m.ref,scope_proof_ref:ref(m.value.authorization),validity_ref:ref(m.value.authentication_window)},
+  holder_evidence:m?{principal:m.value.holder,session_id:m.value.session_id,credential_id:m.value.credential_id,
+   challenge_ref:m.value.challenge_ref,response_ref:m.ref,scope_proof_ref:ref(m.value.authorization),validity_ref:ref(m.value.authentication_window)}:null,
   cancel_evidence:null,authorization_state_ref:selected.state_ref,revocation_cut_ref:ref(cut),selected_tick_ns:tick,expires_tick_ns:selected.expires_tick_ns},'requirement_digest');
 }
 export function selectedDeviceEvidenceDeadline(db,state){
@@ -75,25 +79,35 @@ export function deviceAuthorizationEvidence({db,service,writer,currentContext,ma
    c.body_jcs,c.body_digest,c.audit_jcs,c.notification_jcs,r.body_jcs,r.body_digest FROM device_authorization_evidence e
    JOIN device_authorization_evidence_commit c USING(commit_id) JOIN device_authorization_revocation_cut r ON r.cut_id=e.cut_id WHERE e.evidence_id=?`).raw().get(reference?.id);
   need(row,'missing');const evidence=document(row[5],row[6],'evidence_digest'),commit=checked(document(row[8],row[9])),cut=checked(document(row[12],row[13])),request=JSON.parse(row[4]);
+  const automatic=request.manual_source_ref===null;
   need(evidence.format_version==='device-authorization-evidence/0.1.0-draft.1'&&commit.format==='device-authorization-evidence-commit/1'&&
-   cut.format==='local-manual-device-revocation-cut/1'&&same(namedRef(evidence),reference)&&evidence.state_ref.id===row[0]&&cut.id===row[1]&&commit.id===row[7]&&
+   cut.format===(automatic?'local-automatic-device-revocation-cut/1':'local-manual-device-revocation-cut/1')&&same(namedRef(evidence),reference)&&evidence.state_ref.id===row[0]&&cut.id===row[1]&&commit.id===row[7]&&
    canonicalize(request)===row[4]&&digest(request)===row[3]&&request.request_id===row[2]&&same(commit.request,request)&&
    same(commit.evidence_ref,reference)&&same(commit.state_ref,evidence.state_ref)&&same(evidence.requirement.revocation_cut_ref,ref(cut))&&
    row[10]===canonicalize({kind:'device_authorization_evidence_selected',commit_ref:ref(commit),evidence_ref:reference})&&row[11]===row[10],'integrity');
   const state=readDeviceAuthorizationState(db,evidence.state_ref);
-  need(state.value.status==='policy_selected'&&digest(state.value.context)===evidence.context_digest&&
+  const {context}=state.value;
+  need(state.value.status==='policy_selected'&&digest(context)===evidence.context_digest&&context.mode===(automatic?'automatic':'manual')&&
    same(state.recovery.authorization.binding,evidence.requirement.binding)&&same(evidence.requirement.authorization_state_ref,state.ref)&&
    evidence.requirement.requirement_digest===digest((({requirement_digest,...v})=>v)(evidence.requirement))&&
    same(cut.source_refs,{holder:request.manual_source_ref,evaluator:request.evaluator_source_ref})&&same(cut.binding,evidence.requirement.binding)&&
    cut.context_digest===evidence.context_digest,'binding');
   const source=(table,column,reference)=>{const row=db.prepare(`SELECT body_jcs,body_digest FROM ${table} WHERE ${column}=?`).raw().get(reference.id);
    need(row,'source_missing');const value=checked(document(row[0],row[1]));need(same(ref(value),reference),'source_integrity');return {ref:reference,value};};
-  const m=source('execution_manual_authority','source_id',request.manual_source_ref),e=source('device_evaluator_source','source_id',request.evaluator_source_ref);
-  const windows=[{role:'evaluator',evidence_ref:e.ref,not_before_tick_ns:e.value.selected_tick_ns,before_tick_ns:e.value.expires_tick_ns},
-   {role:'holder',evidence_ref:m.ref,not_before_tick_ns:m.value.selected_tick_ns,before_tick_ns:m.value.expires_tick_ns}];
+  const m=automatic?null:source('execution_manual_authority','source_id',request.manual_source_ref),e=source('device_evaluator_source','source_id',request.evaluator_source_ref);
+  const windows=[{role:'evaluator',evidence_ref:e.ref,not_before_tick_ns:e.value.selected_tick_ns,before_tick_ns:e.value.expires_tick_ns}];
+  if(m)windows.push({role:'holder',evidence_ref:m.ref,not_before_tick_ns:m.value.selected_tick_ns,before_tick_ns:m.value.expires_tick_ns});
   const expires=String(windows.map(v=>BigInt(v.before_tick_ns)).reduce((a,b)=>a<b?a:b));
-  const selected={binding:m.value.binding,state_ref:state.ref,expires_tick_ns:expires};
-  need(same(evidence.windows,windows)&&same(cut.identity_dependencies,[e.value.authorization_dependencies,m.value.authorization_dependencies])&&
+  const selected={binding:state.recovery.authorization.binding,state_ref:state.ref,expires_tick_ns:expires,context,control_state_ref:commit.control_state_ref};
+  if(automatic){
+   const control=readControlSource(db,request.device_id,commit.control_state_ref?.revision);
+   need(same(control.ref,commit.control_state_ref)&&control.value.mode==='automatic'&&control.value.holder===null&&
+    control.value.gate_state==='protected'&&control.value.pending_operation_id===null&&
+    same(control.value.scope,context.scope)&&control.value.control_epoch===context.control_epoch&&control.value.effective_version===context.control_version&&
+    e.value.device_id===request.device_id,'source_binding');
+  }else need(same(m.value.binding,selected.binding),'source_binding');
+  const dependencies=[e.value.authorization_dependencies];if(m)dependencies.push(m.value.authorization_dependencies);
+  need(same(evidence.windows,windows)&&same(cut.identity_dependencies,dependencies)&&
    same(requirement(selected,m,e,cut,evidence.requirement.requirement_id,commit.selected_tick_ns),evidence.requirement)&&
    windows.every(v=>BigInt(v.not_before_tick_ns)<=BigInt(commit.selected_tick_ns))&&BigInt(commit.selected_tick_ns)<BigInt(expires),'source_binding');
   if(commit.previous_evidence_ref){
@@ -109,6 +123,7 @@ export function deviceAuthorizationEvidence({db,service,writer,currentContext,ma
  }
  function live(saved,selected){
   need(same(saved.value.state_ref,selected.state_ref)&&saved.value.context_digest===selected.context_digest&&same(saved.value.requirement.binding,selected.binding),'changed');
+  if(selected.context.mode==='automatic')need(same(saved.value.requirement.control_state_ref,selected.control_state_ref),'changed');
   const now=domain();need(now.ref.clock_domain_id===selected.binding.clock_domain_id&&now.ref.descriptor_digest===selected.binding.descriptor_digest&&
    BigInt(saved.value.requirement.selected_tick_ns)<=BigInt(now.tick)&&BigInt(now.tick)<BigInt(saved.value.requirement.expires_tick_ns),'expired');
  }
@@ -133,14 +148,15 @@ export function deviceAuthorizationEvidence({db,service,writer,currentContext,ma
     const previous=head(state);need(same(previous?.ref??null,fixed.expected_evidence_ref),'selection_conflict');
     if(previous){currentInside(fixed.device_id);live(previous,selected);}else need(BigInt(selected.selected_tick_ns)<BigInt(state.recovery.authorization.expires_tick_ns),'recovery_expired');
     need(db.prepare('SELECT count(*) FROM device_authorization_evidence').pluck().get()<16384,'capacity');
-    const m=manual(fixed.manual_source_ref),e=evaluator(fixed.evaluator_source_ref);need(!m.denied&&!e.denied,'revoked');
+    const m=fixed.manual_source_ref===null?null:manual(fixed.manual_source_ref),e=evaluator(fixed.evaluator_source_ref);need(!m?.denied&&!e.denied,'revoked');
     const cut=seal({...revocationCut(db,service,selected,executionCurrent(fixed.device_id)),id:crypto.randomUUID(),revision:'1'});
     const r=requirement(selected,m,e,cut,crypto.randomUUID(),selected.selected_tick_ns);
     const evidence=namedSeal({format_version:'device-authorization-evidence/0.1.0-draft.1',evidence_id:crypto.randomUUID(),revision:'1',state_ref:state.ref,
      requirement:r,context_digest:selected.context_digest,windows:selected.windows},'evidence_digest'),reference=namedRef(evidence);
     const generation=Number(previous?.commit.generation??0)+1;need(Number.isSafeInteger(generation),'capacity');
     const commit=seal({format:'device-authorization-evidence-commit/1',id:crypto.randomUUID(),revision:'1',request:fixed,state_ref:state.ref,
-     previous_evidence_ref:previous?.ref??null,evidence_ref:reference,generation:String(generation),selected_tick_ns:selected.selected_tick_ns});
+     previous_evidence_ref:previous?.ref??null,evidence_ref:reference,generation:String(generation),selected_tick_ns:selected.selected_tick_ns,
+     ...(m===null?{control_state_ref:selected.control_state_ref}:{})});
     const audit=canonicalize({kind:'device_authorization_evidence_selected',commit_ref:ref(commit),evidence_ref:reference});
     const written=value=>need(value.changes===1,'storage');
     written(db.prepare('INSERT INTO device_authorization_revocation_cut VALUES(?,?,?,?,?)').run(cut.id,state.ref.id,canonicalize(cut),cut.digest,evidence.evidence_id));

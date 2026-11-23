@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import {initializeStorage, migrateStorage, openStorage} from '../dist/storage.mjs';
-import {seal, policy, captureInterval, extrapolate, acquisition} from '../dist/auth-clock-value.mjs';
+import {seal, policy, captureInterval, extrapolate, acquisition, ref} from '../dist/auth-clock-value.mjs';
 import {startAuthenticationClock} from '../dist/auth-clock.mjs';
 
 import {fixture} from './auth-clock-fixture.mjs';
@@ -27,6 +27,11 @@ test('耗时边界来自当前持久采集策略，旧读取形状不变且不�
  try{const first=clock.durationSample(),original=storage.authenticationClock.current(first.runtime_domain_ref.clock_domain_id);
   assert.deepEqual(first.duration_bounds,{policy_ref:original.policy_ref,drift_ppb:original.drift_ppb,monotonic_quantization_ns:original.monotonic_quantization_ns});
   assert.equal(Object.hasOwn(clock.pairingSample(),'duration_bounds'),false);assert.equal(Object.hasOwn(clock.current(),'duration_bounds'),false);
+  const bridge=clock.referenceTimeSample();
+  assert.deepEqual(bridge.acquisition_ref,ref(original));assert.deepEqual(bridge.runtime_ref,ref(f.evidence.runtime));
+  assert.deepEqual(bridge.source_ref,f.evidence.policy.system_time_source_ref);assert.deepEqual(bridge.policy_ref,original.policy_ref);
+  assert.equal(bridge.valid_before_tick_ns,first.valid_before_tick_ns);assert.equal(bridge.monotonic_quantization_ns,original.monotonic_quantization_ns);
+  assert.equal(Object.hasOwn(clock.pairingSample(),'source_ref'),false);
   assert.ok(Object.isFrozen(first.duration_bounds)&&Object.isFrozen(first.duration_bounds.policy_ref));f.source.advance(3000000000n);
   const next=clock.durationSample();assert.deepEqual(next.acquisition_ref,first.acquisition_ref);assert.deepEqual(next.duration_bounds,first.duration_bounds);assert.equal(next.valid_before_tick_ns,first.valid_before_tick_ns);
   f.source.advance(2000000000n);assert.throws(()=>clock.durationSample(),e=>e.code==='auth_clock_expired');assert.equal(clock.status().qualified,false);

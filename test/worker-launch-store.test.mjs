@@ -66,6 +66,21 @@ test('实际业务库准备完整worker意图、精确设备集合和审计，�
   }finally{reopened.close();}
 });
 
+test('已读过的启动原件在存储重开后仍检查原始字节',async t=>{
+  const {root,storage,intent}=await setup(t);
+  const prepared=await storage.workerLaunches.prepare(bytes(intent));
+  assert.deepEqual(storage.workerLaunches.current(),[prepared]);
+  assert.deepEqual(storage.workerLaunches.query(key(intent)),prepared);
+  storage.close();
+  inspect(root,db=>{
+    db.exec('DROP TRIGGER worker_launch_no_update');
+    db.prepare("UPDATE worker_launch_preparation SET intent_jcs=intent_jcs||' ' WHERE launch_id=?").run(intent.launch_id);
+  });
+  const reopened=openStorage(root);
+  try{assert.throws(()=>reopened.workerLaunches.query(key(intent)),{code:'worker_launch_integrity'});}
+  finally{reopened.close();}
+});
+
 test('准备前核当前核心、权威、域、平台、实际设备及成员组唯一性，失败不建立记录',async t=>{
   const missing=await setup(t,{parent:false});
   await assert.rejects(missing.storage.workerLaunches.prepare(bytes(missing.intent)),e=>e.code==='worker_launch_core_required');missing.storage.close();

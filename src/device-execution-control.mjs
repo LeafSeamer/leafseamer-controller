@@ -18,10 +18,12 @@ function source(db,binding,runtime,device){
  need(db.inTransaction,'execution_control_writer');
  const bound=currentDeviceExecutionBinding(db,runtime,device,binding.ipc_session_id);
  const control=deviceRegistryReader(db,{...binding,schema_revision:'31'}).control(device);
- need(control.mode==='manual'&&control.holder&&control.pending_change===null&&control.gate_state==='protected'&&
+ const schema=Number(db.pragma('user_version',{simple:true}));
+ need((control.mode==='manual'&&control.holder||schema>=96&&control.mode==='automatic'&&control.holder===null)&&
+  control.pending_change===null&&control.gate_state==='protected'&&
   control.in_flight_command_ids.length===0&&control.unresolved_command_ids.length===0,'execution_control_source');
  need(!db.prepare("SELECT 1 FROM ca_adjudication a JOIN ca_request_key k USING(key_id) WHERE k.device_id=? AND a.decision!='rejected'").pluck().get(device),'execution_control_command_cut');
- const source=Number(db.pragma('user_version',{simple:true}))>=32?currentControlSource(db,device):null;
+ const source=schema>=32?currentControlSource(db,device):null;
  if(source)need(source.current.value.clock_domain_id===binding.clock_domain_id&&source.current.value.descriptor_digest===binding.descriptor_digest&&
   source.current.value.revision===control.revision&&same(source.current.ref,source.authority.ref),'execution_control_source');
  return {bound,control,source};
