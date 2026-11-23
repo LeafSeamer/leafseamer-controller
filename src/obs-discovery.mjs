@@ -20,7 +20,7 @@ const cutInvalidate=new Set(['ExitStarted','StudioModeStateChanged','CurrentScen
 const record=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const name=value=>typeof value==='string'&&value.length>0&&Buffer.byteLength(value)<=1024;
 const version=value=>typeof value==='string'&&/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/.test(value)&&value.length<=80;
-const uuid=value=>typeof value==='string'&&/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
+const uuid=value=>typeof value==='string'&&/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}(?![\s\S])/.test(value);
 const challengeValue=value=>typeof value==='string'&&/^[A-Za-z0-9+/]{43}=$/.test(value)&&Buffer.from(value,'base64').toString('base64')===value;
 const hash=value=>createHash('sha256').update(value).digest('base64');
 
@@ -48,11 +48,13 @@ function scenes(response,program){
  return Object.freeze(values);
 }
 
-async function inspectObs(input,cut){
+async function inspectObs(input,cut,signal){
  requireValue(record(input)&&Object.keys(input).sort().join(',')==='password,port'&&Number.isInteger(input.port)&&
   input.port>0&&input.port<=65535&&name(input.password),'input');
- let password=input.password,pending=null,failure=null;
- const port=input.port,deadline=performance.now()+budgetMs;
+ requireValue(signal===undefined||signal instanceof AbortSignal&&!signal.aborted,'disconnected');
+ let password=input.password,pending=null,failure=null,retained=false,sampling=false;
+ const port=input.port;
+ let deadline=performance.now()+budgetMs;
  const socket=new WebSocket('ws://127.0.0.1:'+port,protocol,{
   followRedirects:false,perMessageDeflate:false,maxPayload:262144,maxFragments:16,maxBufferedChunks:16,handshakeTimeout:budgetMs
  });
@@ -61,9 +63,13 @@ async function inspectObs(input,cut){
   failure=error;
   const waiting=pending;pending=null;
   waiting?.reject(error);
+  clearTimeout(timer);
+  signal?.removeEventListener('abort',close);
   socket.terminate();
  };
- const timer=setTimeout(()=>fail(new ObsDiscoveryError('timeout')),budgetMs);
+ let timer=setTimeout(()=>fail(new ObsDiscoveryError('timeout')),budgetMs);
+ const close=()=>fail(new ObsDiscoveryError('disconnected'));
+ signal?.addEventListener('abort',close,{once:true});
  function assertCurrent(){
   if(failure)throw failure;
   requireValue(performance.now()<deadline,'timeout');
@@ -78,6 +84,7 @@ async function inspectObs(input,cut){
    requireValue(record(frame)&&record(frame.d),'frame');
    if(frame.op===5){
     requireValue(typeof frame.d.eventType==='string','frame');
+    if(frame.d.eventType==='CurrentProgramSceneChanged'&&retained&&!sampling)return;
     requireValue(!invalidate.has(frame.d.eventType)&&!(cut&&cutInvalidate.has(frame.d.eventType)),'observation_changed');
     return;
    }
@@ -100,23 +107,7 @@ async function inspectObs(input,cut){
    response.requestStatus.code===100&&record(response.responseData),'request');
   return response.responseData;
  }
- try{
-  const hello=await receive(0),proof=hello.authentication;
-  requireValue(hello.rpcVersion===1&&version(hello.obsStudioVersion)&&version(hello.obsWebSocketVersion),'version');
-  requireValue(record(proof)&&challengeValue(proof.salt)&&challengeValue(proof.challenge),'authentication_required');
-  const authentication=hash(hash(password+proof.salt)+proof.challenge);
-  password=null;
-  // General + Config + Scenes + Transitions + Outputs + SceneItems + Ui.
-  const identified=await receive(2,{op:1,d:{rpcVersion:1,authentication,eventSubscriptions:cut?cutSubscriptions:6}});
-  requireValue(identified.negotiatedRpcVersion===1,'version');
-  const advertised=await read('GetVersion'),available=advertised.availableRequests;
-  requireValue(advertised.rpcVersion===1&&advertised.obsVersion===hello.obsStudioVersion&&advertised.obsWebSocketVersion===hello.obsWebSocketVersion&&
-   Array.isArray(available)&&available.length<=1024&&available.every(value=>typeof value==='string'&&/^[A-Za-z][A-Za-z0-9]{0,127}$/.test(value))&&
-   new Set(available).size===available.length&&requests.every(request=>available.includes(request)),'version');
-  const availableRequestsDigest='sha256:'+createHash('sha256').update(JSON.stringify([...available].sort())).digest('hex');
-  if(cut)requireValue(advertised.obsVersion===cutProfile.obs&&advertised.obsWebSocketVersion===cutProfile.websocket&&
-   cutRequests.every(request=>available.includes(request))&&available.includes('SetCurrentProgramScene')&&
-   availableRequestsDigest===cutProfile.requestsDigest,'cut_profile_version');
+ async function observe(){
   const before=collection(await read('GetSceneCollectionList'));
   const directory=await read('GetSceneList');
   const program=await read('GetCurrentProgramScene');
@@ -142,12 +133,49 @@ async function inspectObs(input,cut){
   const after=collection(await read('GetSceneCollectionList'));
   requireValue(before.current===after.current&&JSON.stringify(before.collections)===JSON.stringify(after.collections),'observation_changed');
   assertCurrent();
-  return Object.freeze({obs_version:advertised.obsVersion,websocket_version:advertised.obsWebSocketVersion,rpc_version:1,
-   available_requests_digest:availableRequestsDigest,collection_name:after.current,
-   program_scene_uuid:program.sceneUuid,scenes:entries,...(cut&&{profile:'obs_isolated_empty_cut/1'})});
- }finally{password=null;clearTimeout(timer);socket.terminate();}
+  return {collection_name:after.current,program_scene_uuid:program.sceneUuid,scenes:entries};
+ }
+ try{
+  const hello=await receive(0),proof=hello.authentication;
+  requireValue(hello.rpcVersion===1&&version(hello.obsStudioVersion)&&version(hello.obsWebSocketVersion),'version');
+  requireValue(record(proof)&&challengeValue(proof.salt)&&challengeValue(proof.challenge),'authentication_required');
+  const authentication=hash(hash(password+proof.salt)+proof.challenge);
+  password=null;
+  // General + Config + Scenes + Transitions + Outputs + SceneItems + Ui.
+  const identified=await receive(2,{op:1,d:{rpcVersion:1,authentication,eventSubscriptions:cut?cutSubscriptions:6}});
+  requireValue(identified.negotiatedRpcVersion===1,'version');
+  const advertised=await read('GetVersion'),available=advertised.availableRequests;
+  requireValue(advertised.rpcVersion===1&&advertised.obsVersion===hello.obsStudioVersion&&advertised.obsWebSocketVersion===hello.obsWebSocketVersion&&
+   Array.isArray(available)&&available.length<=1024&&available.every(value=>typeof value==='string'&&/^[A-Za-z][A-Za-z0-9]{0,127}$/.test(value))&&
+   new Set(available).size===available.length&&requests.every(request=>available.includes(request)),'version');
+  const availableRequestsDigest='sha256:'+createHash('sha256').update(JSON.stringify([...available].sort())).digest('hex');
+  if(cut)requireValue(advertised.obsVersion===cutProfile.obs&&advertised.obsWebSocketVersion===cutProfile.websocket&&
+   cutRequests.every(request=>available.includes(request))&&available.includes('SetCurrentProgramScene')&&
+   availableRequestsDigest===cutProfile.requestsDigest,'cut_profile_version');
+  const profile={obs_version:advertised.obsVersion,websocket_version:advertised.obsWebSocketVersion,rpc_version:1,
+   available_requests_digest:availableRequestsDigest,...(cut&&{profile:'obs_isolated_empty_cut/1'})};
+  const initial=Object.freeze({...profile,...await observe()});
+  if(signal===undefined)return initial;
+  retained=true;
+  clearTimeout(timer);
+  deadline=Infinity;
+  return Object.freeze({initial,assertCurrent,close,async sample(){
+   assertCurrent();
+   requireValue(!sampling,'session_busy');
+   sampling=true;
+   deadline=performance.now()+budgetMs;
+   timer=setTimeout(()=>fail(new ObsDiscoveryError('timeout')),budgetMs);
+   try{return Object.freeze({...profile,...await observe()});}
+   catch(error){fail(error);throw error;}
+   finally{sampling=false;clearTimeout(timer);deadline=Infinity;}
+  }});
+ }finally{password=null;if(!retained)close();}
 }
 
 // 场景名称只供显示。两个入口读完即关闭，不签发 DeviceSession 或写权限。
 export const discoverObsScenes=input=>inspectObs(input,false);
 export const inspectObsCut=input=>inspectObs(input,true);
+export function openObsCutSession(input,signal){
+ requireValue(signal instanceof AbortSignal,'session');
+ return inspectObs(input,true,signal);
+}

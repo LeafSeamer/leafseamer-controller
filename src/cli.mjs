@@ -20,7 +20,7 @@ let app;
 try {
   const [command, ...args] = process.argv.slice(2);
   const obsInspector=command==='inspect-obs'?discoverObsScenes:command==='inspect-obs-cut'?inspectObsCut:null;
-  const allowed = command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile'] : [])] : [];
+  const allowed = command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource', 'observe-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile'] : [])] : [];
   if ((!allowed.length && !obsInspector) || args.length % 2) throw new Error('arguments');
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
@@ -57,6 +57,13 @@ try {
     try {
       const result = await storage.registerObsResource(await readEnrollmentInput());
       emit({event: 'obs_resource_registered', ...result, ready: false});
+    } finally { storage.close(); }
+  } else if (command === 'observe-obs-resource') {
+    requireLocalAdministrator(); requirePrivatePipes();
+    const storage = openStorage(options['--data-dir']);
+    try {
+      const result = await storage.observeObsResource(await readEnrollmentInput());
+      emit({event: 'obs_resource_observed', ...result, ready: false});
     } finally { storage.close(); }
   } else if (command === 'enroll-admin' || command === 'identity-status') {
     requireLocalAdministrator();

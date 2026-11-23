@@ -2,6 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {canonical, digest} from './auth-clock-value.mjs';
 import {IdentityError} from './identity-error.mjs';
 import {inspectObsCut} from './obs-discovery.mjs';
+import {createObsDeviceModule} from './obs-device-module.mjs';
 
 const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\s\S])/.test(value);
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}(?![\s\S])/.test(value);
@@ -11,6 +12,26 @@ const read = (text, expected) => {
   need(canonical(value) === text && digest(value) === expected, 'integrity');
   return value;
 };
+const scopeFor = service => ({authority_service_id: service.service_id, database_instance_id: service.database_instance_id});
+const receipt = (service, record) => ({
+  resource_ref: {kind: 'resource', ...scopeFor(service), object_id: record.resource_id, revision: '1', digest: digest(record)},
+  record
+});
+const auditFor = (transaction_id, device_id, resource_ref) => ({
+  kind: 'obs_local_resource_registered', transaction_id, device_id, resource_ref
+});
+
+function currentResource(db, service, deviceId) {
+  const row = db.prepare(`SELECT r.body_jcs,r.body_digest,d.descriptor_digest,c.transaction_id,c.audit_jcs
+    FROM obs_local_resource r JOIN obs_local_resource_commit c USING(transaction_id,device_id)
+    JOIN device_record d USING(device_id) WHERE r.device_id=?`).raw().get(deviceId);
+  need(row, 'unregistered');
+  const value = receipt(service, read(row[0], row[1]));
+  const expectedDevice = {kind: 'device', ...scopeFor(service), object_id: deviceId, revision: '1', digest: row[2]};
+  need(canonical(value.record.device_ref) === canonical(expectedDevice) &&
+    row[4] === canonical(auditFor(row[3], deviceId, value.resource_ref)), 'integrity');
+  return value;
+}
 
 export async function registerObsResource(db, service, input) {
   need(db.open && !db.inTransaction, 'writer');
@@ -24,17 +45,13 @@ export async function registerObsResource(db, service, input) {
   const expectedScenes = [...scene_uuids].sort();
   // 凭据只用于本次 WebSocket 认证，历史请求只绑定已核对的端点和目录身份。
   const inputDigest = digest({request_id, device_id, port, collection_name, scene_uuids: expectedScenes});
-  const scope = {authority_service_id: service.service_id, database_instance_id: service.database_instance_id};
-  const receipt = record => ({
-    resource_ref: {kind: 'resource', ...scope, object_id: record.resource_id, revision: '1', digest: digest(record)},
-    record
-  });
+  const scope = scopeFor(service);
   function select() {
     need(db.prepare('SELECT count(*) FROM identity_receipt').pluck().get() === 1, 'admin_required');
-    const prior = db.prepare('SELECT body_jcs,body_digest,input_digest FROM obs_local_resource WHERE request_id=?').raw().get(request_id);
+    const prior = db.prepare('SELECT device_id,input_digest FROM obs_local_resource WHERE request_id=?').raw().get(request_id);
     if (prior) {
-      need(prior[2] === inputDigest, 'request_conflict');
-      return {prior: receipt(read(prior[0], prior[1]))};
+      need(prior[0] === device_id && prior[1] === inputDigest, 'request_conflict');
+      return {prior: currentResource(db, service, device_id)};
     }
     const row = db.prepare('SELECT descriptor_body,descriptor_digest FROM device_record WHERE device_id=?').raw().get(device_id);
     need(row, 'device_required');
@@ -64,11 +81,32 @@ export async function registerObsResource(db, service, input) {
       rpc_version: observed.rpc_version, available_requests_digest: observed.available_requests_digest,
       collection_name, scene_uuids: expectedScenes
     };
-    const result = receipt(record);
+    const result = receipt(service, record);
     db.prepare('INSERT INTO obs_local_resource VALUES (?,?,?,?,?,?,?,?)').run(device_id, port, record.resource_id,
       request_id, inputDigest, canonical(record), result.resource_ref.digest, transaction);
     db.prepare('INSERT INTO obs_local_resource_commit VALUES (?,?,?)').run(transaction, device_id,
-      canonical({kind: 'obs_local_resource_registered', transaction_id: transaction, device_id, resource_ref: result.resource_ref}));
+      canonical(auditFor(transaction, device_id, result.resource_ref)));
     return result;
   }).immediate();
+}
+
+export async function observeObsResource(db, service, input) {
+  need(db.open && !db.inTransaction, 'writer');
+  need(Number(service.schema_revision) >= 98, 'migration_required');
+  need(input && Object.keys(input).sort().join(',') === 'device_id,password,samples' &&
+    id(input.device_id) && Number.isInteger(input.samples) && input.samples >= 1 && input.samples <= 8, 'input');
+  const {device_id, password, samples} = input;
+  const current = db.transaction(() => currentResource(db, service, device_id)).immediate;
+  const resource = current();
+  const lifetime = new AbortController();
+  const module = createObsDeviceModule({resource: resource.record, password, signal: lifetime.signal});
+  const binding = {device_id, device_session_id: randomUUID(), signal: lifetime.signal};
+  try {
+    const identity = await module.connectReadOnly(binding);
+    const catalog = await module.proposeCatalog({...binding, identity});
+    const observations = [];
+    for (let i = 0; i < samples; i++) observations.push(await module.captureBaseline(binding));
+    need(db.open && !db.inTransaction && current().resource_ref.digest === resource.resource_ref.digest, 'resource_changed');
+    return {resource_ref: resource.resource_ref, observation_session_id: binding.device_session_id, identity, catalog, samples: observations};
+  } finally { lifetime.abort(); }
 }

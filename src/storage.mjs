@@ -7,7 +7,7 @@ import {acquireDatabaseOwner} from './database-owner.mjs';
 import {identityStore} from './identity-store.mjs';
 import {authenticationClockStore} from './auth-clock-store.mjs';
 import {registerDevice} from './device-registry-store.mjs';
-import {registerObsResource} from './obs-resource.mjs';
+import {observeObsResource,registerObsResource} from './obs-resource.mjs';
 import {sessionStore} from './session-store.mjs';
 import {configureVirtualDevice} from './worker-dependencies.mjs';
 import {workerLaunchStore} from './worker-launch-store.mjs';
@@ -394,6 +394,7 @@ export function openStorage(dataDir) {
     return Object.freeze({identity: state, serviceBootId: bootId, engine,
       configureVirtualDevice(input){require(!closed,'storage_closed');return configureVirtualDevice(db,state,input);},
       registerObsResource(input){require(!closed,'storage_closed');return registerObsResource(db,state,input);},
+      observeObsResource(input){require(!closed,'storage_closed');return observeObsResource(db,state,input);},
       bindCoreRuntime(binding, policy, supervision = null) {
         require(!closed && Number(state.schema_revision) >= 11, 'core_runtime_migration_required');
         require(binding.intent.service_id === state.service_id && policy.service_id === state.service_id &&
