@@ -90,23 +90,43 @@ export async function registerObsResource(db, service, input) {
   }).immediate();
 }
 
-export async function observeObsResource(db, service, input) {
+export async function observeObsResource(db, service, input, secrets) {
   need(db.open && !db.inTransaction, 'writer');
   need(Number(service.schema_revision) >= 98, 'migration_required');
-  need(input && Object.keys(input).sort().join(',') === 'device_id,password,samples' &&
+  const fields = input && Object.keys(input).sort().join(',');
+  need((fields === 'device_id,password,samples' || (fields === 'device_id,samples,secret_ref' && secrets)) &&
     id(input.device_id) && Number.isInteger(input.samples) && input.samples >= 1 && input.samples <= 8, 'input');
-  const {device_id, password, samples} = input;
+  const {device_id, samples, secret_ref} = input;
   const current = db.transaction(() => currentResource(db, service, device_id)).immediate;
   const resource = current();
   const lifetime = new AbortController();
-  const module = createObsDeviceModule({resource: resource.record, password, signal: lifetime.signal});
   const binding = {device_id, device_session_id: randomUUID(), signal: lifetime.signal};
+  let cleartext;
   try {
+    if (fields === 'device_id,samples,secret_ref') {
+      need(secret_ref?.secret_id === resource.resource_ref.object_id, 'secret_binding');
+      cleartext = secrets.read(secret_ref);
+    }
+    const password = cleartext ? new TextDecoder('utf-8', {fatal: true}).decode(cleartext) : input.password;
+    const module = createObsDeviceModule({resource: resource.record, password, signal: lifetime.signal});
+    cleartext?.fill(0);
     const identity = await module.connectReadOnly(binding);
     const catalog = await module.proposeCatalog({...binding, identity});
     const observations = [];
     for (let i = 0; i < samples; i++) observations.push(await module.captureBaseline(binding));
     need(db.open && !db.inTransaction && current().resource_ref.digest === resource.resource_ref.digest, 'resource_changed');
     return {resource_ref: resource.resource_ref, observation_session_id: binding.device_session_id, identity, catalog, samples: observations};
-  } finally { lifetime.abort(); }
+  } finally { cleartext?.fill(0); lifetime.abort(); }
+}
+
+export async function sealObsResourceCredential(db, service, input, secrets) {
+  need(input && Object.keys(input).sort().join(',') === 'device_id,password,version' && typeof input.version === 'string' &&
+    /^[1-9][0-9]{0,8}(?![\s\S])/.test(input.version), 'input');
+  const {device_id, password, version} = input;
+  const observed = await observeObsResource(db, service, {device_id, password, samples: 1});
+  const secret_ref = {owner_service_id: service.service_id, secret_id: observed.resource_ref.object_id, version, purpose: 'obs_websocket'};
+  const bytes = Buffer.from(password, 'utf8');
+  try { secrets.write(secret_ref, bytes); }
+  finally { bytes.fill(0); }
+  return {resource_ref: observed.resource_ref, secret_ref};
 }

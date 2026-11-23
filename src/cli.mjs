@@ -13,6 +13,7 @@ import {connectCoreSupervisor, SupervisorError} from './supervisor-control.mjs';
 import {openTrustedPairingClock, readTrustedPairingProfile} from './trusted-pairing-profile.mjs';
 import {LocalPairingError, runLocalPairingAdmin} from './local-pairing-admin.mjs';
 import {discoverObsScenes,inspectObsCut,ObsDiscoveryError} from './obs-discovery.mjs';
+import {initializeLinuxSecretStore,openLinuxSecretStore} from './secret-store.mjs';
 const authenticatedCore = process.argv[2] === 'contained-core-auth';
 const emit = value => (authenticatedCore ? process.stderr : process.stdout).write(JSON.stringify(value) + '\n');
 const pairingStartupError = code => /^pairing_(profile|clock)_[a-z_]+$/.test(code);
@@ -20,7 +21,9 @@ let app;
 try {
   const [command, ...args] = process.argv.slice(2);
   const obsInspector=command==='inspect-obs'?discoverObsScenes:command==='inspect-obs-cut'?inspectObsCut:null;
-  const allowed = command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource', 'observe-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile'] : [])] : [];
+  const secretCommands = ['init-obs-secret-store', 'seal-obs-resource-credential', 'observe-obs-resource'];
+  const allowed = secretCommands.includes(command) ? ['--data-dir','--secret-dir',...(command==='init-obs-secret-store'?['--new-key-dir']:[])] :
+    command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile'] : [])] : [];
   if ((!allowed.length && !obsInspector) || args.length % 2) throw new Error('arguments');
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
@@ -58,13 +61,35 @@ try {
       const result = await storage.registerObsResource(await readEnrollmentInput());
       emit({event: 'obs_resource_registered', ...result, ready: false});
     } finally { storage.close(); }
-  } else if (command === 'observe-obs-resource') {
-    requireLocalAdministrator(); requirePrivatePipes();
+  } else if (secretCommands.includes(command)) {
+    requireLocalAdministrator();
+    if (command !== 'init-obs-secret-store') requirePrivatePipes();
+    const directory=options['--secret-dir'];
+    if(!directory&&command!=='observe-obs-resource')throw new Error('arguments');
+    for(const location of [directory,options['--new-key-dir']].filter(Boolean)){
+      if(!path.isAbsolute(location))throw new Error('arguments');
+      const relative=path.relative(options['--data-dir'],location);
+      if(!relative||(!path.isAbsolute(relative)&&!relative.startsWith('..'+path.sep)&&relative!=='..'))throw new Error('arguments');
+    }
     const storage = openStorage(options['--data-dir']);
+    let secrets;
     try {
-      const result = await storage.observeObsResource(await readEnrollmentInput());
-      emit({event: 'obs_resource_observed', ...result, ready: false});
-    } finally { storage.close(); }
+      const owner=storage.identity.service_id;
+      if(command==='init-obs-secret-store'){
+        const result=initializeLinuxSecretStore({owner,directory,credentialDirectory:options['--new-key-dir']});
+        emit({event:'obs_secret_store_initialized',...result,ready:false});
+      }else{
+        const input=await readEnrollmentInput();
+        if(directory)secrets=openLinuxSecretStore({owner,directory,credentialDirectory:process.env.CREDENTIALS_DIRECTORY,readonly:command==='observe-obs-resource'});
+        if(command==='seal-obs-resource-credential'){
+          const result=await storage.sealObsResourceCredential(input,secrets);
+          emit({event:'obs_resource_credential_sealed',...result,ready:false});
+        }else{
+          const result=await storage.observeObsResource(input,secrets);
+          emit({event:'obs_resource_observed',...result,ready:false});
+        }
+      }
+    } finally { secrets?.close(); storage.close(); }
   } else if (command === 'enroll-admin' || command === 'identity-status') {
     requireLocalAdministrator();
     if (command === 'enroll-admin') requirePrivatePipes();

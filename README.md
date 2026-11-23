@@ -283,6 +283,14 @@ schema 22的新worker准备必须匹配本次服务启动的人员受理、当�
 
 管理员可用同样的私有管道运行 `observe-obs-resource --data-dir ABSOLUTE_PATH`，输入 `device_id`、`password` 和整数 `samples`（1–8）。Controller 从数据库取得目标端口和已登记目录，并在同一条连接上返回有序节目场景 UUID 样本。断连、集合或配置变化、目录不再匹配时终止本次会话。这个入口用于本机核对，回执中的观察会话在命令退出时关闭。
 
+### Linux 本机 OBS 凭据
+
+本机管理员为每个 Controller 准备两个独立、空的私有目录，分别存放密文与主密钥。使用 `init-obs-secret-store --data-dir ABSOLUTE_PATH --secret-dir SECRET_PATH --new-key-dir KEY_PATH` 初始化。该命令生成新的主密钥和 nonce 账本，主密钥文件名固定为 `leafseamer-master-key`。主密钥目录与密文目录的所有者须为操作账户，权限须阻止组及其他账户访问。
+
+密钥由部署配置以只读方式交付，`CREDENTIALS_DIRECTORY` 仅设置目录路径。使用私有管道运行 `seal-obs-resource-credential --data-dir ABSOLUTE_PATH --secret-dir SECRET_PATH`，输入 `device_id`、`password` 和字符串 `version`。Controller 先验证已登记资源和 OBS 凭据，再以 AES-256-GCM 封存并返回 `secret_ref`。相同版本和内容可重试，内容变更须使用新的版本。密文与 nonce 账本独立于业务库。
+
+随后用 `observe-obs-resource --data-dir ABSOLUTE_PATH --secret-dir SECRET_PATH`，私有管道传入 `device_id`、`samples` 和 `secret_ref`。资源、所属 Controller、版本或用途不匹配时拒绝。nonce 账本遗失或恢复了旧备份后，先在维护状态生成新的主密钥和账本，再重新封存凭据。该入口当前用于 Linux 本机观察。
+
 ### 执行会话与初始控制屏障
 
 schema42将人员执行来源改为实际挑战／响应：`beginManualExecutionChallenge`核验人员令牌、当前持有人、权限和运行装配，生成32字节随机nonce，将挑战与提交审计同事务保存；`completeManualExecutionChallenge`核验实际令牌秘密、完整挑战引用和nonce，响应关联与人员来源／审计同事务提交。挑战绑定实际token、会话、凭据、控制原件、完整执行Binding及原核心观察；截止不超过挑战开始后两秒和原观察期限。相同请求只返回仍有效的原件，不换nonce或续期；错误nonce、不同响应内容、过期及旧单步取证入口均拒绝。
