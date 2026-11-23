@@ -372,7 +372,7 @@ if(input.runtime){
  manager=await authenticated({after(){}},{store:business},{native:{source:clock,descriptor:assignment.clock_domain_descriptor},sampleWindowPolicy:'authentication-clock-sample/2'});
  if(needsReference)await collectCommandReference(timeBinding);
  if(input.command_tls)await startCommandHttp(input.command_tls);
- if(input.mode.endsWith('_capabilities')||input.mode==='supervisor_create_module_obs'){
+ if(input.mode.endsWith('_capabilities')||input.mode.startsWith('supervisor_create_module_obs')){
   const before=manager.sessions.localPermissions(manager.auth);
   manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id:manager.logged.session.principal_id,expected_revision:before.revision,permissions:[...new Set([...before.permissions,'device.read'])]});
   commandToken=manager.token(['device.read']);
@@ -475,7 +475,7 @@ try{
       }
       const connected=await moduleClient.connectReadOnly(device),first=await moduleClient.captureBaseline(device),second=await moduleClient.captureBaseline(device);
       const accepted=moduleClient.currentBaseline(device);
-      if(input.mode==='supervisor_create_module_obs'){
+      if(input.mode.startsWith('supervisor_create_module_obs')){
         const route='/api/v1/devices/'+device+'/scene-catalog';
         manager.real.refresh();
         report({event:'obs-scene-catalog-http',current:await commandHttp('GET',route),
@@ -499,6 +499,13 @@ try{
         const packet=business.workerLaunches.prepareObsCutPacket(device,{scene_ref});
         report({event:'obs-cut-packet',target:target.obs_scene_uuid,packet_hex:packet.toString('hex'),
           stale:rejected(()=>business.workerLaunches.prepareObsCutPacket(device,{scene_ref:{...scene_ref,binding_revision:'1'}}))});
+        if(input.mode==='supervisor_create_module_obs_cut'){
+          executionClient=await business.workerLaunches.openExecution(key);
+          const first=await moduleClient.configureExecution(device),repeated=await moduleClient.configureExecution(device);
+          manager.real.refresh();
+          report({event:'obs-cut-execution-bound',first,repeated,state:executionClient.state,features:executionClient.negotiation.selected_features,
+            capabilities:await commandHttp('GET','/api/v1/devices/'+device+'/capabilities')});
+        }
         report({event:'obs-module-samples',connected,first,second,accepted});
         const until=performance.now()+20000;
         while(!fs.existsSync(options['--fixture']+'.obs-stopped')){

@@ -184,12 +184,14 @@ async function inspectObs(input,cut,signal,onInvalidated,writable=false){
     JSON.stringify(value.scenes.map(scene=>scene.obs_scene_uuid).sort())===JSON.stringify(initialIds),'resource_catalog_changed');
    if(expectedDirectory)requireValue(obsCutDirectoryMatches(expectedDirectory,value.scenes),'resource_catalog_changed');
   }
-  async function cutScene({sceneUuid,enterTransmission,tick,nextIoSequence,evidenceDeadline,signal:executionSignal},expectedDirectory=null){
+  async function cutScene({sceneUuid,enterTransmission,tick,nextIoSequence,evidenceDeadline,evidenceBudgetNs,signal:executionSignal},expectedDirectory=null){
    assertCurrent();
    requireValue(!sampling,'session_busy');
    requireValue(uuid(sceneUuid)&&initialIds.includes(sceneUuid),'cut_target');
+   const relative=typeof evidenceBudgetNs==='bigint'&&evidenceBudgetNs>0n&&evidenceBudgetNs<=5000000000n;
    requireValue(typeof enterTransmission==='function'&&typeof tick==='function'&&typeof nextIoSequence==='function'&&
-    typeof evidenceDeadline==='bigint'&&executionSignal instanceof AbortSignal&&!executionSignal.aborted,'cut_dispatch');
+    (relative&&evidenceDeadline===undefined||typeof evidenceDeadline==='bigint'&&evidenceBudgetNs===undefined)&&
+    executionSignal instanceof AbortSignal&&!executionSignal.aborted,'cut_dispatch');
    const frames=[];
    const abortExecution=()=>fail(new ObsDiscoveryError('disconnected'));
    let entered=false,permitRejected=false;
@@ -209,6 +211,7 @@ async function inspectObs(input,cut,signal,onInvalidated,writable=false){
     sameCut(await observe(),expectedDirectory);
     const setType='SetCurrentProgramScene',setId=randomUUID();
     const setReply=await receive(7,{op:6,d:{requestType:setType,requestId:setId,requestData:{sceneUuid}}},()=>{
+     if(relative)evidenceDeadline=tick()+evidenceBudgetNs;
      frame('set_send',setId,sceneUuid);
      try{requireValue(enterTransmission()===undefined,'cut_dispatch');}
      catch(error){permitRejected=error instanceof ObsCutEntryRejected;throw error;}

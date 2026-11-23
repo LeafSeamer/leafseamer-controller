@@ -9,7 +9,7 @@ import {bindDeviceExecution} from './device-execution-binding.mjs';
 import {qualifyDeviceFootprint,readDeviceFootprint} from './device-footprint-qualification.mjs';
 import {registerDeviceAutomation,readDeviceAutomationRegistration} from './device-automation-binding.mjs';
 import {qualifyDeviceEventFrame} from './device-event-qualification.mjs';
-import {obsModuleDefinition,projectObsSceneCatalog,validateObsSceneSample} from './obs-module-profile.mjs';
+import {obsModuleDefinition,obsCutModuleDefinition,isObsCatalogQualification,projectObsSceneCatalog,validateObsSceneSample} from './obs-module-profile.mjs';
 import {readConfirmedObsSceneCatalog} from './obs-scene-confirmation.mjs';
 
 const digest=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
@@ -26,7 +26,7 @@ const definitions=Object.freeze([
  frozen({module:moduleDigest,policy:policyDigest,identity,catalog:simulatorCatalog(),qualification:'fixed_memory_read_only/1'}),
  frozen({module:controlModuleDigest,policy:controlPolicyDigest,identity:{kind:'virtual',model:'leafseamer.simulator.control',revision:'1'},
   catalog:simulatorControlCatalog(),template:controlTemplate,qualification:'fixed_memory_control_catalog/1'}),
- frozen(obsModuleDefinition)
+ frozen(obsModuleDefinition),frozen(obsCutModuleDefinition)
 ]);
 function read(body,digest){const value=JSON.parse(body);need(canonicalize(value)===body&&hash(value)===digest,'module_catalog_integrity');return value;}
 
@@ -42,10 +42,10 @@ export function deviceCatalogStore({db,current,select}){
   const module=content.inventory.files.find(f=>f.file_id===entry.file_id),policy=content.inventory.files.find(f=>f.file_id===entry.io_policy_file_id);
   const definition=definitions.find(value=>value.module===module?.digest&&value.policy===policy?.digest);
   need(definition,'module_catalog_qualification');
-  if(definition.qualification==='fixed_memory_control_catalog/1')
+  if(definition.qualification==='fixed_memory_control_catalog/1'||definition===obsCutModuleDefinition)
    need(content.manifest.api_versions.includes('leafseamer-device-primitives/1'),'module_catalog_qualification');
   const links=dependencies.links.filter(link=>link.device_ref.object_id===device);need(links.length===1,'module_catalog_scope');
-  const link=links[0],obs=definition===obsModuleDefinition;
+  const link=links[0],obs=isObsCatalogQualification(definition.qualification);
   need(obs===Boolean(link.obs_binding)&&(!obs||same(link.resource_ref,link.obs_binding.resource_ref)),'module_catalog_scope');
   const evidenceRow=db.prepare('SELECT body_jcs,body_digest FROM extension_approval_capabilities WHERE approval_id=?').raw().get(runtime.binding.launch_intent.extension_binding.approval_ref.object_id);
   need(evidenceRow&&evidenceRow[1]===dependencies.capability_evidence_digest,'module_catalog_template');
@@ -79,7 +79,7 @@ export function deviceCatalogStore({db,current,select}){
    if(approved.body.automation_registration)readDeviceAutomationRegistration(approved.body,runtime);
    const row=db.prepare('SELECT body_jcs,body_digest FROM device_baseline_sample WHERE approval_id=? ORDER BY length(sample_sequence) DESC,sample_sequence DESC LIMIT 1').raw().get(approved.id);
    const sample=row?read(...row):null;
-   const obs=approved.body.qualification.qualification===obsModuleDefinition.qualification;
+   const obs=isObsCatalogQualification(approved.body.qualification.qualification);
    const scene_catalog=obs&&sample?readConfirmedObsSceneCatalog(db,projectObsSceneCatalog(approved.body,sample)):null;
    return frozen({catalog_approval_ref:ref(runtime,'catalog_approval',approved.id,approved.body),approval:approved.body,sample,
     ...(obs&&{scene_catalog})});
@@ -111,7 +111,7 @@ export function deviceCatalogStore({db,current,select}){
     }else{
      const approved=catalog(channel,body.device_id,body.device_session_id);need(same(approved.body.qualification,qualification),'module_catalog_stale');
      const value=body.value;
-     const obs=definition===obsModuleDefinition;
+     const obs=isObsCatalogQualification(definition.qualification);
      const shape=obs?'program_scene_uuid,sample_sequence,scenes':definition.template?'sample_sequence,value,write_sequence':'sample_sequence,value';
      need(value&&Object.keys(value).sort().join(',')===shape&&
       typeof value.sample_sequence==='string'&&/^[1-9][0-9]{0,19}$(?![\s\S])/.test(value.sample_sequence),'module_sample_schema');

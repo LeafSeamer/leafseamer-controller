@@ -1,7 +1,7 @@
 import {canonical,digest} from './auth-clock-value.mjs';
 import {IdentityError} from './identity-error.mjs';
 import {readDeviceFootprint} from './device-footprint-qualification.mjs';
-import {isObsModuleEntry,obsModuleDefinition,projectObsSceneCatalog,validateObsSceneSample} from './obs-module-profile.mjs';
+import {obsDefinitionForEntry,obsCutModuleDefinition,isObsCatalogQualification,projectObsSceneCatalog,validateObsSceneSample} from './obs-module-profile.mjs';
 import {readConfirmedObsSceneCatalog} from './obs-scene-confirmation.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('device_capabilities_'+code);};
 const same=(a,b)=>canonical(a)===canonical(b);
@@ -25,10 +25,13 @@ export function readCurrentDeviceCatalog(db,{service,device,runtime,selected,dep
   same(q.approval_ref,intent.extension_binding.approval_ref)&&same(q.installation_ref,intent.extension_binding.installation_ref)&&same(q.platform_profile_ref,intent.extension_binding.platform_profile_ref),'binding');
  const links=dependencies.links.filter(link=>link.device_ref.object_id===device);
  need(links.length===1&&same(links[0].device_ref,q.device_ref)&&same(links[0].resource_ref,q.resource_ref)&&links[0].template_digest===q.template_digest,'binding');
- if(descriptor.device_kind==='obs')need(isObsModuleEntry(content,selected.entry)&&links[0].obs_binding&&q.obs_binding&&
+ if(descriptor.device_kind==='obs'){
+  const definition=obsDefinitionForEntry(content,selected.entry);
+  need(definition&&links[0].obs_binding&&q.obs_binding&&
   same(links[0].obs_binding,q.obs_binding)&&
-  q.qualification===obsModuleDefinition.qualification&&q.module_digest===obsModuleDefinition.module&&
-  q.protocol_io_policy_digest===obsModuleDefinition.policy,'binding');
+  q.qualification===definition.qualification&&q.module_digest===definition.module&&
+  q.protocol_io_policy_digest===definition.policy,'binding');
+ }
  const evidenceRow=db.prepare('SELECT body_jcs,body_digest FROM extension_approval_capabilities WHERE approval_id=?').raw().get(q.approval_ref.object_id);
  need(evidenceRow&&evidenceRow[1]===dependencies.capability_evidence_digest,'binding');const evidence=read(...evidenceRow);
  need(same(evidence.intake_ref,content.intake_ref)&&evidence.manifest_digest===q.manifest_digest&&evidence.artifact_set_digest===q.artifact_set_digest,'binding');
@@ -46,7 +49,8 @@ export function readCurrentDeviceCatalog(db,{service,device,runtime,selected,dep
 }
 export function readDeviceCapabilities(db,input){
  const {approved,qualified,template,descriptor,content,intent}=readCurrentDeviceCatalog(db,input),q=approved.qualification,runtime=input.runtime;
- const actions=template.actions.map(action=>({...structuredClone(action),footprint:qualified?.action_footprints.find(value=>value.action_id===action.action_id)??{manifest_digest:q.manifest_digest,semantics_revision:'1',complete:false,
+ // 受监督 OBS 装配保持关闭，公开动作须有对应持久控制与结算策略。
+ const actions=q.qualification===obsCutModuleDefinition.qualification?[]:template.actions.map(action=>({...structuredClone(action),footprint:qualified?.action_footprints.find(value=>value.action_id===action.action_id)??{manifest_digest:q.manifest_digest,semantics_revision:'1',complete:false,
   reads:[],writes:[],failure_writes:[],resources:[],safe_failure_classes:[],action_id:action.action_id}}));
  return {provider_id:intent.member_id,provider_boot_id:runtime.binding.admission_receipt.member_boot_id,catalog_revision:approved.catalog.catalog_revision,
   module_id:content.manifest.extension_id,module_version:content.manifest.extension_version,
@@ -55,7 +59,7 @@ export function readDeviceCapabilities(db,input){
 
 export function readDeviceSceneCatalog(db,input,includeConfirmation=true){
  const {approved}=readCurrentDeviceCatalog(db,input),q=approved.qualification;
- need(q.qualification===obsModuleDefinition.qualification,'unavailable');
+ need(isObsCatalogQualification(q.qualification),'unavailable');
  const row=db.prepare('SELECT body_jcs,body_digest FROM device_baseline_sample WHERE approval_id=? ORDER BY length(sample_sequence) DESC,sample_sequence DESC LIMIT 1')
   .raw().get(approved.approval_id);
  need(row,'unavailable');

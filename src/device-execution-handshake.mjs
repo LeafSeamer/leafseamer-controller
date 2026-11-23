@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {DeviceExecutionError,executionWire} from './device-execution-channel.mjs';
 import {deviceExecutionVersion,deviceExecutionCapabilities,selectDeviceExecutionFeatures} from './sdk/device-execution.mjs';
-import {fixedWorkerExecutionAvailable} from './device-worker-execution.mjs';
+import {fixedWorkerExecutionProfile} from './device-worker-execution.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError(code);};
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(value).digest('hex');
 const ref=(id,digest)=>({id,revision:'1',digest});
@@ -23,12 +23,13 @@ export function selectedHandshake(db,runtime,hello){
  const file=entry&&inventory.files.find(value=>value.file_id===entry.file_id);
  need(entry?.kind==='worker'&&entry.loader==='node_module'&&file?.role==='module'&&
   hello.body.module_id===manifest.extension_id&&hello.body.module_digest===file.digest,'execution_hello_module');
- // 固定内存模块和已接通的持久OPEN领域才选择普通组；其他入口仍须各自领域原件。
- const schema=Number(db.pragma('user_version',{simple:true})),fixed=fixedWorkerExecutionAvailable({inventory},entry);
+ // 协商能力只表明实现支持的消息。各设备仍须独立的执行、控制和发送原件。
+ const schema=Number(db.pragma('user_version',{simple:true})),profile=fixedWorkerExecutionProfile({inventory},entry);
+ const manual=profile==='memory'&&schema>=47||profile==='obs_cut'&&schema>=101;
  return selectDeviceExecutionFeatures(hello.body.supported_features,[...deviceExecutionCapabilities.base,
   ...(schema>=31?deviceExecutionCapabilities.initial_control:[]),
-  ...(schema>=47&&fixed?[...deviceExecutionCapabilities.manual,...deviceExecutionCapabilities.without_reference]:[]),
-  ...(schema>=79&&fixed?deviceExecutionCapabilities.automation:[])]);
+  ...(manual?[...deviceExecutionCapabilities.manual,...deviceExecutionCapabilities.without_reference]:[]),
+  ...(schema>=79&&profile==='memory'?deviceExecutionCapabilities.automation:[])]);
 }
 export function handshakeAck(binding,hello,selected){
  return {ipc_version:deviceExecutionVersion,type:'HELLO_ACK',message_id:crypto.randomUUID(),reply_to:hello.message_id,

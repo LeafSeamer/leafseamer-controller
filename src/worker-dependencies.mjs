@@ -2,6 +2,7 @@ import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {selectObsWorkerResource} from './obs-module-profile.mjs';
+import {obsCutAction} from './obs-cut-device-module.mjs';
 
 export class WorkerDependencyError extends Error {constructor(code){super(code);this.name='WorkerDependencyError';this.code=code;}}
 const need=(ok,code)=>{if(!ok)throw new WorkerDependencyError('worker_dependency_'+code);};
@@ -77,9 +78,17 @@ export function installationDependencies(db,service,selected){
   }
  }
  const devices=[...byDevice.keys()].sort();need(devices.length>=1&&devices.length<=64&&links.length<=256,'capacity');
- if(links.some(link=>link.obs_binding))need(links.length===1&&devices.length===1&&
-  selected.permissions.every(permission=>Array.isArray(permission.scope?.action_ids)&&permission.scope.action_ids.length===0&&
-   Array.isArray(permission.scope?.trigger_ids)&&permission.scope.trigger_ids.length===0),'obs_scope');
+ if(links.some(link=>link.obs_binding)){
+  const [link]=links;
+  need(links.length===1&&devices.length===1,'obs_scope');
+  if(link.action_ids.length){
+   const [permission]=selected.permissions;
+   need(selected.permissions.length===1&&permission.kind==='device_scope'&&
+    same(permission.scope,{devices:[link.device_ref],action_ids:[obsCutAction],trigger_ids:[]}),'obs_scope');
+  }else{
+   need(selected.permissions.length===0,'obs_scope');
+  }
+ }
  const ordered=devices.map(key=>byDevice.get(key));
  return freeze({capability_evidence_digest:raw[1],devices:ordered.map(value=>value.device),resources:ordered.map(value=>value.ref),links:links.sort((a,b)=>canonicalize(a)<canonicalize(b)?-1:1)});
 }

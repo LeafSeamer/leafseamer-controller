@@ -9,10 +9,11 @@ import {moduleSocket,moduleTransport,moduleDigestEqual as same} from './device-m
 import {executionSessionIdentity,executionSocket} from './device-execution-channel.mjs';
 import {deviceWorkerSession} from './device-worker-session.mjs';
 import {deviceExecutionGate} from './device-execution-gate.mjs';
-import {deviceWorkerExecution,fixedWorkerExecutionAvailable} from './device-worker-execution.mjs';
+import {deviceWorkerExecution,fixedWorkerExecutionProfile} from './device-worker-execution.mjs';
 import {deviceExecutionVersion,deviceExecutionCapabilities} from './sdk/device-execution.mjs';
-import {isObsModuleEntry} from './obs-module-profile.mjs';
+import {obsDefinitionForEntry,obsCutModuleDefinition} from './obs-module-profile.mjs';
 import {createObsDeviceModule} from './obs-device-module.mjs';
+import {createObsCutDeviceModule} from './obs-cut-device-module.mjs';
 import {openWindowsSecretStore} from './secret-store.mjs';
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 
@@ -27,6 +28,7 @@ export function hostDeviceModule({admitted,materials,executionIdentity,obsSecret
  const entry=materials.manifest.entrypoints.find(e=>e.entry_id===admitted.intent.extension_binding.entry_id);
  need(entry?.kind==='worker'&&entry.loader==='node_module'&&hash(materials.manifest)===admitted.intent.extension_binding.manifest_digest&&
   hash(materials.inventory)===admitted.intent.extension_binding.artifact_set_digest,'module_content_binding');
+ const obsDefinition=obsDefinitionForEntry(materials,entry),executionProfile=fixedWorkerExecutionProfile(materials,entry);
  function attachExecutionDevice(device,session){
   if(!implementation.execution)return;
   const exit='exit_'+hash({ipc_session_id:execution.ipc_session_id,device_id:device,device_session_id:session}).slice(7);
@@ -50,8 +52,8 @@ export function hostDeviceModule({admitted,materials,executionIdentity,obsSecret
   void executionSession.start({module_id:materials.manifest.extension_id,module_digest:materials.inventory.files.find(f=>f.file_id===entry.file_id).digest,
    clock_domain_id:execution.clock_domain_id,descriptor_digest:execution.descriptor_digest,clock_domain_descriptor:admitted.descriptor,
    supported_ipc_versions:[deviceExecutionVersion],supported_features:[...deviceExecutionCapabilities.base,...deviceExecutionCapabilities.initial_control,
-    ...(fixedWorkerExecutionAvailable(materials,entry)?[...deviceExecutionCapabilities.manual,...deviceExecutionCapabilities.without_reference,
-     ...deviceExecutionCapabilities.automation]:[])]}).catch(stop);
+    ...(executionProfile?[...deviceExecutionCapabilities.manual,...deviceExecutionCapabilities.without_reference]:[]),
+    ...(executionProfile==='memory'?deviceExecutionCapabilities.automation:[])]}).catch(stop);
  }
  function file(fileId,role){const selected=materials.inventory.files.find(f=>f.file_id===fileId);need(selected?.role===role,'module_content_binding');
   const target=path.resolve(materials.root_path,selected.path);need(target.startsWith(path.resolve(materials.root_path)+path.sep),'module_content_path');
@@ -78,7 +80,7 @@ export function hostDeviceModule({admitted,materials,executionIdentity,obsSecret
     // 文件政策和模块都是批准归档的固定字节；策略对象不自赋联网或设备写许可。
     file(entry.io_policy_file_id,'policy');const moduleFile=file(entry.file_id,'module'),configuration=frame.body.configuration.value;
     const deviceIds=admitted.intent.object_scope.device_ids;
-    if(isObsModuleEntry(materials,entry)){
+    if(obsDefinition){
      need(protocol===deviceModuleProtocol&&obsSecretsDirectory,'module_obs_profile');
      exact(configuration,['resource_ref','resource_record','secret_ref']);
      const {resource_ref:ref,resource_record:record,secret_ref:secret}=configuration;
@@ -91,8 +93,9 @@ export function hostDeviceModule({admitted,materials,executionIdentity,obsSecret
      let cleartext;
      try{
       cleartext=secrets.read(secret);current(frame);
-      implementation=createObsDeviceModule({resource:record,password:new TextDecoder('utf-8',{fatal:true}).decode(cleartext),
-       signal:abort.signal,onInvalidated:stop});
+      const create=obsDefinition===obsCutModuleDefinition?createObsCutDeviceModule:createObsDeviceModule;
+      implementation=create({resource:record,resourceRef:ref,password:new TextDecoder('utf-8',{fatal:true}).decode(cleartext),
+       signal:abort.signal,onInvalidated:stop,tick:()=>clock.tick()});
      }finally{cleartext?.fill(0);secrets.close();}
     }else{
      const selected=await import(pathToFileURL(moduleFile).href);current(frame);

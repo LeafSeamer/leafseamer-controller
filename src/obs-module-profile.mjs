@@ -3,6 +3,8 @@ import {createHash} from 'node:crypto';
 import {canonical, digest} from './auth-clock-value.mjs';
 import {IdentityError} from './identity-error.mjs';
 import {obsDeviceCatalog, obsDeviceIdentity} from './obs-device-module.mjs';
+import {obsCutAction,obsCutDeviceCatalog} from './obs-cut-device-module.mjs';
+import {obsCutPacketBytes,obsCutPrimitive} from './obs-cut-packet.mjs';
 import {readRegisteredObsResource} from './obs-resource.mjs';
 
 const bytes = name => readFileSync(new URL('./' + name, import.meta.url));
@@ -18,13 +20,39 @@ export const obsModuleDefinition = Object.freeze({
   module: hash('obs-device-module.mjs'), policy: hash('obs-module-policy.json'),
   identity: obsDeviceIdentity, catalog, template, qualification: 'fixed_obs_read_only/1'
 });
+const cutTemplate = JSON.parse(bytes('obs-cut-module-capability.json'));
+const cutCatalog = obsCutDeviceCatalog();
+need(same(cutTemplate.state_schema,cutCatalog.state_schema)&&same(cutTemplate.actions.map(action=>action.action_id),[obsCutAction])&&
+  cutTemplate.triggers.length===0,'capability');
+export const obsCutModuleDefinition = Object.freeze({
+  module:hash('obs-cut-device-module.mjs'),policy:hash('obs-cut-module-policy.json'),
+  identity:obsDeviceIdentity,catalog:cutCatalog,template:cutTemplate,qualification:'fixed_obs_cut_catalog/1'
+});
 
-export function isObsModuleEntry(content, entry) {
-  const definition = obsModuleDefinition;
+export function obsDefinitionForEntry(content,entry) {
   const files = content?.inventory?.files ?? [];
-  return entry?.kind === 'worker' && entry.loader === 'node_module' &&
+  if(entry?.kind!=='worker'||entry.loader!=='node_module')return undefined;
+  return [obsModuleDefinition,obsCutModuleDefinition].find(definition=>
     files.some(file => file.file_id === entry.file_id && file.role === 'module' && file.digest === definition.module) &&
-    files.some(file => file.file_id === entry.io_policy_file_id && file.role === 'policy' && file.digest === definition.policy);
+    files.some(file => file.file_id === entry.io_policy_file_id && file.role === 'policy' && file.digest === definition.policy));
+}
+export const isObsModuleEntry=(content,entry)=>Boolean(obsDefinitionForEntry(content,entry));
+export const isObsCatalogQualification=q=>q===obsModuleDefinition.qualification||q===obsCutModuleDefinition.qualification;
+
+export function obsCutExecutionProfile(id,binding,resource,sceneCatalog){
+  const {module,policy,template}=obsCutModuleDefinition,action=template.actions[0];
+  need(resource?.kind==='resource'&&resource.authority_service_id===binding.scope.authority_service_id&&
+    resource.database_instance_id===binding.scope.database_instance_id&&resource.revision==='1'&&
+    sceneCatalog?.status==='ready'&&sceneCatalog.binding_revision==='2'&&
+    sceneCatalog.device_id===binding.device_id&&sceneCatalog.device_session_id===binding.device_session_id,'execution_catalog');
+  return {
+    transport:{format:'leafseamer-obs-cut-transport/1',profile_id:id+'-transport',module_digest:module,policy_digest:policy,
+      transport:'obs_websocket',resource_ref:resource,max_packet_bytes:obsCutPacketBytes,max_in_flight:1,automatic_resends:false},
+    plan:{format:'leafseamer-obs-cut-primitive-plan/1',plan_id:id+'-plan',primitive_id:obsCutPrimitive,
+      action_id:action.action_id,capability_version:action.capability_version,parameters_schema_digest:action.parameters_schema.digest,
+      scene_catalog:sceneCatalog,packet:{length:obsCutPacketBytes,prefix_hex:'4c534f31'},retry:'never'},
+    exit:{socket_instance_id:'obs_'+binding.writer_exit_id.slice(5),protocol_session:binding.device_session_id}
+  };
 }
 
 export function validateObsSceneSample(value, expectedUuids) {
@@ -54,7 +82,7 @@ export function isObsReadOnlyRole(manifest, inventory, role, device) {
   return role?.kind === 'device' && role.minimum === 1 && role.maximum === 1 &&
     role.role_id === template.device_role && device?.device_kind === template.device_kind &&
     manifest.roles.length === 1 && manifest.permission_templates.length === 0 && manifest.entrypoints.length === 1 &&
-    isObsModuleEntry({inventory}, manifest.entrypoints[0]) &&
+    obsDefinitionForEntry({inventory},manifest.entrypoints[0])===obsModuleDefinition &&
     manifest.api_versions.length === 1 && manifest.api_versions[0] === 'leafseamer-device-module/2' &&
     manifest.ipc_versions.length === 1 && manifest.ipc_versions[0] === 'device-module/3' &&
     manifest.capability_template_file_ids.length === 1 && inventory.files.some(file =>
@@ -62,12 +90,16 @@ export function isObsReadOnlyRole(manifest, inventory, role, device) {
 }
 
 export function selectObsWorkerResource(db, service, selected, device, template) {
-  const entries = selected.content.manifest.entrypoints.filter(entry => isObsModuleEntry(selected.content, entry));
-  need(entries.length === 1 && (!selected.entry || same(entries[0], selected.entry)) &&
-    selected.content.manifest.api_versions.includes('leafseamer-device-module/2') &&
-    !selected.content.manifest.api_versions.includes('leafseamer-device-primitives/1') &&
-    !selected.content.manifest.api_versions.includes('leafseamer-device-event-capture/1') &&
-    same(template, obsModuleDefinition.template), 'profile');
+  const {manifest,inventory}=selected.content;
+  const [entry]=manifest.entrypoints,definition=obsDefinitionForEntry(selected.content,entry);
+  need(manifest.entrypoints.length===1&&definition&&(!selected.entry||same(entry,selected.entry))&&same(template,definition.template),'profile');
+  const cut=definition===obsCutModuleDefinition;
+  const expectedApis=cut?['leafseamer-device-module/2','leafseamer-device-primitives/1']:['leafseamer-device-module/2'];
+  need(same(manifest.api_versions,expectedApis)&&(!cut||Number(service.schema_revision)>=101&&same(manifest.ipc_versions,['device-module/3'])&&
+    manifest.roles.length===1&&manifest.roles[0].role_id===template.device_role&&manifest.roles[0].kind==='device'&&
+    manifest.roles[0].minimum===1&&manifest.roles[0].maximum===1&&manifest.capability_template_file_ids.length===1&&
+    inventory.files.some(file=>file.file_id===manifest.capability_template_file_ids[0]&&file.role==='schema'&&
+      file.digest===hash('obs-cut-module-capability.json'))),'profile');
   const resource = readRegisteredObsResource(db, service, device.object_id);
   need(same(resource.record.device_ref, device), 'device_binding');
   const reference = selected.approval.configuration_ref;

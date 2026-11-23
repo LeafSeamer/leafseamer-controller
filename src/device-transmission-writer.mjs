@@ -139,7 +139,7 @@ export function deviceTransmissionWriter({binding,preparation,executor,action,cu
     try{
      if(!entryAtTransport)enterTransmission();
      const result=await executor.writePrimitive({device_id:bound.device_id,device_session_id:bound.device_session_id,bytes,signal:abort.signal,
-      ...(entryAtTransport&&{enterTransmission})});
+      ...(entryAtTransport&&{enterTransmission,evidenceBudgetNs:BigInt(body.request.evidence_timeout_ms)*1000000n})});
      need(entry.consumed,'transmission_entry_missing');
      if(closed||signal.aborted)throw new DeviceExecutionError('transmission_closed');
      need(result&&Number.isInteger(result.bytes_written)&&result.bytes_written===packet.byte_length,'transmission_write_uncertain');

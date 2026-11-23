@@ -1,0 +1,167 @@
+{
+  "template_version": "extension-capability-template/1",
+  "template_id": "leafseamer.obs.isolated-cut",
+  "device_role": "device",
+  "device_kind": "obs",
+  "actions": [
+    {
+      "action_id": "obs.program_scene.set",
+      "capability_version": "1.0.0",
+      "parameters_schema": {
+        "schema_id": "leafseamer.obs.cut.parameters.1",
+        "dialect": "https://json-schema.org/draft/2020-12/schema",
+        "document": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scene_ref"
+          ],
+          "properties": {
+            "scene_ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "collection_ref",
+                "collection_generation",
+                "catalog_revision",
+                "binding_revision",
+                "scene_id"
+              ],
+              "properties": {
+                "collection_ref": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+                },
+                "collection_generation": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,19}(?![\\s\\S])"
+                },
+                "catalog_revision": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,19}(?![\\s\\S])"
+                },
+                "binding_revision": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,19}(?![\\s\\S])"
+                },
+                "scene_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+                }
+              }
+            }
+          }
+        },
+        "digest": "sha256:8fd891dfaa46d83e46cb2130037d266ef720e8f3f3790208546187609442c547"
+      },
+      "result_schema": {
+        "schema_id": "leafseamer.obs.cut.result.1",
+        "dialect": "https://json-schema.org/draft/2020-12/schema",
+        "document": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "program_scene_uuid"
+          ],
+          "properties": {
+            "program_scene_uuid": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}(?![\\s\\S])"
+            }
+          }
+        },
+        "digest": "sha256:fd87b6cd0946970c813f864ff4c5d4872d5c98fe64673607c54704c7d9163422"
+      },
+      "resources": [
+        "device"
+      ],
+      "completion": {
+        "supported": [
+          "effect_verified"
+        ],
+        "default": "effect_verified",
+        "evidence_policy_id": "leafseamer.obs.cut.four_frames.1"
+      },
+      "cancel": {
+        "mode": "before_dispatch_only"
+      },
+      "retry": {
+        "mode": "never"
+      },
+      "read_set": [
+        "device"
+      ],
+      "write_set": [
+        "device"
+      ],
+      "evidence_timeout_ms": 1000,
+      "limits_profile": "leafseamer.obs.isolated_cut.limits.1",
+      "platforms": [
+        {
+          "os": "windows",
+          "arch": "x64",
+          "status": "untested"
+        }
+      ],
+      "dependencies": [],
+      "preconditions_schema": {
+        "schema_id": "leafseamer.obs.cut.no_preconditions.1",
+        "dialect": "https://json-schema.org/draft/2020-12/schema",
+        "document": {
+          "type": "object",
+          "additionalProperties": false
+        },
+        "digest": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e"
+      }
+    }
+  ],
+  "triggers": [],
+  "state_schema": {
+    "schema_id": "leafseamer.obs.program-scene.2",
+    "dialect": "https://json-schema.org/draft/2020-12/schema",
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sample_sequence",
+        "program_scene_uuid",
+        "scenes"
+      ],
+      "properties": {
+        "sample_sequence": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,19}(?![\\s\\S])"
+        },
+        "program_scene_uuid": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}(?![\\s\\S])"
+        },
+        "scenes": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "obs_scene_uuid",
+              "display_name"
+            ],
+            "properties": {
+              "obs_scene_uuid": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}(?![\\s\\S])"
+              },
+              "display_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            }
+          }
+        }
+      }
+    },
+    "digest": "sha256:7d1de370419ed36512610ab8e66b9ed53400c309ba9785b729ed505dab52a62c"
+  }
+}

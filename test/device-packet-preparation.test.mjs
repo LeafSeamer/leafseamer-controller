@@ -583,7 +583,7 @@ test('obs_cut_final_guard',{skip:process.env.LEAFSEAMER_OBS_GUARD_TEST!=='1',tim
    entryAtTransport:true,encode(input){return encodeObsCutPacket(catalog,input,input.parameters);},async write(input){
    assert.deepEqual(Buffer.from(input.bytes),prepared);
    return obs.writePreparedCut({...input,catalog,tick:process.hrtime.bigint,nextIoSequence:f.gateOwner.nextIoSequence,
-    evidenceDeadline:process.hrtime.bigint()+5000000000n,signal:input.signal,enterTransmission(){
+    signal:input.signal,enterTransmission(){
      if(!allowed)f.gate(null);
      try{input.enterTransmission();}
      catch(error){if(error.code==='transmission_gate_closed')throw new ObsCutEntryRejected();throw error;}
