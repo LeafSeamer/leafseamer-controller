@@ -15,8 +15,13 @@ try{
   fixture.after(()=>channel.close());
   const {binding,supervision,policy}=await channel.accept({identity:input.policy,source:clock});
   const x=await setup(fixture,{revision:109,directory:input.data,prepareHost(host){
-    host.content.manifest.platforms=['linux-x64'];
-    host.content.receipt.platform_profile_ref.object_id=policy.platform_profile_ref.profile_id;
+    if(input.materialization){
+      Object.assign(host.identity,input.materialization.identity);
+      Object.assign(host.content,input.materialization.content);
+    }else{
+      host.content.manifest.platforms=['linux-x64'];
+      host.content.receipt.platform_profile_ref.object_id=policy.platform_profile_ref.profile_id;
+    }
   }});
   const store=x.f.store;
   store.bindCoreRuntime(binding,policy,supervision);
@@ -42,15 +47,28 @@ try{
   assert.equal((await start.register(key)).state,'registered');
   assert.equal((await start.register(key)).state,'registered');
   assert.equal(store.workerLaunches.runtime.query(key),null);
+  let adopted=null;
+  if(input.materialization){
+    const proof=await supervision.prepareLinuxWorkerContent(key);
+    await assert.rejects(start.create(key,{...proof,load_id:'unrelated-load'}),{code:'supervisor_unauthorized'});
+    const created=await start.create(key,proof);
+    assert.equal(created.state,'admitted_closed');assert.equal(created.creation_attempted,true);
+    adopted=await store.workerLaunches.runtime.adopt(key);
+    assert.deepEqual(adopted.binding.admission_receipt,created.admission_receipt);
+    assert.equal(adopted.binding.gate_state,'closed');
+    await assert.rejects(start.create(key,proof),{code:'worker_authorization_creation_attempted'});
+  }
   a.sessions.revokeExtensionApproval(token,{request_id:'revoke',approval_ref:approved.approval_ref,reason:'测试撤销'});
   const fence=await start.synchronize();
   assert.deepEqual(fence.items,[{...key,disposition:'deny'}]);
-  assert.equal((await supervision.queryLaunch(key)).state,'rejected');
+  const terminal=adopted?'retired':'rejected';
+  assert.equal((await supervision.queryLaunch(key)).state,terminal);
   await assert.rejects(start.authorize(key),{code:'worker_authorization_denied'});
   const next={scope:fence.scope,revision:String(Number(fence.revision)+1),items:[{...key,disposition:'allow'}]};
   await assert.rejects(supervision.putFence({...next,digest:hash(next)}),{code:'supervisor_unauthorized'});
-  assert.equal((await supervision.queryLaunch(key)).state,'rejected');
-  fs.writeFileSync(input.result,JSON.stringify({ok:true,key,deniedRevision:fence.revision,coreReceipt:binding.receipt.receipt_id}));
+  assert.equal((await supervision.queryLaunch(key)).state,terminal);
+  fs.writeFileSync(input.result,JSON.stringify({ok:true,key,deniedRevision:fence.revision,coreReceipt:binding.receipt.receipt_id,
+    workerReceipt:adopted?.binding.admission_receipt??null}));
 }catch(error){
   fs.writeFileSync(input.result,JSON.stringify({ok:false,error:error.stack}));process.exitCode=1;
 }finally{

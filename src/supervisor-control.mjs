@@ -421,6 +421,12 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy, t
       await new Promise(resolve=>setTimeout(resolve,25));assertCurrent();
     }
   }
+  async function prepareLinuxWorkerContent(launchKey){
+    check(inherited,'supervisor_linux_load');
+    const {observation}=await prepareWorkerMaterialization(launchKey);
+    return freeze({load_id:observation.materialization_evidence_id,materialization_evidence_id:observation.materialization_evidence_id,
+      materialization_challenge_id:observation.materialization_challenge_id});
+  }
   async function loadWorkerContent(launchKey, materials) {
     assertCurrent();
     const fixed = await decodeWorkerLoadMaterials(Buffer.from(canonicalize(materials)));
@@ -510,7 +516,7 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy, t
   return Object.freeze({
     assertCurrent, observeWorker, assertWorkerObservation, observeTimeProvider, assertTimeProviderObservation,
     observeTimeProviderRetirement, assertTimeProviderRetirement, observeWorkerRetirement, assertWorkerRetirement,
-    putFence, queryLaunch, registerWorker, prepareWorkerMaterialization, loadWorkerContent, createWorker, retireWorker,
+    putFence, queryLaunch, registerWorker, prepareWorkerMaterialization, prepareLinuxWorkerContent, loadWorkerContent, createWorker, retireWorker,
     scope,
     current() { assertCurrent(); return latest; },
     currentTimeProviderObservation(){

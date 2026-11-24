@@ -117,7 +117,7 @@ async function launch(t, {misplaced=false,missingChannel=false,fromSealed=false,
   if(badHandoff)materialization.request={...materialization.request,launch_intent_digest:digest('different launch')};
   const timeout=5000;
   const context=canonicalize({format:'leafseamer-device-worker-start/3',descriptor,identity,intent,timeout_ms:timeout,
-    module:{root_path:linuxRoot.path,linux_materialization:materialization,manifest,inventory},execution:{controller_boot_id:id().replaceAll('-','')}});
+    module:{root_path:linuxRoot.path,linux_materialization:materialization,manifest,inventory},execution:{controller_boot_id:id()}});
   const configFile=path.join(directory,'worker.json');
   fs.writeFileSync(configFile,context,{mode:0o444});
   const node=fs.realpathSync(process.execPath),image=stat(node);

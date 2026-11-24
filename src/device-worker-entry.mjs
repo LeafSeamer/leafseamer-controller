@@ -20,7 +20,8 @@ try {
   const value=JSON.parse(bytes.toString('utf8'));
   if(canonicalize(value)!==bytes.toString('utf8')||Object.keys(value).sort().join(',')!=='descriptor,execution,format,identity,intent,module,timeout_ms'||
     value.format!=='leafseamer-device-worker-start/3'||!value.execution||Object.keys(value.execution).join(',')!=='controller_boot_id'||
-    !/^[0-9a-f]{32}$(?![\s\S])/.test(value.execution.controller_boot_id))throw new Error('worker_context');
+    !(linux?/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/:
+      /^[0-9a-f]{32}$(?![\s\S])/).test(value.execution.controller_boot_id))throw new Error('worker_context');
   if(linux){
     const descriptors=[3,4,5],status=descriptors.map(fd=>fs.fstatSync(fd,{bigint:true}));
     if(!status.every(info=>info.isSocket())||new Set(status.map(info=>String(info.dev)+':'+info.ino)).size!==status.length)
