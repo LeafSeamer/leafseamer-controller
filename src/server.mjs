@@ -54,7 +54,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   if (pairing !== null) pairingUuid(pairing.credential_id);
   const storage = openStorage(dataDir, protectedIngressIdentity);
   let installationSource=extensionInstallationSource;
-  let supervision = null, timeProviderLink = null, timeProviderBinding = null, clockEvidence = null, linuxSource = null, linuxRuntime = null, linuxProvider=null;
+  let supervision = null, timeProviderLink = null, timeProviderBinding = null, clockEvidence = null, linuxSource = null, linuxRuntime = null, linuxProvider=null, installedCapture=null;
   const assertRuntimeCurrent = () => { supervision?.assertCurrent(); linuxRuntime?.assertLive(); timeProviderLink?.assertCurrent(); };
   try {
     if (coreBootstrap !== null) {
@@ -63,6 +63,9 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       supervision = result.supervision ?? null; supervision?.assertCurrent();
       result.assertCurrent?.();
       linuxProvider=result.referenceProvider??null;
+      installedCapture=result.referenceCapture??null;
+      if(installedCapture&&(!linuxProvider||linuxClockEvidenceProfile?.authentication!==true||referenceTimeAuthorization!==null))
+        throw new Error('time_provider_poll_authority');
       timeProviderBinding = storage.bindCoreRuntime(binding, policy, supervision,linuxProvider);
       if (linuxClockEvidenceProfile !== null) {
         linuxSource = openNativeClock({linuxWithoutSystemSleep: linuxClockEvidenceProfile.authentication});
@@ -102,7 +105,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
         const provider = linuxAuthentication ? clockEvidence : await authenticationProvider?.(Object.freeze({scope: storage.authenticationClock.scope, source}));
         authentication = startAuthenticationClock(source, storage.authenticationClock, provider ?? null,
           {waitForInitialEvidence: linuxAuthentication, renewableHealth: linuxAuthentication});
-        if (linuxPairing) await waitForLinuxAuthentication(authentication, linuxRuntime.signal);
+        if (linuxPairing||installedCapture) await waitForLinuxAuthentication(authentication, linuxRuntime.signal);
         if (Number(storage.identity.schema_revision) >= 5 && (!linuxAuthentication || linuxPairing)) sessions = storage.sessions(authentication);
       }
     }
@@ -152,21 +155,22 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       });
       assertRuntimeCurrent();
     }
-    if (referenceTimeAuthorization !== null) {
+    const timeAuthorization=installedCapture??referenceTimeAuthorization;
+    if (timeAuthorization !== null) {
       if (!timeProviderLink || !authentication?.status().qualified) throw new Error('time_provider_poll_authority');
       const assertPollCurrent = () => {
         if (closing) throw new Error('controller_closing');
         assertRuntimeCurrent();
       };
       const polls = storage.openTimeProviderPolls({
-        limits: referenceTimeAuthorization.limits,
-        readSource: referenceTimeAuthorization.readSource,
+        limits: timeAuthorization.limits,
+        readSource: slot=>timeAuthorization.readSource(slot,authentication),
         readAuthentication: () => authentication.referenceTimeSample(),
         assertCurrent: assertPollCurrent,
-        observeRetirement: supervision.observeTimeProviderRetirement,
-        assertRetirement: supervision.assertTimeProviderRetirement
+        observeRetirement: installedCapture?()=>null:supervision.observeTimeProviderRetirement,
+        assertRetirement: installedCapture?()=>{throw new Error('time_provider_poll_retirement_unavailable');}:supervision.assertTimeProviderRetirement
       });
-      const {readEndpoint, captureProtection, referenceAuthority, schedule} = referenceTimeAuthorization;
+      const {readEndpoint, captureProtection, referenceAuthority, schedule} = timeAuthorization;
       if (readEndpoint !== undefined && typeof readEndpoint !== 'function') throw new Error('time_provider_poll_endpoint_authority');
       if (referenceAuthority !== undefined && !readEndpoint) throw new Error('reference_time_authority');
       const publication = referenceAuthority===undefined ? null : storage.openReferenceTimeAnchor({...referenceAuthority,readContext:polls.referenceContext});

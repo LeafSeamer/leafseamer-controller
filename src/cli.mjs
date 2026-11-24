@@ -32,7 +32,7 @@ try {
   const localAdmin=command==='pairing-admin'?runLocalPairingAdmin:command==='extension-admin'?runLocalExtensionAdmin:null;
   const allowed = secretCommands.includes(command) ? ['--data-dir','--secret-dir',...(command==='init-obs-secret-store'?['--new-key-dir']:[])] :
     command === 'start-protected-ingress' ? ['--data-dir','--ingress-profile'] :
-    composeCore ? ['--data-dir','--ingress-profile','--bootstrap-policy','--clock-evidence-profile','--pairing-profile','--worker-control','--worker-channel-dir','--installation-source','--reference-provider'] :
+    composeCore ? ['--data-dir','--ingress-profile','--bootstrap-policy','--clock-evidence-profile','--pairing-profile','--worker-control','--worker-channel-dir','--installation-source','--reference-provider','--reference-capture'] :
     linuxCore ? ['--data-dir','--host','--port','--bootstrap-policy','--clock-evidence-profile','--pairing-profile','--worker-control','--worker-channel-dir'] :
     localAdmin ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile','--standalone-profile'] : []), ...(command==='supervise'?['--stdin-control']:[])] : [];
   if ((!allowed.length && !obsInspector) || args.length % 2) throw new Error('arguments');
@@ -183,13 +183,18 @@ try {
       launch.coreBootstrap=async identity=>{
         if(workerControl!==undefined&&Number(identity.schema_revision)<109)throw new BootstrapError('worker_launch_migration_required');
         const artifactDigest=options['--reference-provider'];
+        const approvalDigest=options['--reference-capture'];
+        if(approvalDigest!==undefined&&(artifactDigest===undefined||!launch.linuxClockEvidenceProfile?.authentication))
+          throw new BootstrapError('bootstrap_linux_reference_options');
         if(artifactDigest!==undefined&&Number(identity.schema_revision)<110)throw new BootstrapError('time_provider_runtime_migration_required');
+        const capture=approvalDigest===undefined?null:(await import('./linux-reference-capture.mjs')).readInstalledLinuxReferenceCapture({
+          identity,providerDigest:artifactDigest,approvalDigest});
         const result=await linuxChannel.accept({identity,source:openNativeClock()});
         if(artifactDigest===undefined)return result;
         const {openLinuxReferenceProvider}=await import('./linux-reference-provider.mjs');
         const referenceProvider=await openLinuxReferenceProvider({core:result.binding,artifactDigest,
           timeoutMs:policy.bootstrap_timeout_ms,assertLive:result.assertLive});
-        return {...result,referenceProvider};
+        return {...result,referenceProvider,referenceCapture:capture};
       };
     }
     if (authenticatedCore) {
