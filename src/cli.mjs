@@ -32,7 +32,7 @@ try {
   const allowed = secretCommands.includes(command) ? ['--data-dir','--secret-dir',...(command==='init-obs-secret-store'?['--new-key-dir']:[])] :
     command === 'start-protected-ingress' ? ['--data-dir','--ingress-profile'] :
     composeCore ? ['--data-dir','--ingress-profile','--bootstrap-policy','--clock-evidence-profile','--pairing-profile'] :
-    linuxCore ? ['--data-dir','--host','--port','--bootstrap-policy','--clock-evidence-profile','--pairing-profile','--worker-control'] :
+    linuxCore ? ['--data-dir','--host','--port','--bootstrap-policy','--clock-evidence-profile','--pairing-profile','--worker-control','--worker-channel-dir'] :
     command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile','--standalone-profile'] : []), ...(command==='supervise'?['--stdin-control']:[])] : [];
   if ((!allowed.length && !obsInspector) || args.length % 2) throw new Error('arguments');
   const options = {};
@@ -175,7 +175,8 @@ try {
       }
       const workerControl=options['--worker-control'];
       if(workerControl!==undefined&&workerControl!=='inherited')throw new BootstrapError('bootstrap_linux_control');
-      linuxChannel=openLinuxCoreBootstrap(policy,'controller',{compose:composeCore,workerControl:workerControl==='inherited'});
+      linuxChannel=openLinuxCoreBootstrap(policy,'controller',{compose:composeCore,workerControl:workerControl==='inherited',
+        workerChannelDirectory:options['--worker-channel-dir']});
       launch.coreBootstrap=identity=>{
         if(workerControl!==undefined&&Number(identity.schema_revision)<109)throw new BootstrapError('worker_launch_migration_required');
         return linuxChannel.accept({identity,source:openNativeClock()});

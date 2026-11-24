@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import {Socket} from 'node:net';
+import path from 'node:path';
+import {Socket,createConnection} from 'node:net';
 import canonicalize from './runtime/canonicalize.mjs';
 import {BootstrapError,createCoreBootstrapChannel,verifyCoreAssignment,verifyCoreAdmission} from './core-bootstrap.mjs';
 import {connectCoreSupervisor} from './supervisor-control.mjs';
@@ -47,11 +48,29 @@ function localGroup(descriptor,serviceKind,compose){
   return {backend:'linux_cgroup_v2',generation,group_id:'group_'+hash(canonicalize(identity))};
 }
 
-export function openLinuxCoreBootstrap(policy,serviceKind,{compose=false,workerControl=false}={}){
+export function openLinuxCoreBootstrap(policy,serviceKind,{compose=false,workerControl=false,workerChannelDirectory}={}){
   check(serviceKind==='controller'||serviceKind==='seamer','bootstrap_linux_service');
   check(!workerControl||serviceKind==='controller'&&!compose,'bootstrap_linux_control');
+  check(workerChannelDirectory===undefined||workerControl,'bootstrap_linux_control');
   check(process.platform==='linux'&&fs.fstatSync(3).isSocket(),'bootstrap_linux_channel');
   verifyArtifact(policy,serviceKind);
+  function channelDirectory(){
+    const directory=workerChannelDirectory;
+    check(typeof directory==='string'&&path.isAbsolute(directory)&&path.normalize(directory)===directory&&
+      directory!=='/'&&!directory.endsWith('/')&&!directory.includes('\0')&&Buffer.byteLength(directory)<=60,'bootstrap_linux_worker_channel');
+    for(let parent=directory;;parent=path.dirname(parent)){
+      const stat=fs.lstatSync(parent,{bigint:true}),sticky=(parent==='/tmp'||parent==='/var/tmp')&&(stat.mode&0o1000n)!==0n;
+      check(stat.isDirectory()&&stat.uid===0n&&((stat.mode&0o022n)===0n||sticky),'bootstrap_linux_worker_channel');
+      if(parent==='/')return directory;
+    }
+  }
+  if(workerChannelDirectory!==undefined)channelDirectory();
+  function openWorkerChannel(memberBootId,purpose){
+    check(uuid.test(memberBootId)&&['module','execution'].includes(purpose),'bootstrap_linux_worker_channel');
+    const address=path.join(channelDirectory(),memberBootId+'.'+purpose),stat=fs.lstatSync(address,{bigint:true});
+    check(stat.isSocket()&&stat.uid===0n&&stat.gid===BigInt(process.getegid())&&(stat.mode&0o777n)===0o660n,'bootstrap_linux_worker_channel');
+    return createConnection(address);
+  }
   const socket=new Socket({fd:3,readable:true,writable:true});
   const channel=createCoreBootstrapChannel(socket,socket,{timeoutMs:policy.bootstrap_timeout_ms});
   const loss=new AbortController(),{signal}=loss;
@@ -86,7 +105,7 @@ export function openLinuxCoreBootstrap(policy,serviceKind,{compose=false,workerC
       socket.once('end',markLost).once('close',markLost).once('error',markLost);
       if(!workerControl){socket.once('data',markLost);socket.resume();return {binding,policy,assertCurrent,assertLive,signal};}
       const supervision=await connectCoreSupervisor({channelId:receipt.channel_binding_id.replaceAll('-',''),binding,policy,
-        inherited:{socket,source,assertLive}});
+        inherited:{socket,source,assertLive,...(workerChannelDirectory!==undefined&&{openWorkerChannel})}});
       try{assertCurrent();return {binding,policy,assertCurrent,assertLive,signal,supervision};}
       catch(error){supervision.close();throw error;}
     },

@@ -3,7 +3,7 @@ import {executionSocket,executionTransport,DeviceExecutionError} from './device-
 
 // 核心内部装配。端点只取已采用成员boot，原生监督器核对两端实际PID。
 // 派发写入预约与公开风险状态同事务；发送报告和观察候选分别持久化。
-export async function connectDeviceExecution({journal,current,invalidate,onClose}){
+export async function connectDeviceExecution({journal,current,invalidate,onClose,socket}){
  let transport,closed=false,negotiation=null,resolveReady,rejectReady,timer,poll,pending=null,encoding=false,closeFailure=null,closeReason=null;const qualifications=new Map();
  const ready=new Promise((resolve,reject)=>{resolveReady=resolve;rejectReady=reject;});ready.catch(()=>{});
  function close(error=new DeviceExecutionError('execution_client_closed')){
@@ -24,7 +24,7 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
  try{
   const active=current();
   if(active.binding.admission_receipt.member_boot_id!==journal.binding.worker_boot_id)throw new DeviceExecutionError('execution_client_runtime');
-  transport=executionTransport(executionSocket(journal.binding.worker_boot_id,'core'),{incoming:'w2c',failed:close,async receive({frame,payload}){
+  transport=executionTransport(socket??executionSocket(journal.binding.worker_boot_id,'core'),{incoming:'w2c',failed:close,async receive({frame,payload}){
    try{check();if(['FENCE_ACK','OPEN_GATE_ACK'].includes(frame.type)&&negotiation){
      const result=await (frame.type==='FENCE_ACK'?(pending?.closure?journal.receiveCommandClosure(payload):journal.receiveInitialFenceAck(payload)):journal.receiveInitialOpenAck(payload));check();
      if(pending){if(pending.type!==frame.type||pending.message!==frame.reply_to)throw new DeviceExecutionError('execution_control_reply');pending.resolve(result);}return;

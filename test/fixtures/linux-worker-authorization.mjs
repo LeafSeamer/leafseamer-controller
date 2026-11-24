@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
+import {execFileSync} from 'node:child_process';
 import {openLinuxCoreBootstrap} from '../../dist/linux-core-bootstrap.mjs';
 import {openNativeClock} from '../../dist/native-clock.mjs';
 import {setup} from './extension-capabilities.mjs';
@@ -11,10 +13,11 @@ const input=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
 const cleanup=[];
 const fixture={after(fn){cleanup.unshift(fn);}};
 try{
-  const clock=openNativeClock(),channel=openLinuxCoreBootstrap(input.policy,'controller',{workerControl:true});
+  const clock=openNativeClock(),channel=openLinuxCoreBootstrap(input.policy,'controller',{workerControl:true,workerChannelDirectory:input.channelDirectory});
   fixture.after(()=>channel.close());
   const {binding,supervision,policy}=await channel.accept({identity:input.policy,source:clock});
-  const x=await setup(fixture,{revision:109,directory:input.data,prepareHost(host){
+  const capabilityTemplate=input.channelDirectory?JSON.parse(fs.readFileSync(new URL('../../dist/simulator-control-capability.json',import.meta.url),'utf8')):undefined;
+  const x=await setup(fixture,{revision:109,directory:input.data,capabilityTemplate,reviewedActions:capabilityTemplate?.actions.map(action=>action.action_id),prepareHost(host){
     if(input.materialization){
       Object.assign(host.identity,input.materialization.identity);
       Object.assign(host.content,input.materialization.content);
@@ -47,7 +50,7 @@ try{
   assert.equal((await start.register(key)).state,'registered');
   assert.equal((await start.register(key)).state,'registered');
   assert.equal(store.workerLaunches.runtime.query(key),null);
-  let adopted=null;
+  let adopted=null,module=null,execution=null;
   if(input.materialization){
     const proof=await supervision.prepareLinuxWorkerContent(key);
     await assert.rejects(start.create(key,{...proof,load_id:'unrelated-load'}),{code:'supervisor_unauthorized'});
@@ -56,6 +59,26 @@ try{
     adopted=await store.workerLaunches.runtime.adopt(key);
     assert.deepEqual(adopted.binding.admission_receipt,created.admission_receipt);
     assert.equal(adopted.binding.gate_state,'closed');
+    if(input.channelDirectory){
+      // 同 UID/GID 和同 cgroup 的另一个进程也不能认领通道。
+      const endpoint=path.join(input.channelDirectory,created.admission_receipt.member_boot_id+'.module');
+      execFileSync(process.execPath,['--input-type=module','-e',
+        "import {createConnection} from 'node:net'; const socket=createConnection(process.argv[1]); socket.on('error',()=>{process.exitCode=1;}); socket.on('data',()=>{process.exitCode=1;});",endpoint],{timeout:1000});
+      const device=x.registered.device_id;
+      module=await store.workerLaunches.openModule(key,{events:true});
+      assert.equal((await module.connectReadOnly(device)).body.identity.model,'leafseamer.simulator.control');
+      assert.deepEqual((await module.captureBaseline(device)).body.value,{value:0,sample_sequence:'1',write_sequence:'0'});
+      assert.equal(module.currentBaseline(device).approval.evidence_policy.write_eligible,false);
+      execution=await store.workerLaunches.openExecution(key);
+      assert.equal(execution.binding.worker_boot_id,created.admission_receipt.member_boot_id);
+      assert.equal(execution.binding.controller_boot_id,binding.receipt.member_boot_id);
+      assert.equal(execution.state.gate_state,'closed');
+      assert.equal((await module.configureExecution(device)).value.state,'bound_closed');
+      await module.startEvents(device);
+      assert.deepEqual((await module.readEvents(device)).body.result.batch.events,[]);
+      await assert.rejects(store.workerLaunches.openModule(key,{events:true}),{code:'worker_module_capacity'});
+      await assert.rejects(store.workerLaunches.openExecution(key),{code:'execution_client_capacity'});
+    }
     await assert.rejects(start.create(key,proof),{code:'worker_authorization_creation_attempted'});
   }
   a.sessions.revokeExtensionApproval(token,{request_id:'revoke',approval_ref:approved.approval_ref,reason:'测试撤销'});
@@ -63,6 +86,11 @@ try{
   assert.deepEqual(fence.items,[{...key,disposition:'deny'}]);
   const terminal=adopted?'retired':'rejected';
   assert.equal((await supervision.queryLaunch(key)).state,terminal);
+  if(module){
+    await assert.rejects(module.captureBaseline(x.registered.device_id));
+    await assert.rejects(execution.initialFence(x.registered.device_id),{code:'execution_client_closed'});
+    await assert.rejects(store.workerLaunches.openModule(key,{events:true}));
+  }
   await assert.rejects(start.authorize(key),{code:'worker_authorization_denied'});
   const next={scope:fence.scope,revision:String(Number(fence.revision)+1),items:[{...key,disposition:'allow'}]};
   await assert.rejects(supervision.putFence({...next,digest:hash(next)}),{code:'supervisor_unauthorized'});

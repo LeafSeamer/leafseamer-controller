@@ -517,6 +517,10 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy, t
     assertCurrent, observeWorker, assertWorkerObservation, observeTimeProvider, assertTimeProviderObservation,
     observeTimeProviderRetirement, assertTimeProviderRetirement, observeWorkerRetirement, assertWorkerRetirement,
     putFence, queryLaunch, registerWorker, prepareWorkerMaterialization, prepareLinuxWorkerContent, loadWorkerContent, createWorker, retireWorker,
+    ...(inherited?.openWorkerChannel&&{openWorkerChannel(observation,purpose){
+      assertWorkerObservation(observation);
+      return inherited.openWorkerChannel(observation.receipt.member_boot_id,purpose);
+    }}),
     scope,
     current() { assertCurrent(); return latest; },
     currentTimeProviderObservation(){

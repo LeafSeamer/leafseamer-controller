@@ -232,10 +232,12 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     async openExecution(value){
       available();need(Number(service.schema_revision)>=30,'execution_handshake_migration');const selected=key(value);
       need(!executionClients.has(selected.launch_id)&&executionClients.size<4,'execution_client_capacity');
-      const journal=openJournal(selected);executionClients.set(selected.launch_id,null);let client;
-      try{client=await connectDeviceExecution({journal,current:()=>runtime.current(selected),invalidate:()=>runtime.invalidate(selected),
+      const journal=openJournal(selected);executionClients.set(selected.launch_id,null);let client,socket;
+      try{socket=runtime.openChannel(selected,'execution');client=await connectDeviceExecution({journal,current:()=>runtime.current(selected),invalidate:()=>runtime.invalidate(selected),socket,
         onClose:()=>executionClients.delete(selected.launch_id)});available();runtime.current(selected);executionClients.set(selected.launch_id,client);return client;
-      }catch(error){executionClients.delete(selected.launch_id);client?.close();throw error;}
+      }catch(error){executionClients.delete(selected.launch_id);socket?.destroy();
+        if(client)client.close();else{try{journal.end();}catch{}try{runtime.invalidate(selected);}catch{}}
+        throw error;}
     },
     async openModule(value,{events=false}={}){
       available();need(Number(service.schema_revision)>=25,'worker_module_migration_required');const selected=key(value),active=runtime.current(selected);need(!modules.has(selected.launch_id)&&modules.size<4,'worker_module_capacity');
@@ -247,7 +249,7 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
       const current=()=>db.inTransaction?runtime.currentInTransaction(selected):runtime.current(selected);
       const catalog=deviceCatalogStore({db,current,select(intent){const selected=extensionSource.current(intent);return {selected,dependencies:currentWorkerDependencies(db,service,intent,selected)};}});
       const journal=deviceModuleJournal(db,current),eventSource=events&&Number(service.schema_revision)>=64?deviceEventSourceStore({db,current,catalog,projectReferenceCapture}):null;
-      let module;
+      let module,socket;
       try{
         const configuration=db.transaction(()=>{
           const checked=current(),intent=checked.binding.launch_intent,chosen=extensionSource.current(intent);
@@ -258,11 +260,12 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
           need(same(registered.resource_ref,obs.resource_ref)&&same(body.configuration,{resource_ref:obs.resource_ref,secret_ref:obs.secret_ref}),'worker_module_obs_binding');
           return {reference,value:{...body.configuration,resource_record:registered.record}};
         }).immediate();
-        module=await connectDeviceModule({events,eventSource,current,invalidate:()=>runtime.invalidate(selected),configuration,
+        socket=runtime.openChannel(selected,'module');
+        module=await connectDeviceModule({events,eventSource,current,invalidate:()=>runtime.invalidate(selected),configuration,socket,
         journal:{open:journal.open,record(direction,frame){journal.record(direction,frame);if(direction==='w2c')catalog.receive(frame);}},catalog,
         onClose:()=>{try{eventSource?.close();}finally{modules.delete(selected.launch_id);}}});
         available();current();modules.set(selected.launch_id,module);return module;
-      }catch(error){modules.delete(selected.launch_id);module?.close();try{runtime.invalidate(selected);}catch{}throw error;}
+      }catch(error){modules.delete(selected.launch_id);socket?.destroy();module?.close();try{runtime.invalidate(selected);}catch{}throw error;}
     },
     async prepare(input){
       available();need(Buffer.isBuffer(input)&&input.length<=262144,'worker_launch_input');

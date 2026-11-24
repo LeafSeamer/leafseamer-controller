@@ -136,6 +136,13 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
    need(entry,'worker_runtime_unavailable');
    try{checkInWriter(entry);return view(entry.row);}catch(error){withdrawFromWriter(entry,error);throw error;}
   },
+  openChannel(key,purpose){
+   available();const value=prepared(key),entry=value&&active.get(value.intent.launch_id);
+   need(entry,'worker_runtime_unavailable');check(entry);
+   if(value.intent.containment_ref.backend==='windows_job')return undefined;
+   need(typeof source.openWorkerChannel==='function','worker_runtime_channel_unavailable');
+   return source.openWorkerChannel(entry.observation,purpose);
+  },
   invalidate(key){available();const value=prepared(key),entry=value&&active.get(value.intent.launch_id);if(entry)withdraw(entry,'source_changed');},
   close(){if(closed)return;closed=true;unsubscribe?.();for(const entry of [...active.values()])withdraw(entry,'closed');}
  });
