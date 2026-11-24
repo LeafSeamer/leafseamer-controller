@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
+import {setTimeout as delay} from 'node:timers/promises';
 import {openLinuxCoreBootstrap} from '../../dist/linux-core-bootstrap.mjs';
 import {openNativeClock} from '../../dist/native-clock.mjs';
 import {setup} from './extension-capabilities.mjs';
@@ -9,13 +10,22 @@ import {authenticated} from './extension-auth.mjs';
 import {workerIntent} from './core-binding.mjs';
 import {hash} from './extension-installation.mjs';
 
-const input=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
+const compose=process.argv[2]==='contained-compose-linux';
+const inputFile=compose?path.join('/var/lib/leafseamer','worker-test.json'):process.argv[2];
+const input=JSON.parse(fs.readFileSync(inputFile,'utf8'));
 const cleanup=[];
 const fixture={after(fn){cleanup.unshift(fn);}};
 try{
-  const clock=openNativeClock(),channel=openLinuxCoreBootstrap(input.policy,'controller',{workerControl:true,workerChannelDirectory:input.channelDirectory});
+  const clock=openNativeClock(),channel=openLinuxCoreBootstrap(input.policy,'controller',{compose,workerControl:true,workerChannelDirectory:input.channelDirectory});
   fixture.after(()=>channel.close());
   const {binding,supervision,policy}=await channel.accept({identity:input.policy,source:clock});
+  if(compose){
+    const until=performance.now()+10000;
+    while(!fs.existsSync(input.start)){
+      supervision.assertCurrent();assert.ok(performance.now()<until,'Compose supervisor did not finish admitting both cores');
+      await delay(25);
+    }
+  }
   const capabilityTemplate=input.channelDirectory?JSON.parse(fs.readFileSync(new URL('../../dist/simulator-control-capability.json',import.meta.url),'utf8')):undefined;
   const x=await setup(fixture,{revision:109,directory:input.data,capabilityTemplate,reviewedActions:capabilityTemplate?.actions.map(action=>action.action_id),prepareHost(host){
     if(input.materialization){
