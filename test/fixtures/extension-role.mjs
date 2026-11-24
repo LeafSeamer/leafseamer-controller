@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import {setup,fixture,hash} from './extension-installation.mjs';
-export async function prepared(t,{revision=15,recheck=()=>{},prepareHost=()=>{},directory=null,installation=null}={}){
+export async function prepared(t,{revision=15,recheck=()=>{},prepareHost=()=>{},directory=null,installation=null,withEnrolledIssuer=false}={}){
  const f=await setup(t,revision,directory),host=installation??fixture(f.store.identity),raw=Buffer.from('{}');
  if(installation===null){
   const file=host.content.inventory.files.find(f=>f.file_id==='config');
@@ -17,7 +17,11 @@ export async function prepared(t,{revision=15,recheck=()=>{},prepareHost=()=>{},
  const api=f.store.extensionInstallations;api.bindSource(host);const slot=api.createSlot({request_id:'slot',extension_id:host.content.manifest.extension_id});
  const installed=await api.stage({request_id:'stage',slot_id:slot.record.slot_id,expected_slot_revision:'1',intake_ref:host.content.intake_ref});
  const config=await api.configurations.configure({request_id:'configuration',installation_ref:installed.installation_ref,expected_revision:'0',bytes:raw});
- const capability=f.store.enrollment.begin();await f.store.enrollment.complete({token_id:capability.token_id,secret:capability.secret,login:'role.test',password:'Synthetic-role-password-123',mode:'standalone'});
+ if(withEnrolledIssuer){
+  if(!f.store.enrollment.summary().initialized)throw new Error('fixture_issuer_missing');
+ }else{
+  const capability=f.store.enrollment.begin();await f.store.enrollment.complete({token_id:capability.token_id,secret:capability.secret,login:'role.test',password:'Synthetic-role-password-123',mode:'standalone'});
+ }
  const registered=f.store.registerDevice({request_id:'device',device_kind:'simulator',display_name:'测试设备'});
  if(installation===null)host.checkRoles=true;
  return {f,api,host,installed,config,registered,request:api.roles?{request_id:'resolve',installation_ref:installed.installation_ref,configuration_ref:config.configuration_ref,expected_revision:'0',

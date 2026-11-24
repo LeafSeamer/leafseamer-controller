@@ -40,7 +40,7 @@ export async function prepareManualSimulator({store,operator,device}){
   return {token,context,policy,credential_id:active.id,secret:staged.secret};
 }
 
-export async function writeManualSimulator({store,operator,supervision,key,device,manual,value}){
+export async function writeManualSimulator({store,operator,supervision,key,device,manual,value,successor=false}){
   const {sessions,real}=operator,{token,context,policy,credential_id,secret}=manual;
   const input=()=> {
     const human=sessions.beginManualExecutionChallenge(token,device,id());
@@ -54,8 +54,9 @@ export async function writeManualSimulator({store,operator,supervision,key,devic
     await supervision.refreshCoreObservation();
     real.refresh();
   };
-  await store.workerLaunches.initialDeviceFence(key,device);
   await refresh();
+  if(successor)await store.workerLaunches.captureDeviceBaseline(key,device);
+  else await store.workerLaunches.initialDeviceFence(key,device);
   const original=input(),current=sessions.currentManualAuthorizationContext(original);
   const recovery=sessions.requestDeviceAuthorizationRecovery(token,{...original,request_id:id(),
     expected_state_ref:current.state_ref,expected_context_digest:current.context_digest});

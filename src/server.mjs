@@ -11,7 +11,7 @@ import {localPairingPath} from './local-pairing-admin.mjs';
 import {createLocalExtensionManagement,localExtensionPath} from './local-extension-management.mjs';
 import {loadGuiAssets} from './gui-assets.mjs';
 import {startPeerPairingTransport} from './peer-pairing-transport.mjs';
-import {localEventOperations,manageLocalEvents} from './local-event-management.mjs';
+import {createLocalPairingManagement} from './local-pairing-management.mjs';
 import {startOutboxDelivery} from './session-denial-delivery.mjs';
 import {startRunProtectionDelivery} from './run-approval-protection-completion.mjs';
 import {createSubscriptionEndpoint} from './service-subscription-http.mjs';
@@ -216,41 +216,10 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     const gui = guiDirectory === null ? null : loadGuiAssets(guiDirectory, storage.identity, tls.origin, {
       manifestSha256: guiManifestSha256, seamerIdentity: localPairingManagement ? pairing.peers?.[0]?.identity ?? null : null, standalone
     });
-    async function managePairing(auth, operation, input) {
-      if (closing || !peerTransport) throw new Error('pairing_runtime_unavailable');
+    const managePairing=createLocalPairingManagement({sessions,transport:()=>peerTransport,assertCurrent(){
+      if(closing)throw new Error('pairing_runtime_unavailable');
       assertRuntimeCurrent();
-      const api = sessions.peerPairings;
-      let result;
-      switch (operation) {
-        case 'stage': result = api.stage(auth, input); break;
-        case 'export': result = api.exportFirstPairingAuthorization(auth, input); break;
-        case 'activate': result = api.activate(auth, input); break;
-        case 'read-audience':
-          pairingFields(input, 'principal_id,audience');
-          result = sessions.remotePermissions.get(auth, input.principal_id, input.audience);
-          break;
-        case 'grant-audience':
-          result = sessions.remotePermissions.replace(auth, input);
-          break;
-        case 'inspect':
-          pairingFields(input, 'binding_id');
-          result = api.get(auth, input.binding_id);
-          break;
-        case 'prove':
-          pairingFields(input, 'binding_id');
-          api.get(auth, input.binding_id);
-          assertRuntimeCurrent();
-          await peerTransport.prove(input.binding_id);
-          if (closing) throw new Error('pairing_runtime_unavailable');
-          result = api.get(auth, input.binding_id);
-          break;
-        default:
-          if(!localEventOperations.includes(operation))throw new Error('pairing_operation');
-          result=manageLocalEvents(sessions,auth,operation,input);
-      }
-      assertRuntimeCurrent();
-      return result;
-    }
+    }});
     const authenticationScope = {serviceId: storage.identity.service_id, databaseInstanceId: storage.identity.database_instance_id,
       serviceBootId: storage.serviceBootId, sessions};
     const authenticationHttp = createAuthenticationHttp({...authenticationScope, origin: tls?.origin ?? null,

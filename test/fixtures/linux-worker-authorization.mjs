@@ -18,18 +18,19 @@ import {createLocalExtensionManagement,localExtensionPath} from '../../dist/loca
 import {localPairingPath,runLocalExtensionAdmin,runLocalPairingAdmin} from '../../dist/local-pairing-admin.mjs';
 import {manageLocalEvents} from '../../dist/local-event-management.mjs';
 import {commandPermissions,prepareManualSimulator,writeManualSimulator} from './linux-simulator-command.mjs';
+import {simulatorPairingInputs,startSimulatorPairing} from './linux-simulator-pairing.mjs';
 
 const compose=process.argv[2]==='contained-compose-linux';
 const inputFile=compose?path.join('/var/lib/leafseamer','worker-test.json'):process.argv[2];
 const input=JSON.parse(fs.readFileSync(inputFile,'utf8'));
 const cleanup=[];
 const fixture={after(fn){cleanup.unshift(fn);}};
-async function localManagement(store,{sessions,auth},assertCurrent){
-  const origin='https://127.0.0.1:8444',caFile='/etc/leafseamer/tls/certificate.pem';
-  const cert=fs.readFileSync(caFile),key=fs.readFileSync('/etc/leafseamer/tls/private-key.pem');
+async function localManagement(store,{sessions,auth},assertCurrent,pairing=null){
+  const origin='https://127.0.0.1:8444',caFile=pairing?'/etc/leafseamer/pairing/ca.pem':'/etc/leafseamer/tls/certificate.pem';
+  const ca=fs.readFileSync(caFile),cert=pairing?.tls.cert??ca,key=pairing?.tls.key??fs.readFileSync('/etc/leafseamer/tls/private-key.pem');
   const handler=createAuthenticationHttp({serviceId:store.identity.service_id,databaseInstanceId:store.identity.database_instance_id,
     serviceBootId:store.serviceBootId,origin,sessions,
-    localPairing(auth,operation,request){assertCurrent();return manageLocalEvents(sessions,auth,operation,request);},
+    localPairing:pairing?.manage??((auth,operation,request)=>{assertCurrent();return manageLocalEvents(sessions,auth,operation,request);}),
     localExtension:createLocalExtensionManagement({sessions,workerLaunches:store.workerLaunches,assertCurrent})});
   const server=https.createServer({cert,key},(req,res)=>{if(!handler.handle(req,res))res.writeHead(404).end();});
   server.listen(8444,'127.0.0.1');await once(server,'listening');
@@ -38,7 +39,7 @@ async function localManagement(store,{sessions,auth},assertCurrent){
     request(operation,request,{csrf=auth.csrf,headers={},route=localExtensionPath}={}){
       const bytes=Buffer.from(canonicalize({operation,request}));
       return new Promise((resolve,reject)=>{
-        const req=https.request(origin+route,{method:'POST',ca:cert,agent:false,headers:{
+        const req=https.request(origin+route,{method:'POST',ca,agent:false,headers:{
           Origin:origin,Cookie:'leafseamer_session=v1.'+auth.credential_id+'.'+auth.secret,'X-CSRF-Token':csrf,
           'Content-Type':'application/json','Content-Length':String(bytes.length),...headers}},res=>{
           const chunks=[];
@@ -49,23 +50,44 @@ async function localManagement(store,{sessions,auth},assertCurrent){
       });
     },
     async cli(admin,operation,request){
-      const result=await admin({origin,caFile,input:{login:'role.test',password:'Synthetic-role-password-123',operation,request}});
+      const result=await admin({origin,caFile,input:{...(input.paired?.login??{login:'role.test',password:'Synthetic-role-password-123'}),operation,request}});
       return JSON.parse(result.toString('utf8'));
     }
   };
+}
+async function waitForFile(file,assertCurrent,timeout){
+  const until=performance.now()+timeout;
+  while(!fs.existsSync(file)){
+    assertCurrent();assert.ok(performance.now()<until,'Compose simulator did not receive '+path.basename(file));
+    await delay(25);
+  }
+}
+async function waitForEvent(store,device,sequence,value){
+  const until=performance.now()+4000;
+  for(;;){
+    const published=store.workerLaunches.deviceEvents(device);
+    const acknowledged=inspect(input.data,db=>db.prepare(
+      "SELECT count(*) FROM device_module_frame WHERE direction='w2c' AND message_type='EVENT_ACKED'").pluck().get());
+    if(published.events.length===sequence&&acknowledged===sequence){
+      const event=published.events.at(-1);
+      assert.deepEqual(event.origin.payload.value,{value,write_sequence:String(sequence)});
+      assert.equal(event.origin.source_sequence,String(sequence));
+      assert.equal(hash(event.origin),event.origin_digest);
+      return event;
+    }
+    assert.ok(performance.now()<until,'没有提交实际模拟器事件');
+    await delay(20);
+  }
 }
 try{
   const clock=openNativeClock({linuxWithoutSystemSleep:compose}),channel=openLinuxCoreBootstrap(input.policy,'controller',{compose,workerControl:true,
     workerChannelDirectory:input.channelDirectory,installationRead:compose});
   fixture.after(()=>channel.close());
-  const {binding,supervision,policy,extensionInstallationSource}=await channel.accept({identity:input.policy,source:clock});
+  const runtime=await channel.accept({identity:input.policy,source:clock});
+  const {binding,supervision,policy,extensionInstallationSource}=runtime;
   let installation=null;
   if(compose){
-    const until=performance.now()+10000;
-    while(!fs.existsSync(input.start)){
-      supervision.assertCurrent();assert.ok(performance.now()<until,'Compose supervisor did not finish admitting both cores');
-      await delay(25);
-    }
+    await waitForFile(input.start,supervision.assertCurrent,10000);
     const query={intake_id:input.intakeRef.object_id,target_authority_service_id:policy.service_id};
     assert.throws(()=>extensionInstallationSource.describeIntake({...query,target_authority_service_id:'unrelated-service'}),
       {code:'linux_installation_query'});
@@ -76,7 +98,8 @@ try{
     installation={...extensionInstallationSource,content};
   }
   const capabilityTemplate=input.channelDirectory?JSON.parse(fs.readFileSync(new URL('../../dist/simulator-control-capability.json',import.meta.url),'utf8')):undefined;
-  const x=await setup(fixture,{revision:109,directory:input.data,installation,capabilityTemplate,reviewedActions:capabilityTemplate?.actions.map(action=>action.action_id),prepareHost(host){
+  const x=await setup(fixture,{revision:109,directory:input.data,installation,capabilityTemplate,withEnrolledIssuer:!!input.paired,
+    reviewedActions:capabilityTemplate?.actions.map(action=>action.action_id),prepareHost(host){
     if(input.materialization){
       Object.assign(host.identity,input.materialization.identity);
       Object.assign(host.content,input.materialization.content);
@@ -90,9 +113,12 @@ try{
   store.extensionInstallations.bindRuntimeSource(supervision);
   store.workerLaunches.runtime.bindSource(supervision);
   const start=store.workerLaunches.authorization;start.bindSource(supervision);
+  const pairing=input.paired?simulatorPairingInputs(store,runtime,clock):null;
   const a=await authenticated(fixture,x.f,{grant:!compose,...(compose&&{
-    native:{source:clock,descriptor:binding.descriptor},sampleWindowPolicy:'authentication-clock-sample/2'})});
-  const management=compose?await localManagement(store,a,supervision.assertCurrent):null;
+    native:{source:clock,descriptor:binding.descriptor},sampleWindowPolicy:'authentication-clock-sample/2'}),
+    ...(pairing&&{evidence:pairing.evidence,credentials:input.paired.login})});
+  if(pairing)pairing.manage=await startSimulatorPairing(fixture,{store,sessions:a.sessions,real:a.real,profile:pairing.profile,assertCurrent:runtime.assertLive});
+  const management=compose?await localManagement(store,a,supervision.assertCurrent,pairing&&{tls:pairing.profile.tls,manage:pairing.manage}):null;
   async function manage(operation,request){
     const result=await management.request(operation,request);
     assert.equal(result.status,200,JSON.stringify(result.body));
@@ -135,23 +161,7 @@ try{
     assert.equal(started.execution.worker_boot_id,adopted.binding.admission_receipt.member_boot_id);
     assert.deepEqual(await manage('start',request),started);
     const command=await writeManualSimulator({store,operator:a,supervision,key,device,manual,value:7});
-    const until=performance.now()+3000;
-    for(;;){
-      const published=store.workerLaunches.deviceEvents(device);
-      const acknowledged=inspect(input.data,db=>db.prepare(
-        "SELECT count(*) FROM device_module_frame WHERE direction='w2c' AND message_type='EVENT_ACKED'").pluck().get());
-      if(published.events.length&&acknowledged===1){
-        assert.equal(published.events.length,1);
-        const event=published.events[0];
-        assert.deepEqual(event.origin.payload.value,{value:7,write_sequence:'1'});
-        assert.equal(event.origin.source_sequence,'1');
-        assert.equal(hash(event.origin),event.origin_digest);
-        simulatorEvent={command,device,event};
-        break;
-      }
-      assert.ok(performance.now()<until,'没有提交实际模拟器事件');
-      await delay(20);
-    }
+    simulatorEvent={command,device,event:await waitForEvent(store,device,1,7)};
     const scopeRequest={request_id:crypto.randomUUID(),device_ids:[device]},pairing=(operation,request)=>
       management.cli(runLocalPairingAdmin,operation,request);
     assert.equal((await management.request('register-event-scope',scopeRequest,{route:localPairingPath,csrf:crypto.randomBytes(32).toString('base64url')})).status,401);
@@ -162,6 +172,14 @@ try{
     assert.deepEqual(current.registration.scope,scope.scope);
     assert.deepEqual(current.current_frontiers.map(member=>member.source_key),[simulatorEvent.event.origin.source_key]);
     assert.equal(current.current_frontiers[0].registration_sequence,'1');
+    if(input.paired){
+      const {ready,proceed,finish}=input.paired;
+      fs.writeFileSync(ready,canonicalize({device,scope,baseline:simulatorEvent.event}));
+      await waitForFile(proceed,runtime.assertLive,30000);
+      simulatorEvent.incremental={command:await writeManualSimulator({store,operator:a,supervision,key,device,manual,value:23,successor:true}),
+        event:await waitForEvent(store,device,2,23)};
+      await waitForFile(finish,runtime.assertLive,12000);
+    }
     assert.deepEqual(await pairing('revoke-event-scope',{scope_ref:scope.scope_ref}),{scope_ref:scope.scope_ref,state:'revoked'});
     assert.throws(()=>store.workerLaunches.eventScopes.current(scope.scope_ref),{code:'event_scope_inactive'});
     simulatorEvent.scope_ref=scope.scope_ref;

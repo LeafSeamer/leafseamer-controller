@@ -222,6 +222,12 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
         throw error;
       }finally{starting.delete(launch_id);}
     },
+    captureDeviceBaseline(value,device){
+      available();const selected=key(value);runtime.current(selected);
+      const module=modules.get(selected.launch_id);
+      need(module,'worker_module_unavailable');
+      return module.captureBaseline(device);
+    },
     initialDeviceFence(value,device){return currentExecution(value).initialFence(device);},
     openInitialDevice(value,reference){return currentExecution(value).initialOpen(reference,{ready:true});},
     ...(Number(service.schema_revision)>=79&&{applyRunProtection}),
