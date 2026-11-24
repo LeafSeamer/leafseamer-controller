@@ -47,8 +47,9 @@ export function readLinuxClockEvidenceProfile(file, policy, role) {
     fields(profile, ['format', 'service_id', 'database_instance_id', 'policy_digest', 'public_key_file', 'exchange_directory']);
     const {format, service_id, database_instance_id, policy_digest, public_key_file, exchange_directory} = profile;
     pairingUuid(service_id); pairingUuid(database_instance_id);
-    const authentication = role === 'controller' && format === 'leafseamer.controller-linux-clock-evidence-profile/2';
-    need((authentication || (role === 'controller' || role === 'seamer') && format === 'leafseamer.'+role+'-linux-clock-evidence-profile/1') && service_id === policy.service_id &&
+    const prefix = 'leafseamer.'+role+'-linux-clock-evidence-profile/';
+    const authentication = format === prefix+'2';
+    need((role === 'controller' || role === 'seamer') && (authentication || format === prefix+'1') && service_id === policy.service_id &&
       database_instance_id === policy.database_instance_id && typeof policy_digest === 'string' &&
       policy_digest.length === 71 && /^sha256:[0-9a-f]{64}$/.test(policy_digest), 'linux_clock_evidence_profile');
     protectedDirectory(exchange_directory);

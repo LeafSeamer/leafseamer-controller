@@ -76,7 +76,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
         const linuxAuthentication = linuxClockEvidenceProfile?.authentication === true;
         const provider = linuxAuthentication ? clockEvidence : await authenticationProvider?.(Object.freeze({scope: storage.authenticationClock.scope, source}));
         authentication = startAuthenticationClock(source, storage.authenticationClock, provider ?? null,
-          {waitForInitialEvidence: linuxAuthentication});
+          {waitForInitialEvidence: linuxAuthentication, renewableHealth: linuxAuthentication});
         if (Number(storage.identity.schema_revision) >= 5 && !linuxAuthentication) sessions = storage.sessions(authentication);
       }
     }

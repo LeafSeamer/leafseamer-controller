@@ -27,6 +27,12 @@ export function authenticationClockStore(db, scope) {
     if (old) { need(old[0] === value.digest && old[1] === kind && old[2].equals(bytes), 'auth_clock_evidence_identity'); return; }
     db.prepare('INSERT INTO authentication_clock_evidence VALUES (?, ?, ?, ?, ?)').run(value.id, value.revision, value.digest, kind, bytes);
   }
+  function originalEvidence(kind, wanted) {
+    const row = db.prepare('SELECT body, kind FROM authentication_clock_evidence WHERE id = ? AND revision = ? AND digest = ?').raw().get(wanted.id, wanted.revision, wanted.digest);
+    const original = decode(row);
+    need(original && row[1] === kind && same(ref(original), wanted), 'auth_clock_evidence_missing');
+    return original;
+  }
   function writeFault(domain, reason) {
     const old = faultFor(domain); if (old) return old;
     const value = seal({format: 'authentication-clock-fault/1', id: crypto.randomUUID(), revision: '1',
@@ -58,7 +64,10 @@ export function authenticationClockStore(db, scope) {
             db.exec('RELEASE auth_clock_ingest');
             return {state: 'stored', acquisition_ref: ref(old), fault_ref: null, replay: true};
           }
-          const value = acquisition(capture, evidence, current(domain), id);
+          const prior = current(domain);
+          const priorHealthEnd = prior ? clockInteger(originalEvidence('health', prior.health_evidence_ref).valid_before_tick_ns) : null;
+          if (priorHealthEnd !== null) need(now < priorHealthEnd, 'auth_clock_evidence_expired');
+          const value = acquisition(capture, evidence, prior, id);
           extrapolate(value, now);
           for (const key of ['policy', 'runtime', 'health']) writeEvidence(key, evidence[key]);
           const p = value.policy_ref, r = value.runtime_ref, h = value.health_evidence_ref;
@@ -68,9 +77,11 @@ export function authenticationClockStore(db, scope) {
           db.prepare('INSERT INTO authentication_clock_head VALUES (?, ?, ?) ON CONFLICT(service_boot_id, clock_domain_id) DO UPDATE SET acquisition_id = excluded.acquisition_id')
             .run(scope.service_boot_id, domain, value.id);
           // 提交前再读tick和提供者；新采样不得因写入延迟取得额外有效期。
-          const latest = readContext(); context(latest, scope, source.artifactDigest, source.tick());
+          const latest = readContext(), at = source.tick();
+          context(latest, scope, source.artifactDigest, at);
           need(same(latest, evidence), 'auth_clock_context_changed');
-          extrapolate(value, source.tick());
+          if (priorHealthEnd !== null) need(at < priorHealthEnd, 'auth_clock_evidence_expired');
+          extrapolate(value, at);
           db.exec('RELEASE auth_clock_ingest');
           return {state: 'stored', acquisition_ref: ref(value), fault_ref: null, replay: false};
         } catch (error) {
@@ -84,14 +95,16 @@ export function authenticationClockStore(db, scope) {
       need(!faultFor(domain), 'auth_clock_fault_latched'); context(evidence, scope, artifactDigest, now);
       const value = current(domain); need(value !== null, 'auth_clock_missing');
       need(same(value.policy_ref, ref(evidence.policy)) && same(value.runtime_ref, ref(evidence.runtime)), 'auth_clock_binding');
-      // 从库中解析原件和依赖，不只比较调用方的Ref字符串。
-      for (const [kind, key] of [['policy', 'policy_ref'], ['runtime', 'runtime_ref'], ['health', 'health_evidence_ref']]) {
-        const wanted = value[key];
-        const row = db.prepare('SELECT body, kind FROM authentication_clock_evidence WHERE id = ? AND revision = ? AND digest = ?').raw().get(wanted.id, wanted.revision, wanted.digest);
-        const original = decode(row); need(original && row[1] === kind && same(ref(original), wanted), 'auth_clock_evidence_missing');
+      originalEvidence('policy', value.policy_ref);
+      originalEvidence('runtime', value.runtime_ref);
+      const originalHealth = originalEvidence('health', value.health_evidence_ref);
+      if (evidence.health.id === originalHealth.id && evidence.health.revision === originalHealth.revision) {
+        need(same(ref(evidence.health), ref(originalHealth)), 'auth_clock_evidence_identity');
       }
-      const deadline = [value.valid_before_tick_ns, evidence.runtime.valid_before_tick_ns, evidence.health.valid_before_tick_ns]
+      const deadline = [value.valid_before_tick_ns, evidence.runtime.valid_before_tick_ns,
+        originalHealth.valid_before_tick_ns, evidence.health.valid_before_tick_ns]
         .map(clockInteger).reduce((a, b) => a < b ? a : b);
+      need(now < deadline, 'auth_clock_evidence_expired');
       return {acquisition_ref: ref(value), ...extrapolate(value, now), valid_before_tick_ns: String(deadline)};
     }
   });

@@ -623,6 +623,8 @@ CLI 在写入 boot 记录前校验数据库身份及最低 Schema 5。此入口�
 
 `/2` 在回环诊断启动后等待首次签名，确认其作用范围和原期限后才保存认证采集。签发器若在另一个账户下运行，应先在同一文件系统的受保护目录准备证据和读取权限，再原子替换交换目录中的目标文件。`authentication_clock` 显示 `unqualified`、`available` 或 `faulted`。首个采集建立后，证据失效会为本次运行域保存故障并停止认证采集，后来的有效签名也不能恢复该域。该入口只提供回环诊断，就绪继续返回 503。
 
+续签时保留同一 `policy` 和 `runtime` 原件，在旧健康原件到期前发布绑定到该运行域的新 `health` 原件。旧采集仍受将它写入数据库时的健康截止约束。新原件只有完成新一次采集事务后才成为该次采集的依据。若采集中途发生合法续签，Controller 可以用新原件重新采集一次，并继续核对旧原期限。到期或撤下原件产生的运行域故障保持锁闭。
+
 ## 原生时钟诊断
 
 schema 3 服务每500毫秒调用原生采集器。Windows 顺序为 `QueryInterruptTimePrecise → GetSystemTimePreciseAsFileTime → QueryInterruptTimePrecise`，FILETIME 用整数减纪元再转纳秒；Linux 实现使用 `CLOCK_BOOTTIME → CLOCK_REALTIME → CLOCK_BOOTTIME` 并检查时间命名空间。没有 `Date.now()` 或浮点秒替代路径。原生接口依据：[Microsoft 单调时间](https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-queryinterrupttimeprecise)、[精确系统时间](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemtimepreciseasfiletime)、[Linux clock_gettime](https://www.man7.org/linux/man-pages/man2/clock_gettime.2.html)。

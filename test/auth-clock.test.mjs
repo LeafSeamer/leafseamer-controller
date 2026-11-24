@@ -173,15 +173,57 @@ test('COMMIT之后到期保留原件并保护，缺可信提供者不能建立�
   assert.deepEqual(counts(dir), [3, 1, 1, 1]);
 });
 
-test('当前时间窗口不超出健康原件期限，健康更新不刷新旧采样的两秒期限', async t => {
+test('及时健康续签不延长旧采集，后续采集保存新的健康原件', async t => {
   const dir = await directory(t), storage = openStorage(dir), f = fixture(storage.authenticationClock.scope);
   const {digest, ...health} = f.evidence.health;
   f.evidence.health = seal({...health, valid_before_tick_ns: String(f.source.tick() + 1000000000n)});
   const clock = startAuthenticationClock(f.source, storage.authenticationClock, f.provider, {schedule: false});
   try {
-    assert.equal(clock.current().valid_before_tick_ns, '11000000000');
-    f.source.advance(1000000000n);
-    assert.throws(() => clock.current(), e => e.code === 'auth_clock_evidence_expired');
-    assert.equal(clock.status().qualified, false);
+    const old = clock.current();
+    assert.equal(old.valid_before_tick_ns, '11000000000');
+    f.source.advance(500000000n);
+    f.evidence.health = seal({...health,id:crypto.randomUUID(),valid_before_tick_ns:'13000000000'});
+    const pending = clock.current();
+    assert.deepEqual(pending.acquisition_ref,old.acquisition_ref);
+    assert.equal(pending.valid_before_tick_ns,old.valid_before_tick_ns);
+    clock.refresh();
+    const next = clock.current();
+    assert.notDeepEqual(next.acquisition_ref,old.acquisition_ref);
+    assert.equal(next.valid_before_tick_ns,'12500000000');
   } finally { clock.stop(); storage.close(); }
+  assert.deepEqual(counts(dir),[4,2,1,0]);
+});
+
+test('旧健康证据到期后不得用续签填补采集间断', async t => {
+  const dir=await directory(t),storage=openStorage(dir),f=fixture(storage.authenticationClock.scope);
+  const {digest,...health}=f.evidence.health;
+  f.evidence.health=seal({...health,valid_before_tick_ns:'11000000000'});
+  const clock=startAuthenticationClock(f.source,storage.authenticationClock,f.provider,{schedule:false,renewableHealth:true});
+  try {
+    f.source.advance(1000000000n);
+    f.evidence.health=seal({...health,id:crypto.randomUUID(),valid_before_tick_ns:'13000000000'});
+    clock.refresh();
+    assert.equal(clock.status().state,'faulted');
+    assert.equal(clock.status().durable,true);
+  } finally { clock.stop(); storage.close(); }
+  assert.deepEqual(counts(dir),[3,1,1,1]);
+});
+
+test('同一运行证据下在采集事务中续签，回滚后只提交新一轮采集', async t => {
+  const dir=await directory(t),storage=openStorage(dir),f=fixture(storage.authenticationClock.scope);
+  const {digest,...health}=f.evidence.health;
+  const renewed=seal({...health,id:crypto.randomUUID(),valid_before_tick_ns:'20000000000'});
+  let reads=0,rotate=false;
+  const provider={read(){
+    if(rotate&&++reads===3)f.evidence.health=renewed;
+    return f.evidence;
+  }};
+  const clock=startAuthenticationClock(f.source,storage.authenticationClock,provider,{schedule:false,renewableHealth:true});
+  try {
+    f.source.advance(500000000n);rotate=true;
+    clock.refresh();
+    assert.equal(clock.status().qualified,true);
+    assert.deepEqual(storage.authenticationClock.current(f.evidence.runtime.clock_domain_id).health_evidence_ref,ref(renewed));
+  } finally { clock.stop(); storage.close(); }
+  assert.deepEqual(counts(dir),[4,2,1,0]);
 });
