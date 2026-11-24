@@ -35,6 +35,7 @@ export async function startSimulatorPairing(t,{store,sessions,real,profile,asser
   const transport=await startPeerPairingTransport({...settings,identity,pairings:sessions.peerPairings,
     clock:{pairingSample(){assertCurrent();return real.pairingSample();}},
     subscriptions:createSubscriptionEndpoint({store:sessions.serviceSubscriptions,serviceBootId:store.serviceBootId}),
+    deviceBindings(...args){assertCurrent();return store.workerLaunches.deviceAutomation(...args);},
     deviceEvents(...args){assertCurrent();return store.workerLaunches.deviceEvents(...args);},
     async introspection(request){
       assertCurrent();

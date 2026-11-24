@@ -174,7 +174,7 @@ try{
     assert.equal(current.current_frontiers[0].registration_sequence,'1');
     if(input.paired){
       const {ready,proceed,finish}=input.paired;
-      fs.writeFileSync(ready,canonicalize({device,scope,baseline:simulatorEvent.event}));
+      fs.writeFileSync(ready,canonicalize({device,scope,baseline:simulatorEvent.event,source_ref:current.current_frontiers[0].source_registration_ref}));
       await waitForFile(proceed,runtime.assertLive,30000);
       simulatorEvent.incremental={command:await writeManualSimulator({store,operator:a,supervision,key,device,manual,value:23,successor:true}),
         event:await waitForEvent(store,device,2,23)};
