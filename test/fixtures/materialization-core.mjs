@@ -153,8 +153,8 @@ async function runSuccessor(device,parameters={value:23},contextId=commandReques
  const current=await commandHttp('GET','/api/v1/commands/'+id),replayed=await commandHttp('POST','/api/v1/commands',request);
  report({event:'successor-command',opened,accepted,current,replayed,closed,cleaned,state:executionClient.state});
 }
-async function completeObsCut(request,ordinal){
- const route='/api/v1/commands',admitted=await commandHttp('POST',route,request);
+async function completeObsCut(request,ordinal,browserAdmission=null){
+ const route='/api/v1/commands',admitted=browserAdmission??await commandHttp('POST',route,request);
  report({event:'obs-cut-command-admission',admitted,ordinal});
  if(admitted.status!==202)throw new Error('obs_cut_command_http');
  const id=admitted.body.command_ref.object_id;
@@ -165,6 +165,14 @@ async function completeObsCut(request,ordinal){
  const finished=await commandHttp('GET',route+'/'+id),evidence=await commandHttp('GET',route+'/'+id+'/evidence?state_revision=5&limit=5'),
   replayed=await commandHttp('POST',route,request),control=manager.sessions.getControl(commandToken,request.device_id);
  report({event:'obs-cut-command-result',ordinal,finished,evidence,replayed,control});
+}
+async function obsBrowserMarker(file){
+ const until=performance.now()+15000;
+ while(!fs.existsSync(file)){
+  if(performance.now()>=until)throw Object.assign(new Error('fixture_obs_browser_timeout'),{code:'fixture_obs_browser_timeout'});
+  await delay(20);
+ }
+ return fs.readFileSync(file,'utf8');
 }
 async function openOrdinaryGate(device,automatic,token=commandToken){
  await executionClient.initialFence(device);
@@ -533,6 +541,7 @@ try{
             capabilities:await commandHttp('GET','/api/v1/devices/'+device+'/capabilities')});
           if(obsOpen){
             if(obsCommand)await commandHttp('GET','/api/v1/commands/00000000-0000-4000-8000-000000000001');
+            if(input.gui?.obs)await obsBrowserMarker(input.gui.obs.ready);
             await business.workerLaunches.runtime.refreshCurrent(key);
             await source.refreshCoreObservation();
             manager.real.refresh();
@@ -544,7 +553,14 @@ try{
                 idempotency_key:crypto.randomUUID(),dispatch:{mode:'immediate',max_queue_ms:10000}};
               const stale=await commandHttp('POST',route,{...request,parameters:{scene_ref:{...scene_ref,binding_revision:'1'}}});
               report({event:'obs-cut-stale-reference',stale});
-              await completeObsCut(request,1);
+              if(input.gui?.obs){
+                fs.writeFileSync(input.gui.obs.opened,'ready');
+                const {body,response}=JSON.parse(await obsBrowserMarker(input.gui.obs.submitted));
+                if(canonicalize(body.parameters)!==canonicalize(request.parameters))throw new Error('fixture_obs_browser_target');
+                await completeObsCut(body,1,response);
+                fs.writeFileSync(input.gui.obs.settled,'settled');
+                await obsBrowserMarker(input.gui.obs.checked);
+              }else await completeObsCut(request,1);
               const original=ready.entries.find(entry=>entry.obs_scene_uuid===second.body.value.program_scene_uuid);
               const next={...request,idempotency_key:crypto.randomUUID(),parameters:{scene_ref:{...scene_ref,scene_id:original.scene_id}}};
               const blocked=await commandHttp('POST',route,next);
