@@ -54,7 +54,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   if (pairing !== null) pairingUuid(pairing.credential_id);
   const storage = openStorage(dataDir, protectedIngressIdentity);
   let installationSource=extensionInstallationSource;
-  let supervision = null, timeProviderLink = null, timeProviderBinding = null, clockEvidence = null, linuxSource = null, linuxRuntime = null;
+  let supervision = null, timeProviderLink = null, timeProviderBinding = null, clockEvidence = null, linuxSource = null, linuxRuntime = null, linuxProvider=null;
   const assertRuntimeCurrent = () => { supervision?.assertCurrent(); linuxRuntime?.assertLive(); timeProviderLink?.assertCurrent(); };
   try {
     if (coreBootstrap !== null) {
@@ -62,7 +62,8 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       const result = await coreBootstrap(storage.identity), {binding, policy} = result;
       supervision = result.supervision ?? null; supervision?.assertCurrent();
       result.assertCurrent?.();
-      timeProviderBinding = storage.bindCoreRuntime(binding, policy, supervision);
+      linuxProvider=result.referenceProvider??null;
+      timeProviderBinding = storage.bindCoreRuntime(binding, policy, supervision,linuxProvider);
       if (linuxClockEvidenceProfile !== null) {
         linuxSource = openNativeClock({linuxWithoutSystemSleep: linuxClockEvidenceProfile.authentication});
         clockEvidence = inspectLinuxClockEvidence(linuxClockEvidenceProfile, storage.authenticationClock.scope, result, linuxSource);
@@ -89,7 +90,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     }
     if(standalone&&(!supervision||!tls||!authenticationProvider||!guiDirectory||!guiManifestSha256||pairing||localPairingManagement||
       storage.enrollment?.summary().mode!=='standalone'))throw new Error('standalone_profile_runtime');
-  } catch (error) { try { storage.close(); } finally { timeProviderLink?.close(); supervision?.close(); } throw error; }
+  } catch (error) { try { storage.close(); } finally { linuxProvider?.socket.destroy(); timeProviderLink?.close(); supervision?.close(); } throw error; }
   let clock = null, authentication = null, sessions = null;
   if (storage.clockJournal) {
     try {
@@ -107,7 +108,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     }
     catch (error) {
       clock?.stop(); authentication?.stop(); sessions = null;
-      if (pairing !== null || standalone) { try { storage.close(); } finally { supervision?.close(); } throw error; }
+      if (pairing !== null || standalone || linuxProvider) { try { storage.close(); } finally { linuxProvider?.socket.destroy();supervision?.close(); } throw error; }
       try { storage.clockJournal.fault('native_clock_unavailable'); }
       catch (error) { try { storage.close(); } finally { timeProviderLink?.close(); supervision?.close(); } throw error; }
       clock = {status: () => ({state: 'faulted', qualified: false}), stop() {}};
@@ -128,7 +129,8 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     catch(error) { referenceFailure=error; }
     const results = await Promise.allSettled([scheduleStopped,closeHttp(server),closeHttp(localPairingServer), endorsementRevocationDelivery?.close(),
       runProtectionDelivery?.close(), peerTransport?.close()]);
-    for (const stop of [() => clock?.stop(), () => authentication?.stop(), () => storage.close(), () => timeProviderLink?.close(), () => supervision?.close()]) {
+    for (const stop of [() => clock?.stop(), () => authentication?.stop(), () => storage.close(), () => timeProviderLink?.close(),
+      () => linuxProvider?.socket.destroy(), () => supervision?.close()]) {
       try { stop(); } catch (reason) { results.push({status: 'rejected', reason}); }
     }
     const failed = results.find(result => result.status === 'rejected'); if (failed) throw failed.reason;
@@ -137,9 +139,11 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   try {
     if (timeProviderBinding) {
       timeProviderLink = await openTimeProviderLink(timeProviderBinding, {
+        connection:linuxProvider?.socket??null,
         assertCurrent() {
           if (closing) throw new Error('controller_closing');
-          supervision.assertCurrent();
+          if(linuxProvider)linuxProvider.assertCurrent();
+          else supervision.assertCurrent();
         },
         readAuthentication() {
           try { return authentication?.referenceTimeSample() ?? null; }

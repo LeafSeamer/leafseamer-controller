@@ -14,11 +14,11 @@ names.push('storage-revision.mjs');
 names.push('command-dispatch-interruption.sql', 'command-dispatch-interruption.mjs');
 names.push('command-unsent-recovery.sql', 'command-unsent-recovery.mjs');
 names.push('obs-prior-execution.sql', 'obs-prior-execution.mjs');
-names.push('obs-restart-launch.sql', 'obs-cut-reconciliation.sql', 'linux-worker-launch.sql', 'obs-cut-reconciliation.mjs');
+names.push('obs-restart-launch.sql', 'obs-cut-reconciliation.sql', 'linux-worker-launch.sql', 'linux-reference-runtime.sql', 'obs-cut-reconciliation.mjs');
 names.push('historical-control-retirement.mjs');
 const files = await Promise.all(names.map(async name => [name, await fs.readFile(path.join(root, 'src', name))]));
 for(const name of ['device-event-source.sql','device-event-source.mjs','device-source-time.sql','device-event-qualification.mjs','simulator-event-review.json'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
-for (const name of ['time-provider-runtime.sql', 'time-provider-link.mjs', 'time-provider-polls.sql', 'time-provider-polls.mjs',
+for (const name of ['time-provider-runtime.sql', 'time-provider-link.mjs', 'linux-reference-provider.mjs', 'time-provider-polls.sql', 'time-provider-polls.mjs',
   'time-provider-capture.sql', 'time-provider-capture.mjs', 'time-provider-poll-release.sql', 'time-provider-source-recovery.sql',
   'time-provider-poll-control.sql', 'reference-time-anchor.sql', 'reference-time-anchor.mjs', 'reference-time-bundle.mjs', 'reference-time-scheduler.mjs',
   'command-reference-acceptance.sql', 'reference-time-invalidation.sql', 'reference-time-invalidation.mjs',

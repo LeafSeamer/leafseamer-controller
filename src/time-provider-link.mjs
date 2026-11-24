@@ -28,7 +28,8 @@ export function sealTimeProviderRuntime({identity,serviceBootId,core,provider}) 
     !same(receipt.domain_ref,core.receipt.domain_ref)||receipt.receipt_id===core.receipt.receipt_id||
     receipt.bootstrap_id===core.receipt.bootstrap_id||receipt.member_boot_id===core.receipt.member_boot_id||
     observed.observation_id!==receipt.os_observation_ref)throw new Error('time_provider_runtime_binding');
-  const body={format:'leafseamer-time-provider-runtime-binding/1',service_id:identity.service_id,
+  const format=descriptor.clock_backend_id==='linux_boottime'?'leafseamer-time-provider-runtime-binding/2':'leafseamer-time-provider-runtime-binding/1';
+  const body={format,service_id:identity.service_id,
     database_instance_id:identity.database_instance_id,service_boot_id:serviceBootId,core_receipt_id:core.receipt.receipt_id,
     launch_intent:intent,clock_domain_descriptor:descriptor,admission_receipt:receipt,process_observation:observed,gate_state:'closed'};
   const digest=value=>createHash('sha256').update(value).digest('hex');
@@ -38,16 +39,17 @@ export function sealTimeProviderRuntime({identity,serviceBootId,core,provider}) 
   return Object.freeze({text,digest:'sha256:'+digest(text),memberBoot:receipt.member_boot_id,runtimeId:runtime_binding_id});
 }
 
-export function openTimeProviderLink({text, digest, memberBoot}, {assertCurrent = () => {}, readAuthentication = () => null} = {}) {
+export function openTimeProviderLink({text, digest, memberBoot}, {assertCurrent = () => {}, readAuthentication = () => null, connection = null} = {}) {
   if (!/^[0-9a-f]{32}$/.test(memberBoot)) throw new Error('time_provider_link_identity');
   const binding = JSON.parse(text);
+  if ((connection!==null)!==(binding.format==='leafseamer-time-provider-runtime-binding/2')) throw new Error('time_provider_link_identity');
   const requestId = randomUUID();
   const request = Buffer.from(canonicalize({
     version, type: 'BIND', request_id: requestId, binding_digest: digest, binding
   }) + '\n');
   if (request.length > maximum + 1) throw new Error('time_provider_link_capacity');
   const expected = Buffer.from(canonicalize({version, type: 'BOUND', reply_to: requestId, binding_digest: digest}));
-  const socket = net.createConnection(pipePrefix + memberBoot + '.core');
+  const socket = connection??net.createConnection(pipePrefix + memberBoot + '.core');
   let state = 'authenticating', buffer = Buffer.alloc(0), lastTick = -1n, replying = false, onLost = null, quiescing = false;
   let pending = null, pollSequence = 0n;
   const ready = Promise.withResolvers();
@@ -203,7 +205,6 @@ export function openTimeProviderLink({text, digest, memberBoot}, {assertCurrent 
       }
     } catch (error) { call.reject(error); }
   }
-  socket.once('connect', () => socket.write(request));
   socket.on('data', chunk => {
     if(quiescing) return;
     if (chunk.length + buffer.length > (pending && !pending.expectedAck ? captureMaximum : authMaximum) + 1) {
@@ -235,5 +236,12 @@ export function openTimeProviderLink({text, digest, memberBoot}, {assertCurrent 
   socket.on('error', lost);
   socket.on('end', lost);
   socket.on('close', lost);
+  const send=()=>{
+    try{assertCurrent();socket.write(request,error=>{if(error)lost();});}
+    catch{lost();}
+  };
+  if(connection===null)socket.once('connect',send);
+  else if(socket.destroyed||socket.readableEnded)lost();
+  else{socket.resume();send();}
   return ready.promise;
 }
