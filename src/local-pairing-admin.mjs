@@ -6,11 +6,12 @@ import {contractSelection} from './sdk/index.mjs';
 import {pairingFields} from './peer-pairing-value.mjs';
 import {localExtensionOperations,localExtensionPath} from './local-extension-management.mjs';
 import {localEventOperations} from './local-event-management.mjs';
+import {localRunEndorsementOperations} from './local-pairing-management.mjs';
 
 export const localPairingPath = '/auth/local-pairing/v1';
 export const localPairingLimit = 32768;
 export const localPairingOperations = Object.freeze(['stage', 'export', 'inspect', 'prove', 'activate', 'read-audience', 'grant-audience',
-  ...localEventOperations]);
+  ...localEventOperations,...localRunEndorsementOperations]);
 export const loopbackHost = host => ['127.0.0.1', '::1', '[::1]'].includes(host);
 
 export class LocalPairingError extends Error {
@@ -74,7 +75,7 @@ async function runLocalAdmin({origin, caFile, input}, {route,operations,prefix})
     try { value = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(response.bytes)); }
     catch { throw new LocalPairingError(prefix+(response.status === 200 ? '_response' : '_rejected')); }
     if (response.status !== 200) {
-      const errors=route===localPairingPath?/^(?:peer_pairing|local_pairing|remote_authorization|event_scope|service_identity|service_consumer|service_token)_[a-z_]{1,60}$/:
+      const errors=route===localPairingPath?/^(?:peer_pairing|local_pairing|remote_authorization|event_scope|service_identity|service_consumer|service_token|run_endorsement)_[a-z_]{1,60}$/:
         /^(?:local_extension|extension|worker_launch|worker_authorization)_[a-z_]{1,65}$/;
       throw new LocalPairingError(typeof value?.error === 'string' && errors.test(value.error)?value.error:prefix+'_rejected');
     }

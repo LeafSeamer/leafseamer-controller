@@ -131,7 +131,8 @@ try{
     assert.equal((await management.request('approve',x.request)).status,403);
     const grant=a.sessions.localPermissions(a.auth);
     a.sessions.replaceLocalPermissions(a.auth,{request_id:crypto.randomUUID(),principal_id:a.logged.session.principal_id,
-      expected_revision:grant.revision,permissions:[...new Set([...grant.permissions,'extension.read','extension.manage',...commandPermissions])]});
+      expected_revision:grant.revision,permissions:[...new Set([...grant.permissions,'extension.read','extension.manage',...commandPermissions,
+        ...(input.paired?.runApproval?['grant.manage','grant.read']:[])])]});
     approved=await manage('approve',x.request);
   }
   const token=a.token();
@@ -175,7 +176,7 @@ try{
     if(input.paired){
       const {ready,proceed,finish}=input.paired;
       fs.writeFileSync(ready,canonicalize({device,scope,baseline:simulatorEvent.event,source_ref:current.current_frontiers[0].source_registration_ref}));
-      await waitForFile(proceed,runtime.assertLive,30000);
+      await waitForFile(proceed,runtime.assertLive,input.paired.runApproval?45000:30000);
       simulatorEvent.incremental={command:await writeManualSimulator({store,operator:a,supervision,key,device,manual,value:23,successor:true}),
         event:await waitForEvent(store,device,2,23)};
       await waitForFile(finish,runtime.assertLive,12000);

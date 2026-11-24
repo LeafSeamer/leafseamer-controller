@@ -37,6 +37,9 @@ export async function startSimulatorPairing(t,{store,sessions,real,profile,asser
     subscriptions:createSubscriptionEndpoint({store:sessions.serviceSubscriptions,serviceBootId:store.serviceBootId}),
     deviceBindings(...args){assertCurrent();return store.workerLaunches.deviceAutomation(...args);},
     deviceEvents(...args){assertCurrent();return store.workerLaunches.deviceEvents(...args);},
+    automationApproval(...args){assertCurrent();return sessions.currentAutomationServiceApproval(...args);},
+    runEndorsement(...args){assertCurrent();return sessions.runApprovalEndorsements.readForPeer(...args);},
+    runControlObservation(...args){assertCurrent();return sessions.runApprovalEndorsements.readControlsForPeer(...args);},
     async introspection(request){
       assertCurrent();
       const reply=await introspection(request);
@@ -44,6 +47,7 @@ export async function startSimulatorPairing(t,{store,sessions,real,profile,asser
     }});
   t.after(()=>transport.close());
   transport.bindPeers(peers);
+  sessions.runEndorsementPolicies.bindProposalReader(transport.readRunApprovalProposal);
   const {host,port,tls}=readProtectedIngressProfile(argument('--ingress-profile'));
   const ingress=createAuthenticationHttp({...authenticationScope,origin:tls.origin});
   const listener=https.createServer({cert:tls.cert,key:tls.key,minVersion:'TLSv1.2'},(req,res)=>{
@@ -52,5 +56,5 @@ export async function startSimulatorPairing(t,{store,sessions,real,profile,asser
   });
   listener.listen(port,host);await once(listener,'listening');
   t.after(()=>new Promise(resolve=>{listener.close(resolve);listener.closeAllConnections();}));
-  return createLocalPairingManagement({sessions,transport:()=>transport,assertCurrent});
+  return createLocalPairingManagement({sessions,serviceId:service_id,transport:()=>transport,assertCurrent});
 }

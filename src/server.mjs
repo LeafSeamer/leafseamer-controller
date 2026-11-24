@@ -216,7 +216,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     const gui = guiDirectory === null ? null : loadGuiAssets(guiDirectory, storage.identity, tls.origin, {
       manifestSha256: guiManifestSha256, seamerIdentity: localPairingManagement ? pairing.peers?.[0]?.identity ?? null : null, standalone
     });
-    const managePairing=createLocalPairingManagement({sessions,transport:()=>peerTransport,assertCurrent(){
+    const managePairing=createLocalPairingManagement({sessions,serviceId:storage.identity.service_id,transport:()=>peerTransport,assertCurrent(){
       if(closing)throw new Error('pairing_runtime_unavailable');
       assertRuntimeCurrent();
     }});
