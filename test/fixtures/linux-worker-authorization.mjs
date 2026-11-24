@@ -189,7 +189,7 @@ try{
       await waitForFile(proceed,runtime.assertLive,input.paired.runApproval?45000:30000);
       simulatorEvent.incremental={command:await writeManualSimulator({store,operator:a,supervision,key,device,manual,value:23,successor:true}),
         event:await waitForEvent(store,device,2,23)};
-      await waitForFile(finish,runtime.assertLive,12000);
+      await waitForFile(finish,runtime.assertLive,input.paired.armCompletion?18000:12000);
     }
     assert.deepEqual(await pairing('revoke-event-scope',{scope_ref:scope.scope_ref}),{scope_ref:scope.scope_ref,state:'revoked'});
     assert.throws(()=>store.workerLaunches.eventScopes.current(scope.scope_ref),{code:'event_scope_inactive'});

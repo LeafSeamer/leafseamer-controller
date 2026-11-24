@@ -40,6 +40,25 @@ export async function startSimulatorPairing(t,{store,sessions,real,profile,asser
     automationApproval(...args){assertCurrent();return sessions.currentAutomationServiceApproval(...args);},
     runEndorsement(...args){assertCurrent();return sessions.runApprovalEndorsements.readForPeer(...args);},
     runControlObservation(...args){assertCurrent();return sessions.runApprovalEndorsements.readControlsForPeer(...args);},
+    runPreparations:{
+      async prepare(...args){
+        assertCurrent();
+        try{
+          const prepared=await sessions.runPreparations.prepare(...args);
+          assertCurrent();
+          return prepared;
+        }catch(error){
+          process.stdout.write(JSON.stringify({event:'simulator_preparation_failed',code:error.code??error.name})+'\n');
+          throw error;
+        }
+      },
+      lookup(...args){assertCurrent();return sessions.runPreparations.lookup(...args);},
+      async prepareEligibility(...args){
+        assertCurrent();
+        const support=await sessions.runPreparations.prepareEligibility(...args);
+        return {body:support.body,beforeSend(){assertCurrent();return support.beforeSend();}};
+      }
+    },
     async introspection(request){
       assertCurrent();
       const reply=await introspection(request);
@@ -48,6 +67,9 @@ export async function startSimulatorPairing(t,{store,sessions,real,profile,asser
   t.after(()=>transport.close());
   transport.bindPeers(peers);
   sessions.runEndorsementPolicies.bindProposalReader(transport.readRunApprovalProposal);
+  sessions.runApprovalEndorsements.bindApprovalReader(transport.readRunApproval);
+  sessions.runApprovalEndorsements.bindInitiatorReader(transport.readRunInitiator);
+  sessions.runPreparations.bindPlanReader(transport.prepareRunArmPlan);
   const {host,port,tls}=readProtectedIngressProfile(argument('--ingress-profile'));
   const ingress=createAuthenticationHttp({...authenticationScope,origin:tls.origin});
   const listener=https.createServer({cert:tls.cert,key:tls.key,minVersion:'TLSv1.2'},(req,res)=>{
