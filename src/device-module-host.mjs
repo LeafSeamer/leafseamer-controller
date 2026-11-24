@@ -15,6 +15,7 @@ import {obsDefinitionForEntry,obsCutModuleDefinition} from './obs-module-profile
 import {createObsDeviceModule} from './obs-device-module.mjs';
 import {createObsCutDeviceModule} from './obs-cut-device-module.mjs';
 import {openWindowsSecretStore} from './secret-store.mjs';
+import {verifyLinuxWorkerContent} from './linux-worker-content.mjs';
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 
 // 仅由固定worker入口装配。root及完整库存来自监督器持续持有的加载材料。
@@ -77,6 +78,7 @@ export function hostDeviceModule({admitted,materials,executionIdentity,obsSecret
     need(same(frame.body.configuration.reference,admitted.intent.extension_binding.configuration_ref),'module_configuration');
     binding=frame.binding;
     need(materials.manifest.api_versions.includes('leafseamer-device-module/2')&&materials.manifest.ipc_versions.includes(protocol),'module_version');
+    if(process.platform==='linux'){verifyLinuxWorkerContent(materials,admitted,clock);current(frame);}
     // 文件政策和模块都是批准归档的固定字节；策略对象不自赋联网或设备写许可。
     file(entry.io_policy_file_id,'policy');const moduleFile=file(entry.file_id,'module'),configuration=frame.body.configuration.value;
     const deviceIds=admitted.intent.object_scope.device_ids;

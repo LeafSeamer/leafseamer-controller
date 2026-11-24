@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {createInterface} from 'node:readline';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath,pathToFileURL} from 'node:url';
 import canonicalize from '../dist/runtime/canonicalize.mjs';
 import {openNativeClock} from '../dist/native-clock.mjs';
 import {bootstrapVersion} from '../dist/sdk/bootstrap.mjs';
@@ -14,6 +14,7 @@ import {deviceModuleProtocol} from '../dist/sdk/device-module.mjs';
 import {connectDeviceModule} from '../dist/device-module-client.mjs';
 
 const helper = process.env.LEAFSEAMER_TEST_LINUX_WORKER_HELPER;
+const suite = process.env.LEAFSEAMER_TEST_LINUX_WORKER_SUITE;
 const options = {skip:process.platform!=='linux'||!helper,timeout:30000};
 const id = () => crypto.randomUUID();
 const bytesDigest = bytes => 'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
@@ -27,8 +28,9 @@ function stat(file) {
   const info=fs.statSync(file,{bigint:true});
   return {device:String(info.dev),inode:String(info.ino)};
 }
+const fileIdentity=file=>{const value=stat(file);return `${value.device}:${value.inode}`;};
 
-async function launch(t, {misplaced=false,missingChannel=false}={}) {
+async function launch(t, {misplaced=false,missingChannel=false,fromSealed=false,badRoot=false,badHandoff=false}={}) {
   assert.equal(process.geteuid(),0);
   const clock=openNativeClock({linuxWithoutSystemSleep:true});
   const generation=id(),launchId=id();
@@ -39,13 +41,14 @@ async function launch(t, {misplaced=false,missingChannel=false}={}) {
   fs.mkdirSync(root+actualPath,{recursive:true});
   const directory=fs.mkdtempSync('/tmp/leafseamer-linux-worker-');
   fs.chmodSync(directory,0o755);
-  let child,closed;
+  let child,closed,sealed,held;
   t.after(async()=>{
     child?.stdin.destroy();
     if(closed)await closed;
     assert.match(fs.readFileSync(root+actualPath+'/cgroup.events','utf8'),/^populated 0$/m);
     fs.rmdirSync(root+actualPath);
     fs.rmdirSync(root+parent);
+    await held?.discard();sealed?.close();
     fs.rmSync(directory,{recursive:true});
   });
 
@@ -57,13 +60,26 @@ async function launch(t, {misplaced=false,missingChannel=false}={}) {
     platform_profile_id:'platform_profile',platform_profile_revision:'1'};
   const descriptorDigest=digest(descriptorBody),domain={clock_domain_id:'clock_'+descriptorDigest.slice(7),descriptor_digest:descriptorDigest};
   const descriptor={...descriptorBody,...domain};
-  const manifest={extension_id:'test-simulator',entrypoints:[{kind:'worker',loader:'node_module',entry_id:'simulator',file_id:'simulator',io_policy_file_id:'policy'}],
-    api_versions:['leafseamer-device-module/2'],ipc_versions:[deviceModuleProtocol]};
   const moduleSource=fs.readFileSync(path.join(dist,'simulator-module.mjs'));
-  const inventory={files:[['simulator','module','simulator.mjs',moduleSource],['policy','policy','policy.json',Buffer.from('{}')]].map(([file_id,role,name,bytes])=>{
-    fs.writeFileSync(path.join(directory,name),bytes,{mode:0o444});
-    return {file_id,role,path:name,size_bytes:String(bytes.length),digest:bytesDigest(bytes)};
-  })};
+  const materializationDirectory=path.join(directory,'materialization');fs.mkdirSync(materializationDirectory,{mode:0o711});
+  let manifest,inventory,linuxRoot;
+  if(fromSealed){
+    const {sealLinuxWorker}=await import(pathToFileURL(path.join(suite,'test/fixtures/linux-worker-materialization.mjs')));
+    sealed=await sealLinuxWorker(t,{directory,serviceId:identity.service_id,moduleBytes:moduleSource,protocol:deviceModuleProtocol});
+    ({manifest,inventory}=sealed.artifact);
+  }else{
+    manifest={extension_id:'test-simulator',entrypoints:[{kind:'worker',loader:'node_module',entry_id:'simulator',file_id:'simulator',io_policy_file_id:'policy'}],
+      api_versions:['leafseamer-device-module/2'],ipc_versions:[deviceModuleProtocol]};
+    const copied=path.join(materializationDirectory,'worker-'+id());fs.mkdirSync(copied,{mode:0o700});
+    inventory={files:[['simulator','module','simulator.mjs',moduleSource],['policy','policy','policy.json',Buffer.from('{}')]].map(([file_id,role,name,bytes])=>{
+      const actual=path.join(copied,name);
+      fs.writeFileSync(actual,bytes,{mode:0o440});fs.chownSync(actual,0,65534);
+      return {file_id,role,path:name,size_bytes:String(bytes.length),digest:bytesDigest(bytes)};
+    })};
+    fs.chownSync(copied,0,65534);fs.chmodSync(copied,0o550);
+    linuxRoot={directory:materializationDirectory,path:copied,parent_identity:fileIdentity(materializationDirectory),
+      root_identity:fileIdentity(copied),reader_uid:65534,reader_gid:65534};
+  }
   const configurationRef=ref('configuration');
   const group=stat(root+actualPath);
   const intent={launch_id:launchId,service_id:identity.service_id,supervisor_instance_id:descriptor.supervisor_instance_id,
@@ -71,14 +87,41 @@ async function launch(t, {misplaced=false,missingChannel=false}={}) {
     containment_ref:{backend:'linux_cgroup_v2',generation,group_id:'group_'+digest({boot_id:bootId,group_path:actualPath,group}).slice(7)},
     object_scope:{kind:'devices',device_ids:['device.test']},policy_revision:'1',extension_binding:{installation_ref:ref('installation'),
       approval_ref:ref('approval'),review_ref:ref('review'),role_resolution_ref:ref('role_resolution'),configuration_ref:configurationRef,
-      intake_ref:ref('intake'),platform_profile_ref:ref('platform_profile'),host_installation_id:'test-host',host_trust_epoch:'1',
-      manifest_digest:digest(manifest),artifact_set_digest:digest(inventory),entry_id:'simulator',permissions_digest:digest('read-only')}};
+      intake_ref:sealed?.sealed.intake_ref??ref('intake'),platform_profile_ref:ref('platform_profile'),
+      host_installation_id:sealed?.store.identity.host_installation_id??'test-host',host_trust_epoch:'1',
+      manifest_digest:digest(manifest),artifact_set_digest:digest(inventory),entry_id:manifest.entrypoints[0].entry_id,permissions_digest:digest('read-only')}};
+  const intakeRef=intent.extension_binding.intake_ref;
+  const request={intake_id:intakeRef.object_id,target_authority_service_id:identity.service_id,
+    manifest_digest:digest(manifest),artifact_set_digest:digest(inventory),host_trust_epoch:'1',challenge_id:id(),launch_intent_digest:digest(intent)};
+  let materialization;
+  if(fromSealed){
+    const reader={directory:materializationDirectory,uid:65534,gid:65534};
+    assert.equal((await sealed.store.acquireLinuxWorkerMaterialization({...request,launch_intent_digest:digest('different launch'),
+      manifest_digest:digest('incorrect manifest')},reader)).status,'unavailable');
+    assert.equal(fs.readdirSync(materializationDirectory).length,0);
+    held=await sealed.store.acquireLinuxWorkerMaterialization(request,reader);
+    assert.equal(held.status,'available');assert.deepEqual(held.content.request,request);held.assertCurrent();
+    linuxRoot=held.content.root;
+    const {root,intake_ref,lifetime,observer_clock}=held.content;
+    materialization={root,intake_ref,lifetime,observer_clock,request:held.content.request};
+  }else{
+    const observer_clock={format:'leafseamer-materialization-clock/1',backend:'linux_proc_boottime',scope:'linux-'+clock.capture().raw.namespace_after,
+      authority_service_id:intakeRef.authority_service_id,database_instance_id:intakeRef.database_instance_id,
+      host_installation_id:intent.extension_binding.host_installation_id,clock_domain_id:id()};
+    const now=clock.tick();
+    materialization={root:linuxRoot,intake_ref:intakeRef,observer_clock,request,
+      lifetime:{clock:{clock_domain_id:observer_clock.clock_domain_id,descriptor_digest:digest(observer_clock)},
+        issued_tick:String(now),deadline_tick:String(now+4000000000n)}};
+  }
+  if(badRoot)fs.chmodSync(linuxRoot.path,0o570);
+  if(badHandoff)materialization.request={...materialization.request,launch_intent_digest:digest('different launch')};
   const timeout=5000;
   const context=canonicalize({format:'leafseamer-device-worker-start/3',descriptor,identity,intent,timeout_ms:timeout,
-    module:{root_path:directory,manifest,inventory},execution:{controller_boot_id:id().replaceAll('-','')}});
+    module:{root_path:linuxRoot.path,linux_materialization:materialization,manifest,inventory},execution:{controller_boot_id:id().replaceAll('-','')}});
   const configFile=path.join(directory,'worker.json');
   fs.writeFileSync(configFile,context,{mode:0o444});
   const node=fs.realpathSync(process.execPath),image=stat(node);
+  held?.assertCurrent();
   child=spawn(helper,[root+actualPath,group.device,group.inode,node,image.device,image.inode,'65534','65534','--device-worker','--',
     '--disallow-code-generation-from-strings',path.join(dist,'device-worker-entry.mjs'),'--context-file',configFile,'--context-digest',bytesDigest(context)],
   {stdio:['pipe','pipe','pipe','pipe','pipe',missingChannel?'ignore':'pipe']});
@@ -117,27 +160,50 @@ async function launch(t, {misplaced=false,missingChannel=false}={}) {
   assert.equal(JSON.parse(proof.value).payload.proof,expected);
   const receipt={...common,receipt_id:id(),domain_ref:domain,containment_ref:intent.containment_ref,os_observation_ref:id(),
     gate_state:'closed',admitted_tick_ns:String(clock.tick())};
-  send('ADMISSION',receipt);
+  held?.assertCurrent();send('ADMISSION',receipt);
   const binding={format:'leafseamer-worker-runtime-binding/1',runtime_binding_id:id(),...identity,service_boot_id:id(),
     launch_intent:intent,clock_domain_descriptor:descriptor,admission_receipt:receipt,gate_state:'closed'};
-  return {child,closed,receipt,binding,configurationRef};
+  return {child,closed,receipt,binding,configurationRef,held,sealed};
 }
 
-test('Linux 固定 Worker 经真实 cgroup 准入，并在继承通道内读取模拟器状态',options,async t=>{
-  const {child,closed,receipt,binding,configurationRef}=await launch(t);
-  const recorded=[];
-  const module=await connectDeviceModule({socket:child.stdio[4],configuration:{reference:configurationRef,value:{}},
+function connect({child,binding,configurationRef},recorded){
+  return connectDeviceModule({socket:child.stdio[4],configuration:{reference:configurationRef,value:{}},
     current:()=>({current_boot:true,withdrawal:null,binding,ref:ref('runtime_binding',binding.runtime_binding_id,digest(binding))}),
     invalidate:()=>{},journal:{open(){},record(direction,frame){recorded.push([direction,frame.type]);}}});
+}
+
+async function readSimulator(run){
+  run.held?.assertCurrent();
+  const recorded=[],module=await connect(run,recorded);
   const opened=await module.connectReadOnly('device.test');
-  assert.equal(opened.binding.member_boot_id,receipt.member_boot_id);
+  assert.equal(opened.binding.member_boot_id,run.receipt.member_boot_id);
   assert.equal(opened.body.identity.model,'leafseamer.simulator');
   assert.deepEqual((await module.captureBaseline('device.test')).body.value,{sample_sequence:'1',value:0});
   assert.deepEqual((await module.captureBaseline('device.test')).body.value,{sample_sequence:'2',value:0});
   assert.deepEqual(recorded.slice(0,2),[['c2w','LOAD'],['w2c','LOADED']]);
-  child.stdio[3].end();
-  assert.equal((await closed)[0],1);
-  assert(child.stdio[4].destroyed);
+  run.child.stdio[3].end();
+  assert.equal((await run.closed)[0],1);
+  assert(run.child.stdio[4].destroyed);
+}
+
+test('Linux 固定 Worker 经真实 cgroup 准入，并在继承通道内读取模拟器状态',options,async t=>{
+  await readSimulator(await launch(t));
+});
+
+test('Linux 非 root Worker 通过实际安装库封存和交接读取模拟器', {...options,skip:options.skip||!suite},async t=>{
+  const run=await launch(t,{fromSealed:true}),root=run.held.content.root.path;
+  await readSimulator(run);
+  await run.held.discard();assert.equal(fs.existsSync(root),false);
+  const {intake_id,target_authority_service_id}=run.held.content.request;
+  assert.equal((await run.sealed.store.queryIntake({intake_id,target_authority_service_id})).status,'available');
+});
+
+test('Linux Worker 拒绝可修改的加载根及错绑交接，保持模块未采用',options,async t=>{
+  for(const invalid of [{badRoot:true},{badHandoff:true}]){
+    const run=await launch(t,invalid),frames=[];
+    await assert.rejects(connect(run,frames),{code:'module_channel_closed'});
+    assert.equal((await run.closed)[0],1);assert.deepEqual(frames,[['c2w','LOAD']]);
+  }
 });
 
 test('Linux Worker 拒绝核心 cgroup 和缺失的专属通道',options,async t=>{

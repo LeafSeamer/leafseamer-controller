@@ -57,6 +57,7 @@ for(const name of ['run-preparation-store.mjs','run-preparation.sql','run-genera
  'run-approval-protection-completion.mjs','run-approval-protection-completion.sql'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 files.push(['process-host.mjs', await fs.readFile(path.join(root, 'src/process-host.mjs'))]);
 files.push(['worker-bootstrap.mjs', await fs.readFile(path.join(root, 'src/worker-bootstrap.mjs'))]);
+files.push(['linux-worker-content.mjs', await fs.readFile(path.join(root, 'src/linux-worker-content.mjs'))]);
 for (const name of ['worker-launch-store.mjs','worker-launch.sql','worker-runtime-store.mjs','worker-runtime.sql','worker-dependencies.mjs','worker-dependencies.sql','extension-plan-store.mjs','extension-plan.sql','extension-activation-store.mjs','extension-activation.sql','worker-authorization-store.mjs','worker-authorization.sql']) files.push([name,await fs.readFile(path.join(root,'src',name))]);
 for (const name of ['extension-installation-store.mjs','extension-installation.sql']) files.push([name,await fs.readFile(path.join(root,'src',name))]);
 for (const name of ['configuration-validator.mjs','configuration-worker.mjs','configuration-schema.mjs']) files.push([name,await fs.readFile(path.join(root,'src',name))]);
