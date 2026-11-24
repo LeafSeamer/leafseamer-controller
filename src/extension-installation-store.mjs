@@ -53,7 +53,8 @@ export function extensionInstallationStore(db,service,isOpen,attachManagement,at
     launch=extensionLaunchBinding({db,service,available,source:()=>source,currentApproval:state.current,currentResolution,reference});}
   const plans=Number(service.schema_revision)>=21?extensionPlanStore({db,service,bootId,available,reference,launch}):null;
   const lifecycle=Number(service.schema_revision)>=22?extensionActivationStore({db,service,bootId,available,reference,launch,plans}):null;
-  if(launch)attachWorkerSource?.(lifecycle?Object.freeze({...launch,current(intent){const chosen=launch.current(intent);lifecycle.forLaunch(intent);return chosen;},activation:lifecycle.forLaunch}):launch);
+  if(launch)attachWorkerSource?.(lifecycle?Object.freeze({...launch,current(intent){const chosen=launch.current(intent);lifecycle.forLaunch(intent);return chosen;},
+    activation:lifecycle.forLaunch,acceptedActivation:lifecycle.accepted}):launch);
   if(Number(service.schema_revision)>=17)attachManagement?.(authorize=>Object.freeze({...extensionApprovalStore({db,service,available,reference,source:()=>source,currentReview,currentResolution,authorize}),plans:plans?.management(authorize)??null,lifecycle:lifecycle?.management(authorize)??null}));
   return Object.freeze({
     configurations,roles,reviews,bindRuntimeSource:plans?.bindRuntimeSource,

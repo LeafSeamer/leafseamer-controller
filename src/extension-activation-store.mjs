@@ -46,7 +46,16 @@ export function extensionActivationStore({db,service,bootId,available,reference,
   need(schema>=106,'launch_used');
   return {id:row[0],replacement:selectObsLaunchReplacement(db,row[0],intent,bootId,schema>=107)};
  }
- return Object.freeze({forLaunch,management(authorize){return Object.freeze({
+ function accepted(reference){
+  need(db.inTransaction,'writer_required');
+  need(exact(reference,'kind,authority_service_id,database_instance_id,object_id,revision,digest')&&id(reference.object_id),'operation_reference');
+  const row=db.prepare('SELECT body_jcs,body_digest,service_boot_id FROM extension_activation WHERE operation_id=?').raw().get(reference.object_id);
+  need(row&&row[2]===bootId,'required');
+  const body=read(row[0],row[1]);
+  need(body.phase==='accepted'&&same(body.operation_ref,reference),'operation_reference');
+  return body;
+ }
+ return Object.freeze({forLaunch,accepted,management(authorize){return Object.freeze({
   async accept(token,kind,input){
    available();need(['activate','enable'].includes(kind)&&exact(input,'request_id,slot_id,expected_slot_revision,target_installation_ref,approval_ref,dependency_plan_ref')&&
     id(input.request_id)&&id(input.slot_id)&&typeof input.expected_slot_revision==='string'&&/^[1-9][0-9]{0,3}(?![\s\S])/.test(input.expected_slot_revision),'input');

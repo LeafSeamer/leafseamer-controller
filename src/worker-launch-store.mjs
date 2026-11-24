@@ -23,6 +23,7 @@ import {currentInitialReady} from './device-initial-ready.mjs';
 import {currentControlSource} from './device-control-source.mjs';
 import canonicalize from 'canonicalize';
 import {decodeWorkerIntent} from './sdk/worker-runtime.mjs';
+import {deviceModuleEventProtocol} from './sdk/device-module.mjs';
 import {deviceExecutionCapabilities} from './sdk/device-execution.mjs';
 import {readRunProtectionExits} from './run-protection-exits.mjs';
 
@@ -31,6 +32,7 @@ const need=(ok,code)=>{if(!ok)throw new WorkerLaunchError(code);};
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 const same=(a,b)=>canonicalize(a)===canonicalize(b);
 const id=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\s\S])/.test(value);
+const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/;
 const deepFreeze=value=>{if(value&&typeof value==='object'){for(const child of Object.values(value))deepFreeze(child);Object.freeze(value);}return value;};
 const rows=sqliteRows;
 const readLaunchIntent=cacheVerifiedDocument((text,digest)=>{
@@ -148,7 +150,63 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     const targets=db.transaction(()=>device_ids.map(deviceId=>readRunProtectionExits(db,deviceId,fixed))).immediate();
     return {state:targets.every(target=>target.state==='acknowledged')?'acknowledged':'pending',targets};
   }
-  return Object.freeze({runtime,authorization,controlBarrier,eventScopes,
+  const starting=new Set();
+  const api=Object.freeze({runtime,authorization,controlBarrier,eventScopes,
+    async startLinux(input){
+      available();need(process.platform==='linux'&&Number(service.schema_revision)>=109&&extensionSource?.acceptedActivation,'worker_launch_linux_unavailable');
+      need(input&&Object.keys(input).sort().join(',')==='activation_ref,containment_ref,launch_id'&&
+        typeof input.launch_id==='string'&&uuid.test(input.launch_id),'worker_launch_linux_input');
+      const {activation_ref,containment_ref,launch_id}=structuredClone(input);
+      need(containment_ref&&Object.keys(containment_ref).sort().join(',')==='backend,generation,group_id'&&
+        containment_ref.backend==='linux_cgroup_v2'&&typeof containment_ref.group_id==='string'&&
+        /^group_[0-9a-f]{64}$(?![\s\S])/.test(containment_ref.group_id),'worker_launch_linux_input');
+      need(starting.size<4&&!starting.has(launch_id),'worker_launch_linux_busy');
+      starting.add(launch_id);
+      let selected,ownsStart=false;
+      try{
+        const {intent,events,execution}=db.transaction(()=>{
+          const activation=extensionSource.acceptedActivation(activation_ref),parent=core();
+          const {content,approval,resolution}=extensionSource.select(activation.approval_ref);
+          const entries=content.manifest.entrypoints.filter(entry=>entry.kind==='worker'&&entry.loader==='node_module');
+          need(entries.length===1,'worker_launch_linux_entry');
+          const receipt=content.receipt;
+          const devices=[...new Set(resolution.bindings.flatMap(binding=>binding.values.map(ref=>ref.object_id)))].sort();
+          const extension_binding=Object.fromEntries(['installation_ref','approval_ref','review_ref','role_resolution_ref','configuration_ref','permissions_digest']
+            .map(name=>[name,approval[name]]));
+          Object.assign(extension_binding,Object.fromEntries(['platform_profile_ref','host_installation_id','host_trust_epoch','manifest_digest','artifact_set_digest']
+            .map(name=>[name,receipt[name]])),{intake_ref:content.intake_ref,entry_id:entries[0].entry_id});
+          return {intent:{launch_id,member_id:'worker_'+launch_id,role:'worker',service_id:service.service_id,
+            supervisor_instance_id:parent.descriptor.supervisor_instance_id,runtime_generation:parent.descriptor.runtime_generation,
+            artifact_manifest_ref:parent.intent.artifact_manifest_ref,containment_ref,object_scope:{kind:'devices',device_ids:devices},
+            policy_revision:parent.policy.policy_revision,extension_binding},
+            events:content.manifest.ipc_versions.includes(deviceModuleEventProtocol),
+            execution:content.manifest.api_versions.includes('leafseamer-device-primitives/1')};
+        }).immediate();
+        const prepared=await api.prepare(Buffer.from(canonicalize(intent)));
+        selected={launch_id,launch_intent_digest:prepared.ref.digest};
+        const result=()=>{
+          const active=runtime.current(selected),module=modules.get(launch_id),client=executionClients.get(launch_id);
+          need(module&&(!execution||client?.state.phase==='ready'),'worker_launch_linux_channels');
+          return deepFreeze({binding:active,module:module.binding,execution:client?.binding??null});
+        };
+        if(runtime.query(selected))return result();
+        ownsStart=true;
+        await authorization.register(selected);
+        const proof=await authorization.prepareLinuxContent(selected);
+        await authorization.create(selected,proof);
+        await runtime.adopt(selected);
+        const module=await api.openModule(selected,{events});
+        for(const device of intent.object_scope.device_ids){await module.connectReadOnly(device);await module.captureBaseline(device);}
+        if(execution){await api.openExecution(selected);for(const device of intent.object_scope.device_ids)await module.configureExecution(device);}
+        if(events)for(const device of intent.object_scope.device_ids)await module.startEvents(device);
+        return result();
+      }catch(error){
+        if(ownsStart){
+          try{await authorization.deny(selected);}finally{runtime.invalidate(selected);}
+        }
+        throw error;
+      }finally{starting.delete(launch_id);}
+    },
     ...(Number(service.schema_revision)>=79&&{applyRunProtection}),
     queueCommandEncoding(id){
       if(commandTasks.has(id))return;
@@ -338,4 +396,5 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
       core();return Object.freeze(rows(db,'SELECT '+fields+' FROM worker_launch_preparation WHERE service_boot_id=? ORDER BY launch_id COLLATE BINARY',bootId).map(view));
     }).immediate();}
   });
+  return api;
 }

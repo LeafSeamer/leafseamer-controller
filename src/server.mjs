@@ -20,7 +20,7 @@ import {referenceTimeScheduler} from './reference-time-scheduler.mjs';
 import canonicalize from './runtime/canonicalize.mjs';
 import {createHash} from 'node:crypto';
 
-export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null, guiManifestSha256 = null, coreBootstrap = null, pairing = null, referenceTimeAuthorization = null, localPairingManagement = false, standalone = false, protectedIngressIdentity = null, linuxClockEvidenceProfile = null, composePairingAdmin = null} = {}) {
+export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null, guiManifestSha256 = null, coreBootstrap = null, pairing = null, referenceTimeAuthorization = null, localPairingManagement = false, standalone = false, protectedIngressIdentity = null, linuxClockEvidenceProfile = null, composePairingAdmin = null, extensionInstallationSource = null} = {}) {
   const protectedIngress = protectedIngressIdentity !== null;
   const composePairing = composePairingAdmin !== null;
   if (composePairing && (!protectedIngress || !pairing || !localPairingManagement || !coreBootstrap ||
@@ -69,8 +69,14 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       if(supervision)storage.workerLaunches?.runtime?.bindSource(supervision);
       if(supervision)storage.extensionInstallations?.bindRuntimeSource?.(supervision);
       if(supervision)storage.workerLaunches?.authorization?.bindSource(supervision);
+      if(extensionInstallationSource!==null){
+        if(process.platform!=='linux'||Number(storage.identity.schema_revision)<109||typeof supervision?.openWorkerChannel!=='function')
+          throw new Error('worker_launch_linux_unavailable');
+        storage.extensionInstallations.bindSource(extensionInstallationSource);
+      }
       assertRuntimeCurrent();
     }
+    if(extensionInstallationSource!==null&&!supervision)throw new Error('worker_launch_linux_unavailable');
     if (localPairingManagement && ((!supervision && !linuxPairing) || !tls || !pairing || Number(storage.identity.schema_revision) < 93)) {
       throw new Error('pairing_profile_management_unavailable');
     }
@@ -372,6 +378,11 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   let stopping;
   const application = Object.freeze({address: server.address(), identity: storage.identity, serviceBootId: storage.serviceBootId,
     authenticationStatus: () => authentication?.status() ?? null,
+    ...(extensionInstallationSource!==null&&{startLinuxWorker(input){
+      if(closing)throw new Error('controller_closing');
+      assertRuntimeCurrent();
+      return storage.workerLaunches.startLinux(input);
+    }}),
     ...(referenceTimePolls && {referenceTimePolls}),
     pairing: peerTransport ? Object.freeze({api: sessions.peerPairings, transport: peerTransport, remotePermissions: sessions.remotePermissions, sessionDenials: sessions.sessionDenials,
       automationApprovals:Object.freeze({

@@ -81,16 +81,25 @@ test('显式建库、持久身份、重启新boot及排他所有者', t => {
 
 test('未知库版本和迁移内容不自动修复或回退', t => {
   const dir = temporary(t); initializeStorage(dir);
-  inspect(dir, db => db.pragma('user_version = 99'));
+  const unsupported = 2147483647;
+  inspect(dir, db => db.pragma(`user_version = ${unsupported}`));
   assert.throws(() => openStorage(dir), e => e.code === 'database_version_mismatch');
   inspect(dir, db => {
-    assert.equal(db.pragma('user_version', {simple: true}), 99);
+    assert.equal(db.pragma('user_version', {simple: true}), unsupported);
     db.pragma('user_version = 1');
     db.exec('DROP TRIGGER schema_migration_no_update');
     db.prepare("UPDATE schema_migration SET script_digest = 'wrong'").run();
   });
   assert.throws(() => openStorage(dir), e => e.code === 'migration_mismatch');
   assert.equal(inspect(dir, db => db.prepare('SELECT count(*) FROM service_boot').pluck().get()), 0);
+});
+
+test('未受监督的 Controller 拒绝配置 Worker 安装来源并释放数据库', async t => {
+  const dir = temporary(t); initializeStorage(dir);
+  await assert.rejects(startController({dataDir:dir,extensionInstallationSource:{}}), {message:'worker_launch_linux_unavailable'});
+  const app = await startController({dataDir:dir});
+  try { assert.equal(app.startLinuxWorker, undefined); }
+  finally { await app.close(); }
 });
 
 test('实际Controller与SDK连通，存活和业务就绪分开', {timeout: 10000}, async t => {

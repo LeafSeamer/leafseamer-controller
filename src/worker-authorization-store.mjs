@@ -116,6 +116,11 @@ export function workerAuthorizationStore({db,service,bootId,isOpen,core,prepared
   },
   authorize(key){const copy=fixed(key);return enqueue(()=>issue(copy));},
   register(key){const copy=fixed(key);return enqueue(async()=>{const authorization=await issue(copy),value=db.transaction(()=>current(copy)).immediate();return source.registerWorker(value.value.intent,authorization);});},
+  prepareLinuxContent(key){const copy=fixed(key);return enqueue(async()=>{
+   const selected=db.transaction(()=>current(copy)).immediate();
+   need(selected.value.intent.containment_ref.backend==='linux_cgroup_v2'&&typeof source.prepareLinuxWorkerContent==='function','source');
+   const proof=await source.prepareLinuxWorkerContent(copy);db.transaction(()=>current(copy)).immediate();return proof;
+  });},
   create(key,proof){const copy=fixed(key),fixedProof=structuredClone(proof);need(fixedProof&&Object.keys(fixedProof).sort().join(',')==='load_id,materialization_challenge_id,materialization_evidence_id','create_input');
    return enqueue(async()=>{const authorization=await issue(copy);db.transaction(()=>current(copy)).immediate();return source.createWorker({...fixedProof,key:copy,authorization});});},
   deny(key){const copy=fixed(key);denied.add(copy.launch_id);return enqueue(async()=>{db.transaction(()=>deny(copy.launch_id,'requested')).immediate();return sync();});},

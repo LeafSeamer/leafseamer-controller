@@ -47,49 +47,61 @@ try{
   const plan=await a.sessions.planExtension(token,{request_id:'plan',slot_id:x.installed.slot.record.slot_id,
     expected_slot_revision:x.installed.slot.slot_ref.revision,selection:{kind:'activate',source_installation_ref:null,
       target_installation_ref:x.installed.installation_ref,reuse_content_ref:null,configuration_ref:x.config.configuration_ref}});
-  a.sessions.activateExtension(token,{request_id:'activate',slot_id:plan.slot_ref.object_id,expected_slot_revision:plan.slot_ref.revision,
+  const activation=await a.sessions.activateExtension(token,{request_id:'activate',slot_id:plan.slot_ref.object_id,expected_slot_revision:plan.slot_ref.revision,
     target_installation_ref:x.installed.installation_ref,approval_ref:approved.approval_ref,dependency_plan_ref:plan.plan_ref});
-  const intent={...workerIntent(store,binding,x.host.content,approved,[x.registered.device_id]),launch_id:input.launchId,containment_ref:input.containment};
-  const prepared=await store.workerLaunches.prepare(Buffer.from(JSON.stringify(intent)));
-  const key={launch_id:intent.launch_id,launch_intent_digest:prepared.ref.digest};
-  const first=await start.authorize(key);
-  const {authorization_ref,...original}=first;
-  const past={...original,lifetime:{...original.lifetime,issued_tick:'0',deadline_tick:'1'}};
-  await assert.rejects(supervision.registerWorker(intent,{...past,authorization_ref:{...authorization_ref,digest:hash(past)}}),{code:'supervisor_expired'});
-  assert.equal(await supervision.queryLaunch(key),null);
-  assert.equal((await start.register(key)).state,'registered');
-  assert.equal((await start.register(key)).state,'registered');
-  assert.equal(store.workerLaunches.runtime.query(key),null);
-  let adopted=null,module=null,execution=null;
-  if(input.materialization){
-    const proof=await supervision.prepareLinuxWorkerContent(key);
-    await assert.rejects(start.create(key,{...proof,load_id:'unrelated-load'}),{code:'supervisor_unauthorized'});
-    const created=await start.create(key,proof);
-    assert.equal(created.state,'admitted_closed');assert.equal(created.creation_attempted,true);
-    adopted=await store.workerLaunches.runtime.adopt(key);
-    assert.deepEqual(adopted.binding.admission_receipt,created.admission_receipt);
+  let key,adopted=null,module=null,execution=null;
+  if(compose){
+    const request={activation_ref:activation.operation_ref,launch_id:input.launchId,containment_ref:input.containment};
+    await assert.rejects(store.workerLaunches.startLinux({...request,activation_ref:{...activation.operation_ref,digest:hash('unrelated-operation')}}),
+      {code:'extension_activation_operation_reference'});
+    const started=await store.workerLaunches.startLinux(request);
+    adopted=started.binding;
+    key={launch_id:request.launch_id,launch_intent_digest:adopted.binding.admission_receipt.launch_intent_digest};
     assert.equal(adopted.binding.gate_state,'closed');
-    if(input.channelDirectory){
-      // 同 UID/GID 和同 cgroup 的另一个进程也不能认领通道。
-      const endpoint=path.join(input.channelDirectory,created.admission_receipt.member_boot_id+'.module');
-      execFileSync(process.execPath,['--input-type=module','-e',
-        "import {createConnection} from 'node:net'; const socket=createConnection(process.argv[1]); socket.on('error',()=>{process.exitCode=1;}); socket.on('data',()=>{process.exitCode=1;});",endpoint],{timeout:1000});
-      const device=x.registered.device_id;
-      module=await store.workerLaunches.openModule(key,{events:true});
-      assert.equal((await module.connectReadOnly(device)).body.identity.model,'leafseamer.simulator.control');
-      assert.deepEqual((await module.captureBaseline(device)).body.value,{value:0,sample_sequence:'1',write_sequence:'0'});
-      assert.equal(module.currentBaseline(device).approval.evidence_policy.write_eligible,false);
-      execution=await store.workerLaunches.openExecution(key);
-      assert.equal(execution.binding.worker_boot_id,created.admission_receipt.member_boot_id);
-      assert.equal(execution.binding.controller_boot_id,binding.receipt.member_boot_id);
-      assert.equal(execution.state.gate_state,'closed');
-      assert.equal((await module.configureExecution(device)).value.state,'bound_closed');
-      await module.startEvents(device);
-      assert.deepEqual((await module.readEvents(device)).body.result.batch.events,[]);
-      await assert.rejects(store.workerLaunches.openModule(key,{events:true}),{code:'worker_module_capacity'});
-      await assert.rejects(store.workerLaunches.openExecution(key),{code:'execution_client_capacity'});
+    assert.equal(started.execution.worker_boot_id,adopted.binding.admission_receipt.member_boot_id);
+    assert.deepEqual(await store.workerLaunches.startLinux(request),started);
+  }else{
+    const intent={...workerIntent(store,binding,x.host.content,approved,[x.registered.device_id]),launch_id:input.launchId,containment_ref:input.containment};
+    const prepared=await store.workerLaunches.prepare(Buffer.from(JSON.stringify(intent)));
+    key={launch_id:intent.launch_id,launch_intent_digest:prepared.ref.digest};
+    const first=await start.authorize(key);
+    const {authorization_ref,...original}=first;
+    const past={...original,lifetime:{...original.lifetime,issued_tick:'0',deadline_tick:'1'}};
+    await assert.rejects(supervision.registerWorker(intent,{...past,authorization_ref:{...authorization_ref,digest:hash(past)}}),{code:'supervisor_expired'});
+    assert.equal(await supervision.queryLaunch(key),null);
+    assert.equal((await start.register(key)).state,'registered');
+    assert.equal((await start.register(key)).state,'registered');
+    assert.equal(store.workerLaunches.runtime.query(key),null);
+    if(input.materialization){
+      const proof=await supervision.prepareLinuxWorkerContent(key);
+      await assert.rejects(start.create(key,{...proof,load_id:'unrelated-load'}),{code:'supervisor_unauthorized'});
+      const created=await start.create(key,proof);
+      assert.equal(created.state,'admitted_closed');assert.equal(created.creation_attempted,true);
+      adopted=await store.workerLaunches.runtime.adopt(key);
+      assert.deepEqual(adopted.binding.admission_receipt,created.admission_receipt);
+      assert.equal(adopted.binding.gate_state,'closed');
+      if(input.channelDirectory){
+        // 同 UID/GID 和同 cgroup 的另一个进程也不能认领通道。
+        const endpoint=path.join(input.channelDirectory,created.admission_receipt.member_boot_id+'.module');
+        execFileSync(process.execPath,['--input-type=module','-e',
+          "import {createConnection} from 'node:net'; const socket=createConnection(process.argv[1]); socket.on('error',()=>{process.exitCode=1;}); socket.on('data',()=>{process.exitCode=1;});",endpoint],{timeout:1000});
+        const device=x.registered.device_id;
+        module=await store.workerLaunches.openModule(key,{events:true});
+        assert.equal((await module.connectReadOnly(device)).body.identity.model,'leafseamer.simulator.control');
+        assert.deepEqual((await module.captureBaseline(device)).body.value,{value:0,sample_sequence:'1',write_sequence:'0'});
+        assert.equal(module.currentBaseline(device).approval.evidence_policy.write_eligible,false);
+        execution=await store.workerLaunches.openExecution(key);
+        assert.equal(execution.binding.worker_boot_id,created.admission_receipt.member_boot_id);
+        assert.equal(execution.binding.controller_boot_id,binding.receipt.member_boot_id);
+        assert.equal(execution.state.gate_state,'closed');
+        assert.equal((await module.configureExecution(device)).value.state,'bound_closed');
+        await module.startEvents(device);
+        assert.deepEqual((await module.readEvents(device)).body.result.batch.events,[]);
+        await assert.rejects(store.workerLaunches.openModule(key,{events:true}),{code:'worker_module_capacity'});
+        await assert.rejects(store.workerLaunches.openExecution(key),{code:'execution_client_capacity'});
+      }
+      await assert.rejects(start.create(key,proof),{code:'worker_authorization_creation_attempted'});
     }
-    await assert.rejects(start.create(key,proof),{code:'worker_authorization_creation_attempted'});
   }
   a.sessions.revokeExtensionApproval(token,{request_id:'revoke',approval_ref:approved.approval_ref,reason:'测试撤销'});
   const fence=await start.synchronize();
