@@ -40,10 +40,16 @@ export function coreRefreshDelayMs(issued, current) {
 }
 
 // 端点由原生父进程创建并通过固定启动参数交付。一次连接失败后不重连或恢复旧资格。
-export async function connectCoreSupervisor({pipe, channelId, binding, policy, timeProviderIntent = null}) {
-  check(process.platform === 'win32' && /^[0-9a-f]{32}$(?![\s\S])/.test(channelId) &&
-    pipe === '\\\\.\\pipe\\LeafSeamer.Control.' + channelId, 'supervisor_endpoint');
-  const {descriptor, receipt} = structuredClone(binding), source = openNativeClock();
+export async function connectCoreSupervisor({pipe, channelId, binding, policy, timeProviderIntent = null, inherited=null}) {
+  const {descriptor, receipt} = structuredClone(binding);
+  check(/^[0-9a-f]{32}$(?![\s\S])/.test(channelId), 'supervisor_endpoint');
+  if(inherited){
+    check(process.platform==='linux'&&pipe===undefined&&timeProviderIntent===null&&descriptor.clock_backend_id==='linux_boottime'&&
+      receipt.channel_binding_id.replaceAll('-','')===channelId&&typeof inherited.assertLive==='function'&&typeof inherited.source?.tick==='function'&&
+      inherited.socket instanceof net.Socket&&!inherited.socket.destroyed,'supervisor_endpoint');
+    inherited.assertLive();
+  }else check(process.platform==='win32'&&pipe==='\\\\.\\pipe\\LeafSeamer.Control.'+channelId,'supervisor_endpoint');
+  const source=inherited?.source??openNativeClock();
   const scope = Object.freeze({service_id: policy.service_id, database_instance_id: policy.database_instance_id,
     supervisor_instance_id: descriptor.supervisor_instance_id, domain_ref: Object.freeze({...receipt.domain_ref})});
   const key = Object.freeze({launch_id: receipt.launch_id, launch_intent_digest: receipt.launch_intent_digest});
@@ -61,7 +67,7 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy, t
     provider = Object.freeze({intent, requested: Object.freeze({launch_id: intent.launch_id,
       launch_intent_digest: 'sha256:' + crypto.createHash('sha256').update(timeProviderIntent).digest('hex')})});
   }
-  const socket = net.createConnection(pipe);
+  const socket = inherited?.socket??net.createConnection(pipe);
   let pending = null, input = Buffer.alloc(0), failed = null, stopped = false, timer = null, lastDeadline = null;
   let outgoing = 1n, incoming = 1n, listener = null, latest = null;
   const lostListeners=new Set(),workerObservations=new WeakMap(),workerVersions=new Map(),coreObservations=new WeakMap();let workerEpoch=0,latestCoreObservation=null;
@@ -108,6 +114,7 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy, t
     check(!stopped && lastDeadline !== null, 'supervisor_unavailable');
   };
   const now = () => {
+    inherited?.assertLive();
     const tick = source.tick();
     check(previousTick === null || tick >= previousTick, 'supervisor_clock_unavailable'); previousTick = tick; return tick;
   };
@@ -490,7 +497,8 @@ export async function connectCoreSupervisor({pipe, channelId, binding, policy, t
     });
   }
   try {
-    await new Promise((resolve, reject) => {
+    if(inherited)socket.resume();
+    else await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => { fail('supervisor_connect_timeout'); reject(failed); }, 2000);
       const done = error => { clearTimeout(timeout); socket.removeListener('connect', connected); socket.removeListener('error', broken); error ? reject(error) : resolve(); };
       const connected = () => done(), broken = () => done(failed ?? new SupervisorError('supervisor_channel_closed'));

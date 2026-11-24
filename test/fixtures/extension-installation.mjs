@@ -8,10 +8,14 @@ import Database from 'better-sqlite3';
 import {initializeStorage,migrateStorage,openStorage} from '../../dist/storage.mjs';
 export const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 export const inspect=(dir,fn)=>{const db=new Database(path.join(dir,'controller.sqlite'));try{return fn(db);}finally{db.close();}};
-export async function setup(t,revision=13){
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'leafseamer-installation-authority-'));initializeStorage(dir);await migrateStorage(dir,revision);let store=openStorage(dir);
+export async function setup(t,revision=13,directory=null){
+  const dir=directory??fs.mkdtempSync(path.join(os.tmpdir(),'leafseamer-installation-authority-'));
+  if(directory===null){initializeStorage(dir);await migrateStorage(dir,revision);}
+  let store=openStorage(dir);
+  assert.equal(store.identity.schema_revision,String(revision));
   t.after(()=>{
     store?.close();
+    if(directory!==null)return;
     assert.equal(path.dirname(path.resolve(dir)),path.resolve(os.tmpdir()));
     fs.rmSync(dir,{recursive:true,force:true,maxRetries:3,retryDelay:50});
   });

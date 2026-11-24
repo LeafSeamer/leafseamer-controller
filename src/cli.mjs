@@ -32,7 +32,7 @@ try {
   const allowed = secretCommands.includes(command) ? ['--data-dir','--secret-dir',...(command==='init-obs-secret-store'?['--new-key-dir']:[])] :
     command === 'start-protected-ingress' ? ['--data-dir','--ingress-profile'] :
     composeCore ? ['--data-dir','--ingress-profile','--bootstrap-policy','--clock-evidence-profile','--pairing-profile'] :
-    linuxCore ? ['--data-dir','--host','--port','--bootstrap-policy','--clock-evidence-profile','--pairing-profile'] :
+    linuxCore ? ['--data-dir','--host','--port','--bootstrap-policy','--clock-evidence-profile','--pairing-profile','--worker-control'] :
     command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile','--standalone-profile'] : []), ...(command==='supervise'?['--stdin-control']:[])] : [];
   if ((!allowed.length && !obsInspector) || args.length % 2) throw new Error('arguments');
   const options = {};
@@ -173,8 +173,13 @@ try {
           {tls:profile.tls,pairing:profile.pairing,localPairingManagement:true});
         if(profile.gui)Object.assign(launch,{guiDirectory:profile.gui.directory,guiManifestSha256:profile.gui.manifest_sha256});
       }
-      linuxChannel=openLinuxCoreBootstrap(policy,'controller',{compose:composeCore});
-      launch.coreBootstrap=identity=>linuxChannel.accept({identity,source:openNativeClock()});
+      const workerControl=options['--worker-control'];
+      if(workerControl!==undefined&&workerControl!=='inherited')throw new BootstrapError('bootstrap_linux_control');
+      linuxChannel=openLinuxCoreBootstrap(policy,'controller',{compose:composeCore,workerControl:workerControl==='inherited'});
+      launch.coreBootstrap=identity=>{
+        if(workerControl!==undefined&&Number(identity.schema_revision)<109)throw new BootstrapError('worker_launch_migration_required');
+        return linuxChannel.accept({identity,source:openNativeClock()});
+      };
     }
     if (authenticatedCore) {
       const rawPolicy = options['--bootstrap-policy'];

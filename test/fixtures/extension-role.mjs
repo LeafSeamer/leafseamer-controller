@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import {setup,fixture,hash} from './extension-installation.mjs';
-export async function prepared(t,{revision=15,recheck=()=>{},prepareHost=()=>{}}={}){
- const f=await setup(t,revision),host=fixture(f.store.identity),raw=Buffer.from('{}'),file=host.content.inventory.files.find(f=>f.file_id==='config');
+export async function prepared(t,{revision=15,recheck=()=>{},prepareHost=()=>{},directory=null}={}){
+ const f=await setup(t,revision,directory),host=fixture(f.store.identity),raw=Buffer.from('{}'),file=host.content.inventory.files.find(f=>f.file_id==='config');
  Object.assign(file,{size_bytes:String(raw.length),digest:'sha256:'+crypto.createHash('sha256').update(raw).digest('hex')});
  host.content.manifest.roles=[{role_id:'device',kind:'device',minimum:1,maximum:1,purpose:'设备绑定'}];
  host.content.manifest.permission_templates=[{request_id:'device.request',kind:'device_scope',purpose:'请求设备动作',scope:{device_role:'device',action_ids:['get','set'],trigger_ids:[]}}];

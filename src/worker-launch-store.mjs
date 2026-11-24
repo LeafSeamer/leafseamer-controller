@@ -268,6 +268,7 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
       available();need(Buffer.isBuffer(input)&&input.length<=262144,'worker_launch_input');
       const bytes=Buffer.from(input);
       const intent=await decodeWorkerIntent(bytes,{authority:'controller',service_id:service.service_id,database_instance_id:service.database_instance_id});
+      need(intent.containment_ref.backend!=='linux_cgroup_v2'||Number(service.schema_revision)>=109,'worker_launch_migration_required');
       const body=canonicalize(intent),digest=hash(intent);available();
       const existing=db.transaction(()=>{const row=find(intent.launch_id);if(!row)return null;
         need(row.intent_digest===digest,'worker_launch_conflict');need(row.service_boot_id===bootId,'worker_launch_stale_boot');return view(row);}).immediate();
@@ -283,9 +284,11 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
         const dependencies=Number(service.schema_revision)>=20?workerDependencies(db,service,intent,selected):null;
         const activation=Number(service.schema_revision)>=22?extensionSource.activation(intent):null;
         const parent=core(),domain=parent.descriptor;
+        const containment={windows_interrupt_precise:'windows_job',linux_boottime:'linux_cgroup_v2'}[domain.clock_backend_id];
         need(intent.supervisor_instance_id===domain.supervisor_instance_id&&intent.runtime_generation===domain.runtime_generation&&
           intent.policy_revision===parent.policy.policy_revision&&same(intent.artifact_manifest_ref,parent.intent.artifact_manifest_ref)&&
-          intent.containment_ref.backend==='windows_job'&&intent.containment_ref.group_id!==parent.intent.containment_ref.group_id&&
+          containment&&intent.containment_ref.backend===containment&&intent.containment_ref.group_id!==parent.intent.containment_ref.group_id&&
+          (containment!=='linux_cgroup_v2'||intent.containment_ref.generation===domain.runtime_generation)&&
           intent.member_id!==parent.intent.member_id&&intent.launch_id!==parent.intent.launch_id,'worker_launch_binding');
         const profile=intent.extension_binding.platform_profile_ref;
         need(profile.object_id===domain.platform_profile_id&&profile.revision===domain.platform_profile_revision,'worker_launch_binding');

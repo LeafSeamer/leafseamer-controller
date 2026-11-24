@@ -69,7 +69,8 @@ export function extensionPlanStore({db,service,bootId,available,reference,launch
   bindRuntimeSource(source){
    available();need(!supervisor&&source&&typeof source.assertCurrent==='function'&&typeof source.current==='function','source');
    source.assertCurrent();const saved=db.transaction(core).immediate();
-   need(saved.receipt.role==='core'&&saved.receipt.gate_state==='closed'&&saved.descriptor.clock_backend_id==='windows_interrupt_precise'&&
+   const backend=saved.descriptor.clock_backend_id;
+   need((backend==='windows_interrupt_precise'||process.platform==='linux'&&backend==='linux_boottime')&&saved.receipt.role==='core'&&saved.receipt.gate_state==='closed'&&
     same(source.scope,{service_id:service.service_id,database_instance_id:service.database_instance_id,supervisor_instance_id:saved.descriptor.supervisor_instance_id,domain_ref:saved.receipt.domain_ref})&&
     same(source.current().payload.record.admission_receipt,saved.receipt),'source_binding');
    native=openNativeClock();receipt=frozen(saved.receipt);domain=frozen(saved.descriptor);supervisor=source;

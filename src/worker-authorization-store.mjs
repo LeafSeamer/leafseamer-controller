@@ -109,7 +109,8 @@ export function workerAuthorizationStore({db,service,bootId,isOpen,core,prepared
   bindSource(value){
    available();need(!source&&value&&['assertCurrent','current','putFence','queryLaunch','registerWorker','createWorker','subscribeLost','close'].every(name=>typeof value[name]==='function'),'source');
    const parent=db.transaction(core).immediate();value.assertCurrent();
-   need(parent.descriptor.clock_backend_id==='windows_interrupt_precise'&&same(value.scope,{service_id:service.service_id,database_instance_id:service.database_instance_id,
+   const backend=parent.descriptor.clock_backend_id;
+   need((backend==='windows_interrupt_precise'||process.platform==='linux'&&backend==='linux_boottime')&&same(value.scope,{service_id:service.service_id,database_instance_id:service.database_instance_id,
     supervisor_instance_id:parent.descriptor.supervisor_instance_id,domain_ref:parent.receipt.domain_ref})&&same(value.current().payload.record.admission_receipt,parent.receipt),'source_binding');
    source=value;receipt=freeze(parent.receipt);clock=openNativeClock();unsubscribe=source.subscribeLost(()=>{failed=true;clearTimeout(timer);});connected();schedule();
   },

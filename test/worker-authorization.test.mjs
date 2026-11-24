@@ -106,3 +106,20 @@ test('schema22备份升级23只保留受理准备历史，不补造授权或ACK'
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').raw().all(),[]);
  });
 });
+
+test('schema109 保留 Windows 启动、授权、拒绝和双向事务原件',{timeout:45000},async t=>{
+ const x=await authorized(t,{revision:108});
+ await x.provider.register(x.key);await x.provider.deny(x.key);close(x);
+ const tables=['worker_launch_preparation','worker_launch_device','worker_launch_preparation_commit','worker_launch_dependencies',
+  'worker_launch_authorization','worker_launch_denial','worker_fence_snapshot','worker_fence_ack','extension_resource_owner_head'];
+ const read=db=>tables.map(table=>db.prepare('SELECT * FROM '+table+' ORDER BY rowid').raw().all());
+ const original=inspect(x.f.dir,read),migration=await migrateStorage(x.f.dir,109);
+ assert.equal(migration.schema_revision,'109');assert.ok(fs.existsSync(`${x.f.dir}/${migration.backup_file}`));
+ inspect(x.f.dir,db=>{
+  assert.deepEqual(read(db),original);assert.deepEqual(db.prepare('PRAGMA foreign_key_check').raw().all(),[]);
+  assert.throws(()=>db.exec('UPDATE worker_launch_preparation SET state=state'),/immutable_worker_launch/);
+  assert.throws(()=>db.exec('DELETE FROM worker_launch_preparation'),/worker_launch_history_required/);
+ });
+ const reopened=x.f.reopen();assert.equal(reopened.identity.schema_revision,'109');
+ assert.equal(reopened.workerLaunches.query(x.key).current_boot,false);assert.deepEqual(reopened.workerLaunches.query(x.key).intent,x.intent);x.f.close();
+});

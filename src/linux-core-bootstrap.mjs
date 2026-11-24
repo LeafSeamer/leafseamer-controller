@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import {Socket} from 'node:net';
 import canonicalize from './runtime/canonicalize.mjs';
 import {BootstrapError,createCoreBootstrapChannel,verifyCoreAssignment,verifyCoreAdmission} from './core-bootstrap.mjs';
+import {connectCoreSupervisor} from './supervisor-control.mjs';
 
 const hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 const check=(ok,code)=>{if(!ok)throw new BootstrapError(code);};
@@ -46,8 +47,9 @@ function localGroup(descriptor,serviceKind,compose){
   return {backend:'linux_cgroup_v2',generation,group_id:'group_'+hash(canonicalize(identity))};
 }
 
-export function openLinuxCoreBootstrap(policy,serviceKind,{compose=false}={}){
+export function openLinuxCoreBootstrap(policy,serviceKind,{compose=false,workerControl=false}={}){
   check(serviceKind==='controller'||serviceKind==='seamer','bootstrap_linux_service');
+  check(!workerControl||serviceKind==='controller'&&!compose,'bootstrap_linux_control');
   check(process.platform==='linux'&&fs.fstatSync(3).isSocket(),'bootstrap_linux_channel');
   verifyArtifact(policy,serviceKind);
   const socket=new Socket({fd:3,readable:true,writable:true});
@@ -81,9 +83,12 @@ export function openLinuxCoreBootstrap(policy,serviceKind,{compose=false}={}){
       assignment=null;
       assertCurrent();
       channel.release();
-      socket.once('end',markLost).once('close',markLost).once('error',markLost).once('data',markLost);
-      socket.resume();
-      return {binding,policy,assertCurrent,assertLive,signal};
+      socket.once('end',markLost).once('close',markLost).once('error',markLost);
+      if(!workerControl){socket.once('data',markLost);socket.resume();return {binding,policy,assertCurrent,assertLive,signal};}
+      const supervision=await connectCoreSupervisor({channelId:receipt.channel_binding_id.replaceAll('-',''),binding,policy,
+        inherited:{socket,source,assertLive}});
+      try{assertCurrent();return {binding,policy,assertCurrent,assertLive,signal,supervision};}
+      catch(error){supervision.close();throw error;}
     },
     monitor(stop){
       if(signal.aborted)stop();
