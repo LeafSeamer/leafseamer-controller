@@ -296,6 +296,11 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
         const status = /_management(?:_changed)?$/.test(error.code) ? 403 :
           ['peer_pairing_input', 'remote_authorization_request'].includes(error.code) ? 422 : 409;
         respond(status, {error: error.code});
+      } else if (!extension&&/^(?:event_scope|service_identity|service_consumer|service_token)_[a-z_]{1,60}$/.test(error.code)) {
+        const status=/_management(?:_denied|_changed)?$/.test(error.code)?403:
+          /_input$/.test(error.code)?422:/_capacity$/.test(error.code)?429:
+          /_(?:writer|integrity|unavailable)$/.test(error.code)?503:409;
+        respond(status,{error:error.code});
       } else respond(503, {error: prefix+'_unavailable'});
     } finally { pending--; }
   }

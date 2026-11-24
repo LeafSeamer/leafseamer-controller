@@ -939,6 +939,14 @@ Schema 65显式增加固定设备来源范围登记。可信核心调用 `worker
 
 Schema 66提供规范服务订阅的初始持久生命周期。人员管理入口 `approveLocalSubscriptionPolicy` 独立保存 `local-service-receiver-policy/2`，固定组织主体与批准引用、接收服务、消费者槽、设备及 `event.internal.subscribe`／`status.read` 交集。实际订阅仅接受已激活配对的TLS 1.3服务证书，owner由持久主体生成，session为null；不接收Bearer或人员Cookie，普通服务令牌轮换不参与这条mTLS授权链。组织批准和本地政策均须当前有效，任一缺失、撤销、范围不符或到期均拒绝。
 
+配置了配对管理的运行代可使用本机 `pairing-admin --origin https://127.0.0.1:8444 --ca-file <绝对路径>`。命令从标准输入读取 JSON 对象 `{login,password,operation,request}`，使用当前人员会话、CSRF 和近期认证核对 `auth.manage`。管理代理不转发该回环入口。
+
+- `register-event-scope` 接收 `{request_id,device_ids}`，从当代已启动来源登记范围，返回完整 `scope_ref` 及供 Seamer 创建订阅时使用的 `scope`。
+- `create-event-consumer` 接收 `{request_id,display_name}`，登记用途为 `event_consumer` 的停用主体。随后用 `approve-event-consumer` 提交现有 `approveSubscriptionServicePrincipal` 请求，用 `approve-event-policy` 提交现有 `approveLocalSubscriptionPolicy` 请求。两次批准均要求精确的 `event.internal.subscribe` 与 `status.read`，并复用原有配对、范围、期限及消费者槽校验。
+- `revoke-event-scope` 接收登记返回的 `{scope_ref}`。撤销保存墓碑，原登记请求的重投仅返回历史引用。
+
+组织批准的 `request` 包含 `request_id`、`principal_id`、`expected_revision`、`audiences`、`permissions`、`device_ids`、`not_before_ns`、`expires_ns` 和 `consumer_slots`。接收政策以 `subject_ref`、`approval_ref` 及单值 `audience` 取代 `expected_revision` 和 `audiences`。批准的 audience 均为 Controller 本机。每个 `consumer_slots` 成员给出 `publisher_service_id`、`consumer_service_id`、`consumer_database_instance_id`、`consumer_id`、`purpose`、`allowed_scope_ref`、`max_subscriptions` 和 `pairing_ref`。设备来源使用 `canonical_trigger`、登记返回的 `scope_ref`、`max_subscriptions: 1` 和 Controller 上已激活的配对引用。
+
 配对内部监听器提供 `POST /internal/subscriptions`、`GET /internal/subscriptions/{subscription_id}` 和 `DELETE /internal/subscriptions/{subscription_id}?expected_revision=...`，使用固定product9 SDK及选择头，响应为无缓存的订阅视图。当前仅接收已登记范围的 `canonical_trigger`。新建返回202／building，同owner、用途及request_id重投返回原件，异正文或已占用槽返回409／conflict。关闭采用修订CAS；终态保留墓碑，新请求可使用释放的槽。每槽最多一个活动订阅，全库最多64个活动订阅和1024条历史记录；68版将snapshot_ready纳入活动计数。
 
 订阅、原授权引用、来源登记水位pin、当前修订、审计及outbox同事务保存，缺写整笔回滚。后台定期核验当前资格，不依赖失权客户端DELETE；原到期界限转expired，授权撤销转revoked，来源失效或重启转resync_required，恢复条件不能复活原订阅。66版不生成快照；68版增加下述持久发布。69版提供attach，70版提供快照基线确认；增量ACK、live与完整durable_ingest仍未接通，返回building或snapshot_ready均不能作为自动化运行资格；首次可信引导和完整接收端摄取仍待完成。

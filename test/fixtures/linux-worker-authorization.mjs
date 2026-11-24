@@ -15,7 +15,8 @@ import {workerIntent} from './core-binding.mjs';
 import {hash,inspect} from './extension-installation.mjs';
 import {createAuthenticationHttp} from '../../dist/auth-http.mjs';
 import {createLocalExtensionManagement,localExtensionPath} from '../../dist/local-extension-management.mjs';
-import {runLocalExtensionAdmin} from '../../dist/local-pairing-admin.mjs';
+import {localPairingPath,runLocalExtensionAdmin,runLocalPairingAdmin} from '../../dist/local-pairing-admin.mjs';
+import {manageLocalEvents} from '../../dist/local-event-management.mjs';
 import {commandPermissions,prepareManualSimulator,writeManualSimulator} from './linux-simulator-command.mjs';
 
 const compose=process.argv[2]==='contained-compose-linux';
@@ -28,15 +29,16 @@ async function localManagement(store,{sessions,auth},assertCurrent){
   const cert=fs.readFileSync(caFile),key=fs.readFileSync('/etc/leafseamer/tls/private-key.pem');
   const handler=createAuthenticationHttp({serviceId:store.identity.service_id,databaseInstanceId:store.identity.database_instance_id,
     serviceBootId:store.serviceBootId,origin,sessions,
+    localPairing(auth,operation,request){assertCurrent();return manageLocalEvents(sessions,auth,operation,request);},
     localExtension:createLocalExtensionManagement({sessions,workerLaunches:store.workerLaunches,assertCurrent})});
   const server=https.createServer({cert,key},(req,res)=>{if(!handler.handle(req,res))res.writeHead(404).end();});
   server.listen(8444,'127.0.0.1');await once(server,'listening');
   fixture.after(()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
   return {
-    request(operation,request,{csrf=auth.csrf,headers={}}={}){
+    request(operation,request,{csrf=auth.csrf,headers={},route=localExtensionPath}={}){
       const bytes=Buffer.from(canonicalize({operation,request}));
       return new Promise((resolve,reject)=>{
-        const req=https.request(origin+localExtensionPath,{method:'POST',ca:cert,agent:false,headers:{
+        const req=https.request(origin+route,{method:'POST',ca:cert,agent:false,headers:{
           Origin:origin,Cookie:'leafseamer_session=v1.'+auth.credential_id+'.'+auth.secret,'X-CSRF-Token':csrf,
           'Content-Type':'application/json','Content-Length':String(bytes.length),...headers}},res=>{
           const chunks=[];
@@ -46,9 +48,8 @@ async function localManagement(store,{sessions,auth},assertCurrent){
         req.on('error',reject);req.setTimeout(5000,()=>req.destroy());req.end(bytes);
       });
     },
-    async launch(request){
-      const result=await runLocalExtensionAdmin({origin,caFile,input:{login:'role.test',password:'Synthetic-role-password-123',
-        operation:'start',request}});
+    async cli(admin,operation,request){
+      const result=await admin({origin,caFile,input:{login:'role.test',password:'Synthetic-role-password-123',operation,request}});
       return JSON.parse(result.toString('utf8'));
     }
   };
@@ -127,7 +128,7 @@ try{
     assert.deepEqual(await manage('enable',activationRequest),activation);
     const wrong=await management.request('start',{...request,activation_ref:{...activation.operation_ref,digest:hash('unrelated-operation')}});
     assert.deepEqual(wrong,{status:409,body:{error:'extension_activation_operation_reference'}});
-    const started=await management.launch(request);
+    const started=await management.cli(runLocalExtensionAdmin,'start',request);
     adopted=started.binding;
     key={launch_id:request.launch_id,launch_intent_digest:adopted.binding.admission_receipt.launch_intent_digest};
     assert.equal(adopted.binding.gate_state,'closed');
@@ -151,6 +152,19 @@ try{
       assert.ok(performance.now()<until,'没有提交实际模拟器事件');
       await delay(20);
     }
+    const scopeRequest={request_id:crypto.randomUUID(),device_ids:[device]},pairing=(operation,request)=>
+      management.cli(runLocalPairingAdmin,operation,request);
+    assert.equal((await management.request('register-event-scope',scopeRequest,{route:localPairingPath,csrf:crypto.randomBytes(32).toString('base64url')})).status,401);
+    assert.equal((await management.request('register-event-scope',scopeRequest,{route:localPairingPath,headers:{'X-Forwarded-For':'127.0.0.1'}})).status,403);
+    const scope=await pairing('register-event-scope',scopeRequest);
+    assert.deepEqual(await pairing('register-event-scope',scopeRequest),scope);
+    const current=store.workerLaunches.eventScopes.current(scope.scope_ref);
+    assert.deepEqual(current.registration.scope,scope.scope);
+    assert.deepEqual(current.current_frontiers.map(member=>member.source_key),[simulatorEvent.event.origin.source_key]);
+    assert.equal(current.current_frontiers[0].registration_sequence,'1');
+    assert.deepEqual(await pairing('revoke-event-scope',{scope_ref:scope.scope_ref}),{scope_ref:scope.scope_ref,state:'revoked'});
+    assert.throws(()=>store.workerLaunches.eventScopes.current(scope.scope_ref),{code:'event_scope_inactive'});
+    simulatorEvent.scope_ref=scope.scope_ref;
   }else{
     const intent={...workerIntent(store,binding,x.host.content,approved,[x.registered.device_id]),launch_id:input.launchId,containment_ref:input.containment};
     const prepared=await store.workerLaunches.prepare(Buffer.from(JSON.stringify(intent)));

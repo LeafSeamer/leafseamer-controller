@@ -11,6 +11,7 @@ import {localPairingPath} from './local-pairing-admin.mjs';
 import {createLocalExtensionManagement,localExtensionPath} from './local-extension-management.mjs';
 import {loadGuiAssets} from './gui-assets.mjs';
 import {startPeerPairingTransport} from './peer-pairing-transport.mjs';
+import {localEventOperations,manageLocalEvents} from './local-event-management.mjs';
 import {startOutboxDelivery} from './session-denial-delivery.mjs';
 import {startRunProtectionDelivery} from './run-approval-protection-completion.mjs';
 import {createSubscriptionEndpoint} from './service-subscription-http.mjs';
@@ -243,7 +244,9 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
           if (closing) throw new Error('pairing_runtime_unavailable');
           result = api.get(auth, input.binding_id);
           break;
-        default: throw new Error('pairing_operation');
+        default:
+          if(!localEventOperations.includes(operation))throw new Error('pairing_operation');
+          result=manageLocalEvents(sessions,auth,operation,input);
       }
       assertRuntimeCurrent();
       return result;

@@ -237,6 +237,18 @@ export function serviceIdentityStore({db,service,bootId,writer,time,authenticate
   activePeer:(scope,bindingId)=>pairings().requireActivePeerInTransaction(scope,'seamer',bindingId),
   prepareInitiator:runApprovalEndorsements.prepareRunInitiator,prepareApproval:runApprovalEndorsements.prepareRunApproval,automationExecution}):null;
  return Object.freeze({
+  ...(eventScopes&&Number(service.schema_revision)>=66&&{
+   registerEventScope(input,request){
+    return management(input,'auth.manage',()=>{
+     const {registration,scope_ref}=eventScopes.register(request);
+     return {scope_ref,scope:registration.scope};
+    });
+   },
+   revokeEventScope(input,request){
+    fields(request,'scope_ref');
+    return management(input,'auth.manage',()=>eventScopes.revoke(request.scope_ref));
+   }
+  }),
   approveSubscriptionServicePrincipal:(input,request)=>approvePrincipal(input,request,'subscription'),
   approveAutomationServicePrincipal:(input,request)=>approvePrincipal(input,request,'automation'),
   currentAutomationServiceApproval:(bindingId,socket,request)=>writer(()=>currentAutomationApproval(bindingId,socket,request)),
