@@ -17,7 +17,7 @@ import {createAuthenticationHttp} from '../../dist/auth-http.mjs';
 import {createLocalExtensionManagement,localExtensionPath} from '../../dist/local-extension-management.mjs';
 import {localPairingPath,runLocalExtensionAdmin,runLocalPairingAdmin} from '../../dist/local-pairing-admin.mjs';
 import {manageLocalEvents} from '../../dist/local-event-management.mjs';
-import {commandPermissions,prepareManualSimulator,writeManualSimulator} from './linux-simulator-command.mjs';
+import {commandPermissions,prepareAutomaticSimulator,prepareManualSimulator,writeManualSimulator} from './linux-simulator-command.mjs';
 import {simulatorPairingInputs,startSimulatorPairing} from './linux-simulator-pairing.mjs';
 
 const compose=process.argv[2]==='contained-compose-linux';
@@ -98,8 +98,15 @@ try{
     installation={...extensionInstallationSource,content};
   }
   const capabilityTemplate=input.channelDirectory?JSON.parse(fs.readFileSync(new URL('../../dist/simulator-control-capability.json',import.meta.url),'utf8')):undefined;
+  let targetDevice=null;
   const x=await setup(fixture,{revision:109,directory:input.data,installation,capabilityTemplate,withEnrolledIssuer:!!input.paired,
-    reviewedActions:capabilityTemplate?.actions.map(action=>action.action_id),prepareHost(host){
+    reviewedActions:capabilityTemplate?.actions.map(action=>action.action_id),prepareBindings({f,api,request}){
+    if(!input.paired?.armPreflight)return;
+    targetDevice=f.store.registerDevice({request_id:'target-device',device_kind:'simulator',display_name:'模拟器动作目标'}).device_id;
+    const {values}=request.bindings[0];
+    values.push(api.roles.deviceReference(targetDevice));
+    values.sort((left,right)=>Buffer.compare(Buffer.from(canonicalize(left)),Buffer.from(canonicalize(right))));
+  },prepareHost(host){
     if(input.materialization){
       Object.assign(host.identity,input.materialization.identity);
       Object.assign(host.content,input.materialization.content);
@@ -132,14 +139,16 @@ try{
     const grant=a.sessions.localPermissions(a.auth);
     a.sessions.replaceLocalPermissions(a.auth,{request_id:crypto.randomUUID(),principal_id:a.logged.session.principal_id,
       expected_revision:grant.revision,permissions:[...new Set([...grant.permissions,'extension.read','extension.manage',...commandPermissions,
-        ...(input.paired?.runApproval?['grant.manage','grant.read']:[])])]});
+        ...(input.paired?.runApproval?['grant.manage','grant.read']:[]),...(targetDevice?['control.release']:[])])]});
     approved=await manage('approve',x.request);
   }
   const token=a.token();
   if(!compose)approved=await a.sessions.approveExtension(token,x.request);
   store.configureVirtualDevice({request_id:'resource',device_id:x.registered.device_id});
+  if(targetDevice)store.configureVirtualDevice({request_id:'target-resource',device_id:targetDevice});
   const device=x.registered.device_id;
   const manual=compose?await prepareManualSimulator({store,operator:a,device}):null;
+  if(targetDevice)await prepareAutomaticSimulator({store,operator:a,device:targetDevice});
   const planRequest={request_id:'plan',slot_id:x.installed.slot.record.slot_id,
     expected_slot_revision:x.installed.slot.slot_ref.revision,selection:{kind:compose?'enable':'activate',source_installation_ref:null,
       target_installation_ref:x.installed.installation_ref,reuse_content_ref:null,configuration_ref:x.config.configuration_ref}};
@@ -175,7 +184,8 @@ try{
     assert.equal(current.current_frontiers[0].registration_sequence,'1');
     if(input.paired){
       const {ready,proceed,finish}=input.paired;
-      fs.writeFileSync(ready,canonicalize({device,scope,baseline:simulatorEvent.event,source_ref:current.current_frontiers[0].source_registration_ref}));
+      fs.writeFileSync(ready,canonicalize({device,scope,baseline:simulatorEvent.event,source_ref:current.current_frontiers[0].source_registration_ref,
+        ...(targetDevice&&{target_device:targetDevice})}));
       await waitForFile(proceed,runtime.assertLive,input.paired.runApproval?45000:30000);
       simulatorEvent.incremental={command:await writeManualSimulator({store,operator:a,supervision,key,device,manual,value:23,successor:true}),
         event:await waitForEvent(store,device,2,23)};

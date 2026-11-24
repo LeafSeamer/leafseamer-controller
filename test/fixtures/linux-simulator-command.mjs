@@ -7,22 +7,38 @@ const id=()=>crypto.randomUUID();
 const ref=value=>({id:value.id,revision:value.revision,digest:value.digest});
 export const commandPermissions=['control.read','control.acquire','device.command','device.recover','command.read','request.create'];
 
+async function changeControl(sessions,token,context,device,operation,reason){
+  const control=sessions.getControl(token,device);
+  const accepted=await sessions.changeControl(token,operation,{device_id:device},{context_id:context.context_id,idempotency_key:id(),
+    expected_control:{epoch:control.control_epoch,version:control.effective_version},reason});
+  const deadline=performance.now()+4000;
+  for(;;){
+    const current=sessions.getControlOperation(token,accepted.receipt.initial_result_ref.id);
+    if(current.state==='effective')return sessions.getControl(token,device);
+    assert.ok(current.state==='pending'&&performance.now()<deadline,JSON.stringify({state:current.state,reason:current.failure_code}));
+    await delay(20);
+  }
+}
+
+export async function prepareAutomaticSimulator({store,operator,device}){
+  const {sessions,real}=operator,audience=store.identity.service_id;
+  real.refresh();
+  const token=operator.token(['control.read','control.acquire','control.release','request.create']);
+  const context=sessions.createRequestContext(token,{audience,operations:['acquireControl','releaseControl'],selection:contractSelection,
+    ttl_ms:30000,max_unique_requests:2});
+  await changeControl(sessions,token,context,device,'acquireControl','登记模拟器动作目标的控制原件');
+  const control=await changeControl(sessions,token,context,device,'releaseControl','切换模拟器动作目标到自动控制');
+  assert.equal(control.mode,'automatic');
+  assert.equal(control.gate_state,'protected');
+}
+
 export async function prepareManualSimulator({store,operator,device}){
   const {sessions,auth,real}=operator,service=store.identity.service_id,device_ids=[device];
   real.refresh();
   const token=operator.token(commandPermissions);
   const context=sessions.createRequestContext(token,{audience:service,operations:['acquireControl','submitCommand'],
     selection:contractSelection,ttl_ms:60000,max_unique_requests:4});
-  const control=sessions.getControl(token,device);
-  const acquisition=await sessions.changeControl(token,'acquireControl',{device_id:device},{context_id:context.context_id,idempotency_key:id(),
-    expected_control:{epoch:control.control_epoch,version:control.effective_version},reason:'模拟器人员控制'});
-  const deadline=performance.now()+4000;
-  for(;;){
-    const state=sessions.getControlOperation(token,acquisition.receipt.initial_result_ref.id).state;
-    if(state==='effective')break;
-    assert.ok(state==='pending'&&performance.now()<deadline,'控制权未生效');
-    await delay(20);
-  }
+  await changeControl(sessions,token,context,device,'acquireControl','模拟器人员控制');
   const now=real.current(),principal=sessions.createServicePrincipal(auth,{request_id:id(),display_name:'模拟器评估器',purpose:'controller_evaluator'});
   const approval=sessions.approveServicePrincipal(auth,{request_id:id(),principal_id:principal.id,expected_revision:principal.revision,
     audiences:[service],permissions:['identity.read'],device_ids,not_before_ns:now.lower_ns,expires_ns:String(BigInt(now.upper_ns)+3600000000000n)});
