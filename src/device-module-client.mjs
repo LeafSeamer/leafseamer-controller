@@ -5,7 +5,7 @@ import canonicalize from './runtime/canonicalize.mjs';
 import {moduleSocket,moduleTransport,moduleFrameBytes,moduleDigestEqual as same} from './device-module-channel.mjs';
 
 // 核心内部调用；current/invalidate绑定同库当前运行原件，HTTP调用方不能提供这些函数。
-export async function connectDeviceModule({current,invalidate,configuration,journal,catalog,onClose,events=false,eventSource=null}){
+export async function connectDeviceModule({current,invalidate,configuration,journal,catalog,onClose,events=false,eventSource=null,socket}){
  need(typeof events==='boolean','module_version');const protocol=events?deviceModuleEventProtocol:deviceModuleProtocol,captures=new Map();
  const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
  const initial=current(),clock=openNativeClock(),sessions=new Map();
@@ -16,7 +16,7 @@ export async function connectDeviceModule({current,invalidate,configuration,jour
   transport?.close();try{invalidate();}catch{}try{onClose?.();}catch{}call?.reject(new DeviceModuleError('module_channel_closed'));};
  const check=()=>{need(!stopped,'module_closed');const actual=current();need(actual.current_boot&&!actual.withdrawal&&same(actual.ref,initial.ref),'module_binding');return actual;};
  journal.open(binding);
- transport=moduleTransport(moduleSocket(binding.member_boot_id,'core'),{failed:fail,receive(frame){
+ transport=moduleTransport(socket??moduleSocket(binding.member_boot_id,'core'),{failed:fail,receive(frame){
   check();const call=pending;need(call&&frame.version===protocol&&frame.type===call.response&&frame.sequence===call.request.sequence&&frame.reply_to===call.request.request_id&&same(frame.binding,binding)&&
    frame.issued_tick_ns===call.request.issued_tick_ns&&frame.deadline_tick_ns===call.request.deadline_tick_ns,'module_reply');
   const now=clock.tick();need(now>=BigInt(frame.issued_tick_ns)&&now<BigInt(frame.deadline_tick_ns),'module_expired');

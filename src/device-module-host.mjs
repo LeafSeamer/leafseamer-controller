@@ -18,7 +18,7 @@ import {openWindowsSecretStore} from './secret-store.mjs';
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 
 // 仅由固定worker入口装配。root及完整库存来自监督器持续持有的加载材料。
-export function hostDeviceModule({admitted,materials,executionIdentity,obsSecretsDirectory,failed}){
+export function hostDeviceModule({admitted,materials,executionIdentity,obsSecretsDirectory,sockets,failed}){
  const clock=openNativeClock(),abort=new AbortController(),sessions=new Map(),usedSessions=new Set(),usedCaptures=new Set();
  let transport,implementation=null,binding=null,protocol=null,sequence=1n,stopped=false,execution=null,executionSession=null;
  const gates=new Map(),executions=new Map(),executionBindings=new Map();
@@ -39,7 +39,7 @@ export function hostDeviceModule({admitted,materials,executionIdentity,obsSecret
   const gate=deviceExecutionGate({binding:bound,transmissions:()=>executions.get(device)?.fenceSnapshot(),tick:()=>clock.tick(),signal:abort.signal,failed:stop,limits:{max_entries:4096,max_metadata_bytes:1048576}});
   if(executionSession)executionSession.replaceDevice(device,gate);gates.set(device,gate);
   if(executionSession||!admitted.intent.object_scope.device_ids.every(id=>sessions.has(id)))return;
-  executionSession=deviceWorkerSession({socket:executionSocket(admitted.receipt.member_boot_id,'worker'),identity:execution,descriptor:admitted.descriptor,
+  executionSession=deviceWorkerSession({socket:sockets?.execution??executionSocket(admitted.receipt.member_boot_id,'worker'),identity:execution,descriptor:admitted.descriptor,
    devices:gates,signal:abort.signal,failed:stop,limits:{max_frames:4096,max_history_bytes:16777216,max_queue_entries:64,max_queue_bytes:1048576,write_timeout_ms:2000},
    async receive({frame,payload}){
     if(frame.type==='HELLO_ACK')return;
@@ -58,7 +58,7 @@ export function hostDeviceModule({admitted,materials,executionIdentity,obsSecret
  function file(fileId,role){const selected=materials.inventory.files.find(f=>f.file_id===fileId);need(selected?.role===role,'module_content_binding');
   const target=path.resolve(materials.root_path,selected.path);need(target.startsWith(path.resolve(materials.root_path)+path.sep),'module_content_path');
   const bytes=fs.readFileSync(target);need(String(bytes.length)===selected.size_bytes&&'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex')===selected.digest,'module_content_binding');return target;}
- transport=moduleTransport(moduleSocket(admitted.receipt.member_boot_id,'worker'),{failed:stop,async receive(frame){
+ transport=moduleTransport(sockets?.module??moduleSocket(admitted.receipt.member_boot_id,'worker'),{failed:stop,async receive(frame){
   current(frame);need(frame.sequence===String(sequence)&&frame.reply_to===null,'module_order');sequence++;
   need(frame.binding.member_boot_id===admitted.receipt.member_boot_id,'module_binding');
   const timer=timerFor(frame);let type,body;
