@@ -4,6 +4,7 @@ import https from 'node:https';
 import {canonical} from './auth-clock-value.mjs';
 import {contractSelection} from './sdk/index.mjs';
 import {pairingFields} from './peer-pairing-value.mjs';
+import {localExtensionOperations,localExtensionPath} from './local-extension-management.mjs';
 
 export const localPairingPath = '/auth/local-pairing/v1';
 export const localPairingLimit = 32768;
@@ -42,38 +43,40 @@ function request(origin, route, method, ca, extra, value = undefined) {
   });
 }
 
-export async function runLocalPairingAdmin({origin, caFile, input}) {
+async function runLocalAdmin({origin, caFile, input}, {route,operations,prefix}){
+  const requireInput=(valid,suffix='input')=>check(valid,prefix+'_'+suffix);
   let site;
-  try { site = new URL(origin); } catch { throw new LocalPairingError('local_pairing_origin'); }
-  check(site.origin === origin && site.protocol === 'https:' && loopbackHost(site.hostname), 'local_pairing_origin');
-  check(typeof caFile === 'string' && path.isAbsolute(caFile), 'local_pairing_trust');
+  try { site = new URL(origin); } catch { throw new LocalPairingError(prefix+'_origin'); }
+  requireInput(site.origin === origin && site.protocol === 'https:' && loopbackHost(site.hostname),'origin');
+  requireInput(typeof caFile === 'string' && path.isAbsolute(caFile),'trust');
   const fd = fs.openSync(caFile, 'r');
   let ca;
   try {
     const stat = fs.fstatSync(fd);
-    check(stat.isFile() && stat.size > 0 && stat.size <= 65536, 'local_pairing_trust');
+    requireInput(stat.isFile() && stat.size > 0 && stat.size <= 65536,'trust');
     ca = Buffer.alloc(stat.size);
-    check(fs.readSync(fd, ca, 0, ca.length, null) === ca.length, 'local_pairing_trust');
+    requireInput(fs.readSync(fd, ca, 0, ca.length, null) === ca.length,'trust');
   } finally { fs.closeSync(fd); }
   pairingFields(input, 'login,password,operation,request');
   const {login, password, operation, request: body} = input;
-  check(typeof login === 'string' && typeof password === 'string' && localPairingOperations.includes(operation));
+  requireInput(typeof login === 'string' && typeof password === 'string' && operations.includes(operation));
   const session = await request(origin, '/auth/sessions', 'POST', ca, {}, {login, password});
-  check(session.status === 201, 'local_pairing_login');
+  requireInput(session.status === 201,'login');
   const cookie = session.headers['set-cookie']?.[0]?.split(';', 1)[0], csrf = session.headers['x-csrf-token'];
-  check(/^leafseamer_session=v1\.[a-f0-9-]{36}\.[A-Za-z0-9_-]{43}$/.test(cookie) && /^[A-Za-z0-9_-]{43}$/.test(csrf), 'local_pairing_login');
+  requireInput(/^leafseamer_session=v1\.[a-f0-9-]{36}\.[A-Za-z0-9_-]{43}$/.test(cookie) && /^[A-Za-z0-9_-]{43}$/.test(csrf),'login');
   const auth = {'Cookie': cookie, 'X-CSRF-Token': csrf};
   let result;
   try {
-    const response = await request(origin, localPairingPath, 'POST', ca, auth, {operation, request: body});
+    const response = await request(origin, route, 'POST', ca, auth, {operation, request: body});
     let value;
     try { value = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(response.bytes)); }
-    catch { throw new LocalPairingError(response.status === 200 ? 'local_pairing_response' : 'local_pairing_rejected'); }
+    catch { throw new LocalPairingError(prefix+(response.status === 200 ? '_response' : '_rejected')); }
     if (response.status !== 200) {
-      throw new LocalPairingError(typeof value?.error === 'string' && /^(?:peer_pairing|local_pairing|remote_authorization)_[a-z_]{1,60}$/.test(value.error) ?
-        value.error : 'local_pairing_rejected');
+      const errors=route===localPairingPath?/^(?:peer_pairing|local_pairing|remote_authorization)_[a-z_]{1,60}$/:
+        /^(?:local_extension|extension|worker_launch|worker_authorization)_[a-z_]{1,65}$/;
+      throw new LocalPairingError(typeof value?.error === 'string' && errors.test(value.error)?value.error:prefix+'_rejected');
     }
-    check(response.bytes.toString('utf8') === canonical(value), 'local_pairing_response');
+    requireInput(response.bytes.toString('utf8') === canonical(value),'response');
     result = response.bytes;
   } finally {
     // 会话清理不改变管理操作的持久结果，失联时由现有会话到期机制回收。
@@ -81,3 +84,7 @@ export async function runLocalPairingAdmin({origin, caFile, input}) {
   }
   return result;
 }
+
+export const runLocalPairingAdmin=input=>runLocalAdmin(input,{route:localPairingPath,operations:localPairingOperations,prefix:'local_pairing'});
+export const runLocalExtensionAdmin=input=>runLocalAdmin(input,{route:localExtensionPath,operations:localExtensionOperations.filter(name=>!name.startsWith('lookup-')),
+  prefix:'local_extension'});

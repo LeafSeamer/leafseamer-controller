@@ -15,7 +15,7 @@ async function setup(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'leafseamer-http-'));
   let server;
   t.after(async () => { await server?.close(); assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir())); fs.rmSync(dir, {recursive: true, force: true}); });
-  initializeStorage(dir); await migrateStorage(dir);
+  initializeStorage(dir); await migrateStorage(dir,8);
   server = await startController({dataDir: dir});
   return {server, baseUrl: 'http://127.0.0.1:' + server.address.port};
 }

@@ -15,7 +15,7 @@ import {readLinuxClockEvidenceProfile} from './linux-clock-evidence.mjs';
 import {connectCoreSupervisor, SupervisorError} from './supervisor-control.mjs';
 import {openTrustedControllerClock, readTrustedPairingProfile, readTrustedStandaloneProfile} from './trusted-pairing-profile.mjs';
 import {readProtectedIngressProfile} from './protected-ingress-profile.mjs';
-import {LocalPairingError, runLocalPairingAdmin} from './local-pairing-admin.mjs';
+import {LocalPairingError, runLocalPairingAdmin,runLocalExtensionAdmin} from './local-pairing-admin.mjs';
 import {discoverObsScenes,inspectObsCut,ObsDiscoveryError} from './obs-discovery.mjs';
 import {initializeLinuxSecretStore,initializeWindowsSecretStore,openLinuxSecretStore,openWindowsSecretStore} from './secret-store.mjs';
 import {windowsSecretDirectory} from './windows-secret-files.mjs';
@@ -29,24 +29,25 @@ try {
   const [command, ...args] = process.argv.slice(2);
   const obsInspector=command==='inspect-obs'?discoverObsScenes:command==='inspect-obs-cut'?inspectObsCut:null;
   const secretCommands = ['init-obs-secret-store', 'seal-obs-resource-credential', 'observe-obs-resource'];
+  const localAdmin=command==='pairing-admin'?runLocalPairingAdmin:command==='extension-admin'?runLocalExtensionAdmin:null;
   const allowed = secretCommands.includes(command) ? ['--data-dir','--secret-dir',...(command==='init-obs-secret-store'?['--new-key-dir']:[])] :
     command === 'start-protected-ingress' ? ['--data-dir','--ingress-profile'] :
     composeCore ? ['--data-dir','--ingress-profile','--bootstrap-policy','--clock-evidence-profile','--pairing-profile','--worker-control','--worker-channel-dir','--installation-source'] :
     linuxCore ? ['--data-dir','--host','--port','--bootstrap-policy','--clock-evidence-profile','--pairing-profile','--worker-control','--worker-channel-dir'] :
-    command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile','--standalone-profile'] : []), ...(command==='supervise'?['--stdin-control']:[])] : [];
+    localAdmin ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile','--standalone-profile'] : []), ...(command==='supervise'?['--stdin-control']:[])] : [];
   if ((!allowed.length && !obsInspector) || args.length % 2) throw new Error('arguments');
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
     if (!allowed.includes(args[i]) || Object.hasOwn(options, args[i])) throw new Error('arguments');
     options[args[i]] = args[i + 1];
   }
-  if (command !== 'pairing-admin' && !obsInspector && (!options['--data-dir'] || !path.isAbsolute(options['--data-dir']))) throw new Error('arguments');
+  if (!localAdmin && !obsInspector && (!options['--data-dir'] || !path.isAbsolute(options['--data-dir']))) throw new Error('arguments');
   if (obsInspector) {
     requirePrivatePipes();
     emit({event:command==='inspect-obs'?'obs_discovered':'obs_cut_checked',...await obsInspector(await readEnrollmentInput())});
-  } else if (command === 'pairing-admin') {
+  } else if (localAdmin) {
     requirePrivatePipes();
-    const bytes = await runLocalPairingAdmin({origin: options['--origin'], caFile: options['--ca-file'], input: await readEnrollmentInput()});
+    const bytes = await localAdmin({origin: options['--origin'], caFile: options['--ca-file'], input: await readEnrollmentInput()});
     process.stdout.write(bytes);
   } else if (command === 'upgrade-process-host') {
     emit(await upgradeProcessHost(options['--data-dir']));

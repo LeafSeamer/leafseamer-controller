@@ -66,6 +66,15 @@ test('fence ACK等待中撤销审批，发送完整deny且不签授权，不释�
   assert.equal(db.prepare('SELECT count(*) FROM extension_resource_owner_head').pluck().get(),1);
  });
 });
+test('启动授权等待期间人员失权，监督器没有收到CREATE',{timeout:20000},async t=>{
+ const x=await authorized(t);
+ let current=true;
+ x.setAck(()=>{current=false;});
+ await assert.rejects(x.provider.create(x.key,{load_id:'load',materialization_challenge_id:'challenge',materialization_evidence_id:'evidence'},()=>{
+   if(!current)throw new Error('operator_withdrawn');
+ }),/operator_withdrawn/);
+ assert.equal(x.grants.length,0);
+});
 test('显式撤销不可逆，监督来源失联后不能签发或重新绑定',{timeout:20000},async t=>{
  const x=await authorized(t);await x.provider.authorize(x.key);await x.provider.deny(x.key);await x.provider.synchronize();
  assert.equal(x.snapshots.length,2);assert.equal(x.snapshots[1].items[0].disposition,'deny');await assert.rejects(x.provider.authorize(x.key),/denied/);

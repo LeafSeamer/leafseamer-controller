@@ -191,6 +191,15 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
       if(!session||time().upper>=BigInt(session.recent_before_ns))fail('extension_management_recent_required');}
     return proof;
   });
+  function authorizeLocalExtension(input,permission,recent){
+    const now=time(),found=deliver(authenticated(input,now)),session=found.session;
+    const grant=authorization(session);
+    if(!grant.permissions.includes(permission))fail('extension_management_denied');
+    if(recent&&now.upper>=BigInt(session.recent_before_ns))fail('extension_management_recent_required');
+    return {principal_id:session.principal_id,session_id:session.session_id,credential_id:found.credential.credential_id,
+      issuer_id:session.issuer_id,issuer_epoch:session.issuer_epoch,authorization_digest:grant.digest,acquisition_ref:now.acquisition};
+  }
+  const localExtensions=createExtensionManagement?.(authorizeLocalExtension);
   function readDevice(input, permission, read, revalidate = () => {}) {
     return deliver(writer(() => {
       const proof = authorizeToken(input, serviceId); if (proof.denied) return proof;
@@ -294,6 +303,13 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
     planExtension(input,request){if(!extensionManagement?.plans)fail('extension_plans_unavailable');return extensionManagement.plans.create(input,request);},
     lookupExtensionPlan(input,requestId){if(!extensionManagement?.plans)fail('extension_plans_unavailable');return extensionManagement.plans.query(input,requestId);},
     getCurrentExtensionPlan(input,planRef){if(!extensionManagement?.plans)fail('extension_plans_unavailable');return extensionManagement.plans.current(input,planRef);},
+    localExtensionManagement:localExtensions?.plans&&localExtensions.lifecycle?Object.freeze({
+      plan:localExtensions.plans.create,approve:localExtensions.approve,
+      activate:(input,request)=>localExtensions.lifecycle.accept(input,'activate',request),
+      enable:(input,request)=>localExtensions.lifecycle.accept(input,'enable',request),
+      lookupPlan:localExtensions.plans.query,lookupActivation:localExtensions.lifecycle.query,
+      assertStart:input=>writer(()=>authorizeLocalExtension(input,'extension.manage',true))
+    }):null,
     activateExtension(input,request){if(!extensionManagement?.lifecycle)fail('extension_activation_unavailable');return extensionManagement.lifecycle.accept(input,'activate',request);},
     enableExtension(input,request){if(!extensionManagement?.lifecycle)fail('extension_activation_unavailable');return extensionManagement.lifecycle.accept(input,'enable',request);},
     lookupExtensionActivation(input,requestId){if(!extensionManagement?.lifecycle)fail('extension_activation_unavailable');return extensionManagement.lifecycle.query(input,requestId);},

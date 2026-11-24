@@ -8,6 +8,7 @@ import {startAuthenticationClock} from './auth-clock.mjs';
 import {inspectLinuxClockEvidence, waitForLinuxAuthentication} from './linux-clock-evidence.mjs';
 import {createAuthenticationHttp} from './auth-http.mjs';
 import {localPairingPath} from './local-pairing-admin.mjs';
+import {createLocalExtensionManagement,localExtensionPath} from './local-extension-management.mjs';
 import {loadGuiAssets} from './gui-assets.mjs';
 import {startPeerPairingTransport} from './peer-pairing-transport.mjs';
 import {startOutboxDelivery} from './session-denial-delivery.mjs';
@@ -253,10 +254,15 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       localPairing: localPairingManagement && !composePairing ? managePairing : null});
     const options = {maxHeaderSize: 16384, requestTimeout: 5000, headersTimeout: 5000, keepAliveTimeout: 1000};
     if (composePairing) {
-      const localHttp = createAuthenticationHttp({...authenticationScope, origin: composePairingAdmin.origin, localPairing: managePairing});
+      const localExtension=installationSource!==null&&sessions?.localExtensionManagement?
+        createLocalExtensionManagement({sessions,workerLaunches:storage.workerLaunches,assertCurrent(){
+          if(closing)throw new Error('controller_closing');
+          assertRuntimeCurrent();
+        }}):null;
+      const localHttp = createAuthenticationHttp({...authenticationScope, origin: composePairingAdmin.origin, localPairing: managePairing,localExtension});
       localPairingServer = https.createServer({...options,key:composePairingAdmin.key,cert:composePairingAdmin.cert,minVersion:'TLSv1.2'}, (req,res) => {
         try { assertRuntimeCurrent(); } catch { res.writeHead(503,{'Cache-Control':'no-store',Connection:'close'});res.end();return; }
-        if ([localPairingPath,'/auth/sessions','/auth/sessions/current'].includes(req.url) && localHttp.handle(req,res)) return;
+        if ([localPairingPath,localExtensionPath,'/auth/sessions','/auth/sessions/current'].includes(req.url) && localHttp.handle(req,res)) return;
         res.writeHead(404,{'Cache-Control':'no-store',Connection:'close'});res.end();
       });
       localPairingServer.maxRequestsPerSocket=100;

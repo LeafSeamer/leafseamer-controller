@@ -152,7 +152,7 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
   }
   const starting=new Set();
   const api=Object.freeze({runtime,authorization,controlBarrier,eventScopes,
-    async startLinux(input){
+    async startLinux(input,assertOperator=()=>{}){
       available();need(process.platform==='linux'&&Number(service.schema_revision)>=109&&extensionSource?.acceptedActivation,'worker_launch_linux_unavailable');
       need(input&&Object.keys(input).sort().join(',')==='activation_ref,containment_ref,launch_id'&&
         typeof input.launch_id==='string'&&uuid.test(input.launch_id),'worker_launch_linux_input');
@@ -164,6 +164,7 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
       starting.add(launch_id);
       let selected,ownsStart=false;
       try{
+        assertOperator();
         const {intent,events,execution}=db.transaction(()=>{
           const activation=extensionSource.acceptedActivation(activation_ref),parent=core();
           const {content,approval,resolution}=extensionSource.select(activation.approval_ref);
@@ -185,15 +186,18 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
         const prepared=await api.prepare(Buffer.from(canonicalize(intent)));
         selected={launch_id,launch_intent_digest:prepared.ref.digest};
         const result=()=>{
+          assertOperator();
           const active=runtime.current(selected),module=modules.get(launch_id),client=executionClients.get(launch_id);
           need(module&&(!execution||client?.state.phase==='ready'),'worker_launch_linux_channels');
           return deepFreeze({binding:active,module:module.binding,execution:client?.binding??null});
         };
         if(runtime.query(selected))return result();
         ownsStart=true;
+        assertOperator();
         await authorization.register(selected);
         const proof=await authorization.prepareLinuxContent(selected);
-        await authorization.create(selected,proof);
+        assertOperator();
+        await authorization.create(selected,proof,assertOperator);
         await runtime.adopt(selected);
         const module=await api.openModule(selected,{events});
         for(const device of intent.object_scope.device_ids){await module.connectReadOnly(device);await module.captureBaseline(device);}

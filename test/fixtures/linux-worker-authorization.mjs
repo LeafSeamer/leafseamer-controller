@@ -3,18 +3,55 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {setTimeout as delay} from 'node:timers/promises';
+import https from 'node:https';
+import {once} from 'node:events';
+import crypto from 'node:crypto';
+import canonicalize from 'canonicalize';
 import {openLinuxCoreBootstrap} from '../../dist/linux-core-bootstrap.mjs';
 import {openNativeClock} from '../../dist/native-clock.mjs';
 import {setup} from './extension-capabilities.mjs';
 import {authenticated} from './extension-auth.mjs';
 import {workerIntent} from './core-binding.mjs';
 import {hash} from './extension-installation.mjs';
+import {createAuthenticationHttp} from '../../dist/auth-http.mjs';
+import {createLocalExtensionManagement,localExtensionPath} from '../../dist/local-extension-management.mjs';
+import {runLocalExtensionAdmin} from '../../dist/local-pairing-admin.mjs';
 
 const compose=process.argv[2]==='contained-compose-linux';
 const inputFile=compose?path.join('/var/lib/leafseamer','worker-test.json'):process.argv[2];
 const input=JSON.parse(fs.readFileSync(inputFile,'utf8'));
 const cleanup=[];
 const fixture={after(fn){cleanup.unshift(fn);}};
+async function localManagement(store,{sessions,auth},assertCurrent){
+  const origin='https://127.0.0.1:8444',caFile='/etc/leafseamer/tls/certificate.pem';
+  const cert=fs.readFileSync(caFile),key=fs.readFileSync('/etc/leafseamer/tls/private-key.pem');
+  const handler=createAuthenticationHttp({serviceId:store.identity.service_id,databaseInstanceId:store.identity.database_instance_id,
+    serviceBootId:store.serviceBootId,origin,sessions,
+    localExtension:createLocalExtensionManagement({sessions,workerLaunches:store.workerLaunches,assertCurrent})});
+  const server=https.createServer({cert,key},(req,res)=>{if(!handler.handle(req,res))res.writeHead(404).end();});
+  server.listen(8444,'127.0.0.1');await once(server,'listening');
+  fixture.after(()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
+  return {
+    request(operation,request,{csrf=auth.csrf,headers={}}={}){
+      const bytes=Buffer.from(canonicalize({operation,request}));
+      return new Promise((resolve,reject)=>{
+        const req=https.request(origin+localExtensionPath,{method:'POST',ca:cert,agent:false,headers:{
+          Origin:origin,Cookie:'leafseamer_session=v1.'+auth.credential_id+'.'+auth.secret,'X-CSRF-Token':csrf,
+          'Content-Type':'application/json','Content-Length':String(bytes.length),...headers}},res=>{
+          const chunks=[];
+          res.on('data',chunk=>chunks.push(chunk)).on('error',reject);
+          res.on('end',()=>resolve({status:res.statusCode,body:JSON.parse(Buffer.concat(chunks))}));
+        });
+        req.on('error',reject);req.setTimeout(5000,()=>req.destroy());req.end(bytes);
+      });
+    },
+    async launch(request){
+      const result=await runLocalExtensionAdmin({origin,caFile,input:{login:'role.test',password:'Synthetic-role-password-123',
+        operation:'start',request}});
+      return JSON.parse(result.toString('utf8'));
+    }
+  };
+}
 try{
   const clock=openNativeClock(),channel=openLinuxCoreBootstrap(input.policy,'controller',{compose,workerControl:true,
     workerChannelDirectory:input.channelDirectory,installationRead:compose});
@@ -51,25 +88,47 @@ try{
   store.extensionInstallations.bindRuntimeSource(supervision);
   store.workerLaunches.runtime.bindSource(supervision);
   const start=store.workerLaunches.authorization;start.bindSource(supervision);
-  const a=await authenticated(fixture,x.f),token=a.token();
-  const approved=await a.sessions.approveExtension(token,x.request);
+  const a=await authenticated(fixture,x.f,{grant:!compose});
+  const management=compose?await localManagement(store,a,supervision.assertCurrent):null;
+  async function manage(operation,request){
+    const result=await management.request(operation,request);
+    assert.equal(result.status,200,JSON.stringify(result.body));
+    return result.body;
+  }
+  let approved;
+  if(compose){
+    assert.equal((await management.request('approve',x.request,{csrf:crypto.randomBytes(32).toString('base64url')})).status,401);
+    assert.equal((await management.request('approve',x.request,{headers:{'X-Forwarded-For':'127.0.0.1'}})).status,403);
+    assert.equal((await management.request('approve',x.request)).status,403);
+    const grant=a.sessions.localPermissions(a.auth);
+    a.sessions.replaceLocalPermissions(a.auth,{request_id:crypto.randomUUID(),principal_id:a.logged.session.principal_id,
+      expected_revision:grant.revision,permissions:[...grant.permissions,'extension.read','extension.manage']});
+    approved=await manage('approve',x.request);
+  }
+  const token=a.token();
+  if(!compose)approved=await a.sessions.approveExtension(token,x.request);
   store.configureVirtualDevice({request_id:'resource',device_id:x.registered.device_id});
-  const plan=await a.sessions.planExtension(token,{request_id:'plan',slot_id:x.installed.slot.record.slot_id,
-    expected_slot_revision:x.installed.slot.slot_ref.revision,selection:{kind:'activate',source_installation_ref:null,
-      target_installation_ref:x.installed.installation_ref,reuse_content_ref:null,configuration_ref:x.config.configuration_ref}});
-  const activation=await a.sessions.activateExtension(token,{request_id:'activate',slot_id:plan.slot_ref.object_id,expected_slot_revision:plan.slot_ref.revision,
-    target_installation_ref:x.installed.installation_ref,approval_ref:approved.approval_ref,dependency_plan_ref:plan.plan_ref});
+  const planRequest={request_id:'plan',slot_id:x.installed.slot.record.slot_id,
+    expected_slot_revision:x.installed.slot.slot_ref.revision,selection:{kind:compose?'enable':'activate',source_installation_ref:null,
+      target_installation_ref:x.installed.installation_ref,reuse_content_ref:null,configuration_ref:x.config.configuration_ref}};
+  const plan=compose?await manage('plan',planRequest):await a.sessions.planExtension(token,planRequest);
+  const activationRequest={request_id:'activate',slot_id:plan.slot_ref.object_id,expected_slot_revision:plan.slot_ref.revision,
+    target_installation_ref:x.installed.installation_ref,approval_ref:approved.approval_ref,dependency_plan_ref:plan.plan_ref};
+  const activation=compose?await manage('enable',activationRequest):await a.sessions.activateExtension(token,activationRequest);
   let key,adopted=null,module=null,execution=null;
   if(compose){
     const request={activation_ref:activation.operation_ref,launch_id:input.launchId,containment_ref:input.containment};
-    await assert.rejects(store.workerLaunches.startLinux({...request,activation_ref:{...activation.operation_ref,digest:hash('unrelated-operation')}}),
-      {code:'extension_activation_operation_reference'});
-    const started=await store.workerLaunches.startLinux(request);
+    assert.deepEqual(await manage('lookup-plan',{request_id:planRequest.request_id}),plan);
+    assert.deepEqual(await manage('lookup-activation',{request_id:activationRequest.request_id}),activation);
+    assert.deepEqual(await manage('enable',activationRequest),activation);
+    const wrong=await management.request('start',{...request,activation_ref:{...activation.operation_ref,digest:hash('unrelated-operation')}});
+    assert.deepEqual(wrong,{status:409,body:{error:'extension_activation_operation_reference'}});
+    const started=await management.launch(request);
     adopted=started.binding;
     key={launch_id:request.launch_id,launch_intent_digest:adopted.binding.admission_receipt.launch_intent_digest};
     assert.equal(adopted.binding.gate_state,'closed');
     assert.equal(started.execution.worker_boot_id,adopted.binding.admission_receipt.member_boot_id);
-    assert.deepEqual(await store.workerLaunches.startLinux(request),started);
+    assert.deepEqual(await manage('start',request),started);
   }else{
     const intent={...workerIntent(store,binding,x.host.content,approved,[x.registered.device_id]),launch_id:input.launchId,containment_ref:input.containment};
     const prepared=await store.workerLaunches.prepare(Buffer.from(JSON.stringify(intent)));

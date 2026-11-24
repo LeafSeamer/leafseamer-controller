@@ -5,6 +5,7 @@ import {contractSelection as selection} from './sdk/index.mjs';
 import {canonical} from './auth-clock-value.mjs';
 import {pairingFields} from './peer-pairing-value.mjs';
 import {localPairingLimit, localPairingOperations, localPairingPath, loopbackHost} from './local-pairing-admin.mjs';
+import {localExtensionOperations,localExtensionPath} from './local-extension-management.mjs';
 
 const routes = new Map([
   ['/auth/sessions', 'POST'], ['/auth/sessions/refresh', 'POST'],
@@ -105,7 +106,7 @@ function failure(error) {
 }
 
 // origin与sessions只能由可信本地启动装配。代理身份头不能开启认证入口。
-export function createAuthenticationHttp({serviceId, databaseInstanceId, serviceBootId, sessions = null, origin = null, onFailure = null, localPairing = null}) {
+export function createAuthenticationHttp({serviceId, databaseInstanceId, serviceBootId, sessions = null, origin = null, onFailure = null, localPairing = null, localExtension = null}) {
   const adapter = createHttpAdapter(selection);
   let site = null;
   if (origin !== null) {
@@ -244,7 +245,10 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
       else empty(res, status === 408 ? 408 : status === 400 ? 400 : 503);
     } finally { pending--; }
   }
-  async function serveLocalPairing(req, res) {
+  async function serveLocalManagement(req, res, extension) {
+    const prefix=extension?'local_extension':'local_pairing';
+    const operations=extension?localExtensionOperations:localPairingOperations;
+    const manage=extension?localExtension:localPairing;
     const respond = (status, value) => {
       if (res.destroyed || res.headersSent) return;
       const bytes = Buffer.from(canonical(value));
@@ -258,15 +262,15 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
       !loopbackHost(req.socket.localAddress) || req.headers.host !== site.host || req.headers.origin !== origin ||
       req.headers['sec-fetch-site'] === 'cross-site' || req.headers.forwarded !== undefined ||
       Object.keys(req.headers).some(key => key.startsWith('x-forwarded-'))) {
-      respond(403, {error: 'local_pairing_origin'}); return;
+      respond(403, {error: prefix+'_origin'}); return;
     }
     const length = Number(req.headers['content-length']);
-    if (length > localPairingLimit) { respond(413, {error: 'local_pairing_size'}); return; }
+    if (length > localPairingLimit) { respond(413, {error: prefix+'_size'}); return; }
     if (!Number.isInteger(length) || length < 1 || req.headers['content-type'] !== 'application/json' ||
       req.headers['transfer-encoding'] !== undefined || req.headers['content-encoding'] !== undefined) {
-      respond(400, {error: 'local_pairing_input'}); return;
+      respond(400, {error: prefix+'_input'}); return;
     }
-    if (pending >= maximumPending) { respond(429, {error: 'local_pairing_capacity'}); return; }
+    if (pending >= maximumPending) { respond(429, {error: prefix+'_capacity'}); return; }
     pending++;
     try {
       const auth = cookieInput(req);
@@ -276,22 +280,31 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
         const text = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
         body = JSON.parse(text);
         pairingFields(body, 'operation,request');
-        if (!localPairingOperations.includes(body.operation) || bytes.length !== length || canonical(body) !== text) throw new Error();
-      } catch { respond(400, {error: 'local_pairing_input'}); return; }
-      respond(200, await localPairing(auth, body.operation, body.request));
+        if (!operations.includes(body.operation) || bytes.length !== length || canonical(body) !== text) throw new Error();
+      } catch { respond(400, {error: prefix+'_input'}); return; }
+      respond(200, await manage(auth, body.operation, body.request));
     } catch (error) {
-      if (error === 400 || error === 408 || error === 413) respond(error, {error: 'local_pairing_input'});
-      else if (['session_invalid','session_expired'].includes(error.code)) respond(401, {error: 'local_pairing_session'});
-      else if (/^(?:peer_pairing|remote_authorization)_[a-z_]{1,59}$/.test(error.code)) {
+      if (error === 400 || error === 408 || error === 413) respond(error, {error: prefix+'_input'});
+      else if (['session_invalid','session_expired'].includes(error.code)) respond(401, {error: prefix+'_session'});
+      else if(extension&&/^(?:extension|worker_launch|worker_authorization)_[a-z_]{1,65}$/.test(error.code)){
+        const status=/^extension_management_(?:denied|recent_required)$/.test(error.code)?403:
+          error.code==='extension_management_not_found'?404:/_input$/.test(error.code)?422:
+          /_capacity$/.test(error.code)?429:/_(?:unavailable|integrity)$/.test(error.code)?503:409;
+        respond(status,{error:error.code});
+      }
+      else if (!extension&&/^(?:peer_pairing|remote_authorization)_[a-z_]{1,59}$/.test(error.code)) {
         const status = /_management(?:_changed)?$/.test(error.code) ? 403 :
           ['peer_pairing_input', 'remote_authorization_request'].includes(error.code) ? 422 : 409;
         respond(status, {error: error.code});
-      } else respond(503, {error: 'local_pairing_unavailable'});
+      } else respond(503, {error: prefix+'_unavailable'});
     } finally { pending--; }
   }
   return Object.freeze({handle(req, res) {
     if (req.url === localPairingPath && localPairing !== null) {
-      void serveLocalPairing(req, res).catch(() => empty(res, 503)); return true;
+      void serveLocalManagement(req, res, false).catch(() => empty(res, 503)); return true;
+    }
+    if (req.url === localExtensionPath && localExtension !== null) {
+      void serveLocalManagement(req, res, true).catch(() => empty(res, 503)); return true;
     }
     const pathname = req.url?.split('?')[0];
     const method = routes.get(pathname) ?? (/^\/api\/v1\/commands\/[^/]+(?:\/evidence(?:\/[^/]+\/revisions\/[^/]+)?)?$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/(?:control|capabilities|scene-catalog)$/.test(pathname)||/^\/api\/v1\/control-operations\/[^/]+$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+$/.test(pathname)?'GET':

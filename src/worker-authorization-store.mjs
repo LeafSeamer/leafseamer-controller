@@ -121,8 +121,9 @@ export function workerAuthorizationStore({db,service,bootId,isOpen,core,prepared
    need(selected.value.intent.containment_ref.backend==='linux_cgroup_v2'&&typeof source.prepareLinuxWorkerContent==='function','source');
    const proof=await source.prepareLinuxWorkerContent(copy);db.transaction(()=>current(copy)).immediate();return proof;
   });},
-  create(key,proof){const copy=fixed(key),fixedProof=structuredClone(proof);need(fixedProof&&Object.keys(fixedProof).sort().join(',')==='load_id,materialization_challenge_id,materialization_evidence_id','create_input');
-   return enqueue(async()=>{const authorization=await issue(copy);db.transaction(()=>current(copy)).immediate();return source.createWorker({...fixedProof,key:copy,authorization});});},
+  create(key,proof,assertOperator=()=>{}){const copy=fixed(key),fixedProof=structuredClone(proof);need(fixedProof&&Object.keys(fixedProof).sort().join(',')==='load_id,materialization_challenge_id,materialization_evidence_id','create_input');
+   return enqueue(async()=>{assertOperator();const authorization=await issue(copy);db.transaction(()=>current(copy)).immediate();
+    assertOperator();return source.createWorker({...fixedProof,key:copy,authorization});});},
   deny(key){const copy=fixed(key);denied.add(copy.launch_id);return enqueue(async()=>{db.transaction(()=>deny(copy.launch_id,'requested')).immediate();return sync();});},
   synchronize(){return enqueue(sync);},
   domain(){connected();return freeze({ref:structuredClone(receipt.domain_ref),tick:String(clock.tick())});},
