@@ -6,8 +6,8 @@ import {canonical,context,digest,fields,same} from './auth-clock-value.mjs';
 import {clockInteger,openNativeClock} from './native-clock.mjs';
 import {pairingUuid} from './peer-pairing-value.mjs';
 import {observeLinuxChronyHealth} from './linux-chrony-health.mjs';
+import {clockEvidenceFormat as evidenceFormat} from './clock-evidence-envelope.mjs';
 
-const evidenceFormat='leafseamer.authentication-clock-evidence/1';
 const need=(ok,code)=>{if(!ok)throw Object.assign(new Error(code),{code});};
 const hash=value=>typeof value==='string'&&/^sha256:[0-9a-f]{64}$/.test(value);
 

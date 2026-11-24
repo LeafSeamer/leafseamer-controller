@@ -160,7 +160,7 @@ try {
       const policy=validateBootstrapPolicy(JSON.parse(rawPolicy));
       if(canonicalize(policy)!==rawPolicy)throw new BootstrapError('bootstrap_policy');
       if (options['--clock-evidence-profile'] !== undefined) {
-        launch.linuxClockEvidenceProfile=readLinuxClockEvidenceProfile(options['--clock-evidence-profile'],policy);
+        launch.linuxClockEvidenceProfile=readLinuxClockEvidenceProfile(options['--clock-evidence-profile'],policy,'controller');
       }
       linuxChannel=openLinuxCoreBootstrap(policy,'controller');
       launch.coreBootstrap=identity=>linuxChannel.accept({identity,source:openNativeClock()});

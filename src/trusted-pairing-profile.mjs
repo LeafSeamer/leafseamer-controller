@@ -3,11 +3,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {isIP} from 'node:net';
 import {setTimeout as delay} from 'node:timers/promises';
-import {canonical,context,fields} from './auth-clock-value.mjs';
+import {context,fields} from './auth-clock-value.mjs';
 import {pairingUuid} from './peer-pairing-value.mjs';
 import {validateBootstrapPolicy} from './core-bootstrap.mjs';
+import {authenticationClockChallenge, verifyClockEvidence} from './clock-evidence-envelope.mjs';
 
-const evidenceFormat = 'leafseamer.authentication-clock-evidence/1';
 const hash = value => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value);
 const read = (file, limit = 65536) => {
   if (typeof file !== 'string' || !path.isAbsolute(file) || !fs.statSync(file).isFile()) throw new Error('local_file');
@@ -92,24 +92,6 @@ export function readTrustedPairingProfile(file, host, port) {
   } catch { throw Object.assign(new Error('pairing_profile_invalid'), {code: 'pairing_profile_invalid'}); }
 }
 
-export function verifyClockEvidence(bytes, key) {
-  const packet = json(bytes);
-  fields(packet, ['format', 'evidence', 'signature']);
-  const {format, evidence, signature} = packet;
-  need(format === evidenceFormat && canonical(packet) === bytes.toString('utf8') &&
-    typeof signature === 'string' && /^[A-Za-z0-9_-]{86}$/.test(signature), 'pairing_clock_encoding');
-  const signed = Buffer.from(signature, 'base64url');
-  need(signed.toString('base64url') === signature &&
-    crypto.verify(null, Buffer.from(format + '\0' + canonical(evidence)), key, signed), 'pairing_clock_signature');
-  return evidence;
-}
-
-export function authenticationClockChallenge(scope, policy, domain, source, capture) {
-  return {event: 'authentication_clock_challenge', ...scope, database_instance_id: policy.database_instance_id,
-    native_binary_digest: source.artifactDigest, continuity: capture.continuity, tick_ns: String(source.tick()),
-    clock_domain_id: domain.clock_domain_id, descriptor_digest: domain.descriptor_digest};
-}
-
 export async function openTrustedControllerClock(profile, {scope, source}, binding, supervision, emit) {
   const {policy, clock} = profile, domain = binding.descriptor;
   supervision.assertCurrent();
@@ -129,7 +111,7 @@ export async function openTrustedControllerClock(profile, {scope, source}, bindi
       evidence.runtime.continuity === capture.continuity, 'pairing_clock_domain');
     return evidence;
   }
-  emit(authenticationClockChallenge(scope, policy, domain, source, capture));
+  emit(authenticationClockChallenge(scope, policy.database_instance_id, source, capture, domain));
   const deadline = performance.now() + 10000;
   for (;;) {
     if (current(true)) return {read: () => current()};

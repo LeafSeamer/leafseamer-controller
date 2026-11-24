@@ -4,7 +4,7 @@ import path from 'node:path';
 import {canonical, context, fields, need} from './auth-clock-value.mjs';
 import {clockInteger} from './native-clock.mjs';
 import {pairingUuid} from './peer-pairing-value.mjs';
-import {authenticationClockChallenge, verifyClockEvidence} from './trusted-pairing-profile.mjs';
+import {authenticationClockChallenge, verifyClockEvidence} from './clock-evidence-envelope.mjs';
 
 const flags = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK;
 const json = bytes => JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
@@ -40,14 +40,14 @@ function read(file, limit) {
   } finally { fs.closeSync(fd); }
 }
 
-export function readLinuxClockEvidenceProfile(file, policy) {
+export function readLinuxClockEvidenceProfile(file, policy, role) {
   try {
     need(process.platform === 'linux', 'linux_clock_evidence_platform');
     const profile = json(read(file, 16384));
     fields(profile, ['format', 'service_id', 'database_instance_id', 'policy_digest', 'public_key_file', 'exchange_directory']);
     const {format, service_id, database_instance_id, policy_digest, public_key_file, exchange_directory} = profile;
     pairingUuid(service_id); pairingUuid(database_instance_id);
-    need(format === 'leafseamer.controller-linux-clock-evidence-profile/1' && service_id === policy.service_id &&
+    need((role === 'controller' || role === 'seamer') && format === 'leafseamer.'+role+'-linux-clock-evidence-profile/1' && service_id === policy.service_id &&
       database_instance_id === policy.database_instance_id && typeof policy_digest === 'string' &&
       policy_digest.length === 71 && /^sha256:[0-9a-f]{64}$/.test(policy_digest), 'linux_clock_evidence_profile');
     protectedDirectory(exchange_directory);
@@ -75,7 +75,7 @@ export function inspectLinuxClockEvidence(profile, scope, {policy, binding}, sou
   need(descriptor.clock_backend_id === 'linux_boottime' && descriptor.authority_service_id === scope.service_id &&
     receipt.containment_ref.backend === 'linux_cgroup_v2' && receipt.gate_state === 'closed', 'linux_clock_evidence_binding');
   pairingUuid(scope.service_boot_id);
-  const challenge = authenticationClockChallenge(scope, policy, descriptor, source, source.capture());
+  const challenge = authenticationClockChallenge(scope, policy.database_instance_id, source, source.capture(), descriptor);
   const directory = profile.exchange_directory;
   publishChallenge(directory, challenge);
   const evidenceFile = path.join(directory, 'evidence-'+scope.service_boot_id+'.json');

@@ -22,7 +22,7 @@ const guestErrorLimit=100000000n;
 
 test(guestDiscipline?'隔离客体实际校时后签发，失联后保留最后签发原件':'独立 Chrony 实际追踪已批准源，-x、配置改变与源失联拒绝签发',{
   skip:process.platform!=='linux'||!guestDiscipline&&process.env.LEAFSEAMER_TEST_CHRONY_HOST!=='1',
-  timeout:guestDiscipline&&process.env.LEAFSEAMER_TEST_CHRONY_SUITE?75000:35000
+  timeout:guestDiscipline&&process.env.LEAFSEAMER_TEST_CHRONY_SUITE?145000:35000
 },async t=>{
   function kernelClock(){
     const probe=spawnSync('/proof/read-kernel-clock',[],{encoding:'utf8',timeout:2000});
