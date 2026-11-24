@@ -7,6 +7,7 @@ import {startClockMonitor} from './clock-monitor.mjs';
 import {startAuthenticationClock} from './auth-clock.mjs';
 import {inspectLinuxClockEvidence, waitForLinuxAuthentication} from './linux-clock-evidence.mjs';
 import {createAuthenticationHttp} from './auth-http.mjs';
+import {localPairingPath} from './local-pairing-admin.mjs';
 import {loadGuiAssets} from './gui-assets.mjs';
 import {startPeerPairingTransport} from './peer-pairing-transport.mjs';
 import {startOutboxDelivery} from './session-denial-delivery.mjs';
@@ -19,12 +20,18 @@ import {referenceTimeScheduler} from './reference-time-scheduler.mjs';
 import canonicalize from './runtime/canonicalize.mjs';
 import {createHash} from 'node:crypto';
 
-export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null, guiManifestSha256 = null, coreBootstrap = null, pairing = null, referenceTimeAuthorization = null, localPairingManagement = false, standalone = false, protectedIngressIdentity = null, linuxClockEvidenceProfile = null} = {}) {
+export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null, guiManifestSha256 = null, coreBootstrap = null, pairing = null, referenceTimeAuthorization = null, localPairingManagement = false, standalone = false, protectedIngressIdentity = null, linuxClockEvidenceProfile = null, composePairingAdmin = null} = {}) {
   const protectedIngress = protectedIngressIdentity !== null;
+  const composePairing = composePairingAdmin !== null;
+  if (composePairing && (!protectedIngress || !pairing || !localPairingManagement || !coreBootstrap ||
+      linuxClockEvidenceProfile?.authentication !== true || composePairingAdmin.origin !== 'https://127.0.0.1:8444' ||
+      !composePairingAdmin.cert || !composePairingAdmin.key || pairing.host !== host || pairing.port !== 9443 || pairing.network !== true)) {
+    throw new Error('pairing_profile_compose');
+  }
   if (protectedIngress) {
-    if (process.platform !== 'linux' || !tls || authenticationProvider || guiDirectory || pairing ||
+    if (process.platform !== 'linux' || !tls || authenticationProvider || guiDirectory || (!composePairing && (pairing || localPairingManagement)) ||
         (linuxClockEvidenceProfile !== null && (!coreBootstrap || linuxClockEvidenceProfile.authentication !== true)) ||
-        referenceTimeAuthorization || localPairingManagement || standalone) throw new Error('protected_ingress_options');
+        referenceTimeAuthorization || standalone) throw new Error('protected_ingress_options');
     pairingFields(protectedIngressIdentity, 'database_instance_id,service_id');
     pairingUuid(protectedIngressIdentity.service_id);
     pairingUuid(protectedIngressIdentity.database_instance_id);
@@ -93,10 +100,10 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       clock = {status: () => ({state: 'faulted', qualified: false}), stop() {}};
     }
   }
-  let server, referenceTimePolls = null, referenceSchedule = null, referencePublication = null, referenceWatcher = null, peerTransport = null;
+  let server, localPairingServer, referenceTimePolls = null, referenceSchedule = null, referencePublication = null, referenceWatcher = null, peerTransport = null;
   let endorsementRevocationDelivery = null, runProtectionDelivery = null, closing = false;
-  const closeHttp = () => !server?.listening ? Promise.resolve() : new Promise((resolve, reject) => {
-    server.close(error => error ? reject(error) : resolve()); server.closeAllConnections();
+  const closeHttp = listener => !listener?.listening ? Promise.resolve() : new Promise((resolve, reject) => {
+    listener.close(error => error ? reject(error) : resolve()); listener.closeAllConnections();
   });
   const cleanup = async () => {
     closing = true;
@@ -106,7 +113,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     let referenceFailure;
     try { referencePublication?.invalidate?.('shutdown'); }
     catch(error) { referenceFailure=error; }
-    const results = await Promise.allSettled([scheduleStopped,closeHttp(), endorsementRevocationDelivery?.close(),
+    const results = await Promise.allSettled([scheduleStopped,closeHttp(server),closeHttp(localPairingServer), endorsementRevocationDelivery?.close(),
       runProtectionDelivery?.close(), peerTransport?.close()]);
     for (const stop of [() => clock?.stop(), () => authentication?.stop(), () => storage.close(), () => timeProviderLink?.close(), () => supervision?.close()]) {
       try { stop(); } catch (reason) { results.push({status: 'rejected', reason}); }
@@ -229,9 +236,21 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       assertRuntimeCurrent();
       return result;
     }
-    const authenticationHttp = createAuthenticationHttp({serviceId: storage.identity.service_id, databaseInstanceId: storage.identity.database_instance_id,
-      serviceBootId: storage.serviceBootId, sessions, origin: tls?.origin ?? null, localPairing: localPairingManagement ? managePairing : null});
+    const authenticationScope = {serviceId: storage.identity.service_id, databaseInstanceId: storage.identity.database_instance_id,
+      serviceBootId: storage.serviceBootId, sessions};
+    const authenticationHttp = createAuthenticationHttp({...authenticationScope, origin: tls?.origin ?? null,
+      localPairing: localPairingManagement && !composePairing ? managePairing : null});
     const options = {maxHeaderSize: 16384, requestTimeout: 5000, headersTimeout: 5000, keepAliveTimeout: 1000};
+    if (composePairing) {
+      const localHttp = createAuthenticationHttp({...authenticationScope, origin: composePairingAdmin.origin, localPairing: managePairing});
+      localPairingServer = https.createServer({...options,key:composePairingAdmin.key,cert:composePairingAdmin.cert,minVersion:'TLSv1.2'}, (req,res) => {
+        try { assertRuntimeCurrent(); } catch { res.writeHead(503,{'Cache-Control':'no-store',Connection:'close'});res.end();return; }
+        if ([localPairingPath,'/auth/sessions','/auth/sessions/current'].includes(req.url) && localHttp.handle(req,res)) return;
+        res.writeHead(404,{'Cache-Control':'no-store',Connection:'close'});res.end();
+      });
+      localPairingServer.maxRequestsPerSocket=100;
+      localPairingServer.on('clientError',(_error,socket)=>socket.destroy());
+    }
     const listener = (req, res) => {
     try { assertRuntimeCurrent(); } catch { res.writeHead(503, {'Cache-Control': 'no-store', Connection: 'close'}); res.end(); return; }
     res.setHeader('Cache-Control', 'no-store');
@@ -343,6 +362,9 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       }
       supervision?.assertCurrent();
     }
+    if(localPairingServer)await new Promise((resolve,reject)=>{
+      localPairingServer.once('error',reject);localPairingServer.listen(8444,'127.0.0.1',resolve);
+    });
     runProtectionDelivery=startRunProtectionDelivery({endorsements:sessions?.runApprovalEndorsements,workerLaunches:storage.workerLaunches,
       assertCurrent(){if(closing)throw new Error('controller_closing');assertRuntimeCurrent();}});
     assertRuntimeCurrent();
