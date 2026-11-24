@@ -110,7 +110,7 @@ try{
  replaceFile(output,canonical({format:evidenceFormat,evidence,signature}));
  process.stdout.write(canonical({state:'published',service_id:profile.service_id,service_boot_id:evidence.runtime.service_boot_id})+'\n');
 }catch(error){
- const code=/^(?:(?:clock_evidence_|auth_clock_)[a-z_]+|clock_wall_(?:discontinuity|monitor_unavailable))$/.test(error.code??'')?error.code:'clock_evidence_failed';
+ const code=/^(?:(?:clock_evidence_|auth_clock_)[a-z_]+|clock_(?:wall|suspend)_(?:discontinuity|monitor_unavailable))$/.test(error.code??'')?error.code:'clock_evidence_failed';
  process.stderr.write(JSON.stringify({error:code})+'\n');
  process.exitCode=1;
 }

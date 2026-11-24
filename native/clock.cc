@@ -22,6 +22,10 @@ struct State {
 #else
   int realtime_timer = -1;
   const char* realtime_fault = "clock_wall_monitor_unavailable";
+  bool suspend_baseline = false;
+  int64_t suspend_offset_low = 0;
+  int64_t suspend_offset_high = 0;
+  const char* suspend_fault = nullptr;
 #endif
 };
 bool ok(napi_env env, napi_status status) {
@@ -78,6 +82,38 @@ bool ns(std::string& value) {
   return true;
 }
 bool valid(const timespec& value) { return value.tv_sec >= 0 && value.tv_nsec >= 0 && value.tv_nsec < 1000000000; }
+
+bool read_monotonic_ns(clockid_t clock, int64_t& result) {
+  constexpr int64_t ns_per_second = 1000000000;
+  timespec value{};
+  if (clock_gettime(clock, &value) != 0 || !valid(value) ||
+      value.tv_sec > (INT64_MAX - value.tv_nsec) / ns_per_second) return false;
+  result = static_cast<int64_t>(value.tv_sec) * ns_per_second + value.tv_nsec;
+  return true;
+}
+
+const char* check_suspend_monitor(State& state) {
+  if (state.suspend_fault) return state.suspend_fault;
+  int64_t before = 0, boot = 0, after = 0;
+  if (!read_monotonic_ns(CLOCK_MONOTONIC, before) || !read_monotonic_ns(CLOCK_BOOTTIME, boot) ||
+      !read_monotonic_ns(CLOCK_MONOTONIC, after) || after < before || after - before > 20000000) {
+    state.suspend_fault = "clock_suspend_monitor_unavailable";
+    return state.suspend_fault;
+  }
+  // The contemporaneous BOOTTIME - MONOTONIC offset lies in this interval.
+  const int64_t low = boot - after, high = boot - before;
+  if (!state.suspend_baseline) {
+    state.suspend_offset_low = low;
+    state.suspend_offset_high = high;
+    state.suspend_baseline = true;
+  } else if (low > state.suspend_offset_high || high < state.suspend_offset_low) {
+    state.suspend_fault = "clock_suspend_discontinuity";
+  } else {
+    if (low > state.suspend_offset_low) state.suspend_offset_low = low;
+    if (high < state.suspend_offset_high) state.suspend_offset_high = high;
+  }
+  return state.suspend_fault;
+}
 #endif
 void finalize(napi_env, void* data, void*) {
   auto* state = static_cast<State*>(data);
@@ -109,6 +145,7 @@ napi_value capture(napi_env env, napi_callback_info) {
       !number(env, result, "continuity_before", before_generation) || !number(env, result, "continuity_after", after_generation) ||
       !text(env, result, "continuity_monitor", state->notifications_available ? "power_notifications" : "unavailable")) return nullptr;
 #else
+  if (const char* fault = check_suspend_monitor(*state)) return fail(env, fault);
   if (const char* fault = check_realtime_monitor(*state)) return fail(env, fault);
   std::string namespace_before, namespace_after;
   if (!ns(namespace_before)) return fail(env, "native_clock_namespace");
@@ -116,6 +153,7 @@ napi_value capture(napi_env env, napi_callback_info) {
   if (clock_gettime(CLOCK_BOOTTIME, &before) != 0 || clock_gettime(CLOCK_REALTIME, &wall) != 0 ||
       clock_gettime(CLOCK_BOOTTIME, &after) != 0 || !valid(before) || !valid(wall) || !valid(after)) return fail(env, "native_clock_read");
   if (!ns(namespace_after)) return fail(env, "native_clock_namespace");
+  if (const char* fault = check_suspend_monitor(*state)) return fail(env, fault);
   if (const char* fault = check_realtime_monitor(*state)) return fail(env, fault);
   if (!text(env, result, "platform", "linux") || !number(env, result, "before_sec", static_cast<uint64_t>(before.tv_sec)) ||
       !number(env, result, "before_nsec", static_cast<uint64_t>(before.tv_nsec)) ||
@@ -151,6 +189,7 @@ napi_value initialize(napi_env env, napi_value exports) {
   state->notifications_available = PowerRegisterSuspendResumeNotification(DEVICE_NOTIFY_CALLBACK, &subscriber, &state->notification) == ERROR_SUCCESS;
 #else
   arm_realtime_monitor(*state);
+  check_suspend_monitor(*state);
 #endif
   if (!ok(env, napi_set_instance_data(env, state, finalize, nullptr))) { finalize(env, state, nullptr); return nullptr; }
   napi_property_descriptor properties[] = {

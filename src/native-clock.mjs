@@ -47,7 +47,7 @@ export function openNativeClock() {
     function capture() {
       try { return normalizeCapture(native.capture()); }
       catch (error) {
-        if (error?.code === 'clock_wall_discontinuity' || error?.code === 'clock_wall_monitor_unavailable') throw new ClockError(error.code);
+        if (/^clock_(?:wall|suspend)_(?:discontinuity|monitor_unavailable)$/.test(error?.code??'')) throw new ClockError(error.code);
         throw error;
       }
     }
