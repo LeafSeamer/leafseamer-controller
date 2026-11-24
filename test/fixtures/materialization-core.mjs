@@ -557,19 +557,25 @@ try{
                 fs.writeFileSync(input.gui.obs.opened,'ready');
                 const {body,response}=JSON.parse(await obsBrowserMarker(input.gui.obs.submitted));
                 if(canonicalize(body.parameters)!==canonicalize(request.parameters))throw new Error('fixture_obs_browser_target');
-                await completeObsCut(body,1,response);
+                if(input.gui.obs.recovery){
+                  manager.real.refresh();
+                  const replayed=await commandHttp('POST',route,body);
+                  report({event:'obs-cut-browser-rejected',response,replayed});
+                }else await completeObsCut(body,1,response);
                 fs.writeFileSync(input.gui.obs.settled,'settled');
                 await obsBrowserMarker(input.gui.obs.checked);
               }else await completeObsCut(request,1);
-              const original=ready.entries.find(entry=>entry.obs_scene_uuid===second.body.value.program_scene_uuid);
-              const next={...request,idempotency_key:crypto.randomUUID(),parameters:{scene_ref:{...scene_ref,scene_id:original.scene_id}}};
-              const blocked=await commandHttp('POST',route,next);
-              report({event:'obs-cut-protected',blocked,state:executionClient.state});
-              const successor=await openSuccessorGate(device,{checkObsSample:true});
-              report({event:'obs-cut-reopened',...successor,state:executionClient.state});
-              await completeObsCut(next,2);
-              const sample=await moduleClient.captureBaseline(device);
-              report({event:'obs-cut-final-sample',sample:sample.body.value});
+              if(!input.gui?.obs?.recovery){
+                const original=ready.entries.find(entry=>entry.obs_scene_uuid===second.body.value.program_scene_uuid);
+                const next={...request,idempotency_key:crypto.randomUUID(),parameters:{scene_ref:{...scene_ref,scene_id:original.scene_id}}};
+                const blocked=await commandHttp('POST',route,next);
+                report({event:'obs-cut-protected',blocked,state:executionClient.state});
+                const successor=await openSuccessorGate(device,{checkObsSample:true});
+                report({event:'obs-cut-reopened',...successor,state:executionClient.state});
+                await completeObsCut(next,2);
+                const sample=await moduleClient.captureBaseline(device);
+                report({event:'obs-cut-final-sample',sample:sample.body.value});
+              }
             }
           }
         }
