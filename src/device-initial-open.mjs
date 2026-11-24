@@ -5,7 +5,7 @@ import {IdentityError} from './identity-crypto.mjs';
 import {seal,ref,digest,same,checked} from './auth-clock-value.mjs';
 import {readControlSource} from './device-control-source.mjs';
 import {readInitialFence} from './device-execution-control.mjs';
-import {obsCutInitialResourceFormat} from './device-initial-resource.mjs';
+import {obsCutInitialResourceFormat,obsCutSuccessorProvider} from './device-initial-resource.mjs';
 import {readCommandClosure} from './command-settlement.mjs';
 import {memoExecutionRead,withExecutionReadView} from './execution-read-view.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('initial_open_'+code);};
@@ -20,7 +20,7 @@ const decode=cacheVerifiedDocument((text,hash)=>{const v=checked(JSON.parse(text
 export function deviceInitialOpen({db,writer,resourceCurrent,resourceRead,domain,attach}){
  function derive(id,source,selected){
   need(db.inTransaction,'writer');const s=source.value,i=s.inventory,b=s.binding;
-  const successor=s.format==='leafseamer-device-resource-successor/1',obs=s.format===obsCutInitialResourceFormat;
+  const successor=s.format==='leafseamer-device-resource-successor/1',obs=s.format===obsCutInitialResourceFormat||s.provider===obsCutSuccessorProvider;
   need((obs||successor||s.format==='leafseamer-initial-resource-source/2')&&s.deny_snapshots&&
    BigInt(s.selected_tick_ns)<=BigInt(selected)&&BigInt(selected)<BigInt(s.expires_tick_ns),'source');
   const revision=db.prepare('SELECT revision FROM control_state_source WHERE source_id=? AND device_id=?').pluck().get(i.control_state_ref.id,b.device_id);

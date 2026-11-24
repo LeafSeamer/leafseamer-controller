@@ -108,9 +108,9 @@ async function releaseAfterCommands(device){
  report({event:'command-control-released',before,accepted,operation,replay,control:manager.sessions.getControl(token,device)});
  if(operation.state!=='effective')throw Object.assign(new Error('command_control_not_effective'),{code:'command_control_not_effective'});
 }
-async function runSuccessor(device,parameters={value:23},contextId=commandRequest.context_id){
+async function openSuccessorGate(device,{checkObsSample=false}={}){
  const missing=await commandHttp('GET','/api/v1/commands/00000000-0000-4000-8000-000000000001');if(missing.status!==404)throw new Error('successor_http_connection');
- const baseline=await moduleClient.captureBaseline(device);manager.real.refresh();
+ let baseline=checkObsSample?null:await moduleClient.captureBaseline(device);manager.real.refresh();
  const manual=await manualSourceFor(commandToken,device),challenge=manager.sessions.beginDeviceEvaluatorChallenge({request_id:crypto.randomUUID(),policy_ref:evaluator.policy_ref,device_id:device});
  const evaluated=manager.sessions.completeDeviceEvaluatorChallenge({request_id:crypto.randomUUID(),challenge_ref:{id:challenge.id,revision:'1',digest:challenge.digest},nonce:challenge.nonce,credential_id:evaluator.credential_id,secret:evaluator.secret});
  const context=manager.sessions.currentManualAuthorizationContext({device_id:device,manual_source_ref:manual.ref,evaluator_source_ref:evaluated.ref});
@@ -125,10 +125,20 @@ async function runSuccessor(device,parameters={value:23},contextId=commandReques
  const evidence=manager.sessions.selectDeviceAuthorizationEvidence({request_id:crypto.randomUUID(),device_id:device,manual_source_ref:nextManual.ref,evaluator_source_ref:nextEvaluator.ref,
   expected_state_ref:selected.ref,expected_evidence_ref:firstEvidence.ref});
  report({event:'successor-stage',stage:'authorization-selected',remaining_ms:Number((BigInt(evidence.value.requirement.expires_tick_ns)-clock.tick())/1000000n)});
- const resource=manager.sessions.selectInitialDeviceResources({request_id:crypto.randomUUID(),device_id:device,expected_evidence_ref:evidence.ref});
+ const select=()=>manager.sessions.selectInitialDeviceResources({request_id:crypto.randomUUID(),device_id:device,expected_evidence_ref:evidence.ref});
+ if(checkObsSample){
+  try{select();throw new Error('obs_cut_stale_sample_accepted');}
+  catch(error){if(error.code!=='initial_resource_observed_write')throw error;report({event:'obs-cut-stale-reopen',code:error.code});}
+  baseline=await moduleClient.captureBaseline(device);
+ }
+ const resource=select();
  const opening=manager.sessions.prepareInitialDeviceOpen({request_id:crypto.randomUUID(),device_id:device,expected_resource_ref:resource.ref});
  report({event:'successor-resource',baseline,resource,opening,remaining_ms:Number((BigInt(opening.value.plan.expires_tick_ns)-clock.tick())/1000000n)});
  const opened=await executionClient.initialOpen(opening.ref,{ready:true});report({event:'successor-stage',stage:'opened',remaining_ms:Number((BigInt(opening.value.plan.expires_tick_ns)-clock.tick())/1000000n)});
+ return {baseline,resource,opening,opened};
+}
+async function runSuccessor(device,parameters={value:23},contextId=commandRequest.context_id){
+ const {opening,opened}=await openSuccessorGate(device);
  const request={...commandRequest,parameters,context_id:contextId,idempotency_key:crypto.randomUUID(),dispatch:{mode:'immediate',max_queue_ms:10000}};
  const accepted=await commandHttp('POST','/api/v1/commands',request);
  if(accepted.status!==202)throw Object.assign(new Error('successor_http_admission'),{code:'successor_http_admission',cause:accepted.body});
@@ -142,6 +152,19 @@ async function runSuccessor(device,parameters={value:23},contextId=commandReques
  const id=accepted.body.command_ref.object_id,cleaned=await business.workerLaunches.whenCommandCleaned(id),closed=await business.workerLaunches.whenCommandSettled(id);
  const current=await commandHttp('GET','/api/v1/commands/'+id),replayed=await commandHttp('POST','/api/v1/commands',request);
  report({event:'successor-command',opened,accepted,current,replayed,closed,cleaned,state:executionClient.state});
+}
+async function completeObsCut(request,ordinal){
+ const route='/api/v1/commands',admitted=await commandHttp('POST',route,request);
+ report({event:'obs-cut-command-admission',admitted,ordinal});
+ if(admitted.status!==202)throw new Error('obs_cut_command_http');
+ const id=admitted.body.command_ref.object_id;
+ for(const [stage,method] of [['encoding','whenCommandEncoded'],['final-admission','whenCommandFinalized'],['guard','whenCommandGuarded'],['dispatch','whenCommandDispatched'],['settlement','whenCommandSettled'],['cleanup','whenCommandCleaned']]){
+  try{await business.workerLaunches[method](id);}catch(error){report({event:'obs-cut-command-failed',ordinal,stage,code:error.code,cause:error.cause?.code});throw error;}
+ }
+ manager.real.refresh();
+ const finished=await commandHttp('GET',route+'/'+id),evidence=await commandHttp('GET',route+'/'+id+'/evidence?state_revision=5&limit=5'),
+  replayed=await commandHttp('POST',route,request),control=manager.sessions.getControl(commandToken,request.device_id);
+ report({event:'obs-cut-command-result',ordinal,finished,evidence,replayed,control});
 }
 async function openOrdinaryGate(device,automatic,token=commandToken){
  await executionClient.initialFence(device);
@@ -520,18 +543,17 @@ try{
               const request={...commandRequest,action_id:'obs.program_scene.set',parameters:{scene_ref},required_completion:'effect_verified',
                 idempotency_key:crypto.randomUUID(),dispatch:{mode:'immediate',max_queue_ms:10000}};
               const stale=await commandHttp('POST',route,{...request,parameters:{scene_ref:{...scene_ref,binding_revision:'1'}}});
-              const admitted=await commandHttp('POST',route,request);
-              report({event:'obs-cut-command-admission',admitted,stale});
-              if(admitted.status!==202)throw new Error('obs_cut_command_http');
-              const id=admitted.body.command_ref.object_id;
-              for(const [stage,method] of [['encoding','whenCommandEncoded'],['final-admission','whenCommandFinalized'],['guard','whenCommandGuarded'],['dispatch','whenCommandDispatched'],['settlement','whenCommandSettled'],['cleanup','whenCommandCleaned']]){
-                try{await business.workerLaunches[method](id);}catch(error){report({event:'obs-cut-command-failed',stage,code:error.code,cause:error.cause?.code});throw error;}
-              }
+              report({event:'obs-cut-stale-reference',stale});
+              await completeObsCut(request,1);
+              const original=ready.entries.find(entry=>entry.obs_scene_uuid===second.body.value.program_scene_uuid);
+              const next={...request,idempotency_key:crypto.randomUUID(),parameters:{scene_ref:{...scene_ref,scene_id:original.scene_id}}};
+              const blocked=await commandHttp('POST',route,next);
+              report({event:'obs-cut-protected',blocked,state:executionClient.state});
+              const successor=await openSuccessorGate(device,{checkObsSample:true});
+              report({event:'obs-cut-reopened',...successor,state:executionClient.state});
+              await completeObsCut(next,2);
               const sample=await moduleClient.captureBaseline(device);
-              manager.real.refresh();
-              const finished=await commandHttp('GET',route+'/'+id),evidence=await commandHttp('GET',route+'/'+id+'/evidence?state_revision=5&limit=5'),
-                replayed=await commandHttp('POST',route,request),control=manager.sessions.getControl(commandToken,device);
-              report({event:'obs-cut-command-result',finished,evidence,replayed,control,sample:sample.body.value});
+              report({event:'obs-cut-final-sample',sample:sample.body.value});
             }
           }
         }
