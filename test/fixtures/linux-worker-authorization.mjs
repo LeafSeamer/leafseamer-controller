@@ -12,10 +12,11 @@ import {openNativeClock} from '../../dist/native-clock.mjs';
 import {setup} from './extension-capabilities.mjs';
 import {authenticated} from './extension-auth.mjs';
 import {workerIntent} from './core-binding.mjs';
-import {hash} from './extension-installation.mjs';
+import {hash,inspect} from './extension-installation.mjs';
 import {createAuthenticationHttp} from '../../dist/auth-http.mjs';
 import {createLocalExtensionManagement,localExtensionPath} from '../../dist/local-extension-management.mjs';
 import {runLocalExtensionAdmin} from '../../dist/local-pairing-admin.mjs';
+import {commandPermissions,prepareManualSimulator,writeManualSimulator} from './linux-simulator-command.mjs';
 
 const compose=process.argv[2]==='contained-compose-linux';
 const inputFile=compose?path.join('/var/lib/leafseamer','worker-test.json'):process.argv[2];
@@ -53,7 +54,7 @@ async function localManagement(store,{sessions,auth},assertCurrent){
   };
 }
 try{
-  const clock=openNativeClock(),channel=openLinuxCoreBootstrap(input.policy,'controller',{compose,workerControl:true,
+  const clock=openNativeClock({linuxWithoutSystemSleep:compose}),channel=openLinuxCoreBootstrap(input.policy,'controller',{compose,workerControl:true,
     workerChannelDirectory:input.channelDirectory,installationRead:compose});
   fixture.after(()=>channel.close());
   const {binding,supervision,policy,extensionInstallationSource}=await channel.accept({identity:input.policy,source:clock});
@@ -88,7 +89,8 @@ try{
   store.extensionInstallations.bindRuntimeSource(supervision);
   store.workerLaunches.runtime.bindSource(supervision);
   const start=store.workerLaunches.authorization;start.bindSource(supervision);
-  const a=await authenticated(fixture,x.f,{grant:!compose});
+  const a=await authenticated(fixture,x.f,{grant:!compose,...(compose&&{
+    native:{source:clock,descriptor:binding.descriptor},sampleWindowPolicy:'authentication-clock-sample/2'})});
   const management=compose?await localManagement(store,a,supervision.assertCurrent):null;
   async function manage(operation,request){
     const result=await management.request(operation,request);
@@ -102,12 +104,14 @@ try{
     assert.equal((await management.request('approve',x.request)).status,403);
     const grant=a.sessions.localPermissions(a.auth);
     a.sessions.replaceLocalPermissions(a.auth,{request_id:crypto.randomUUID(),principal_id:a.logged.session.principal_id,
-      expected_revision:grant.revision,permissions:[...grant.permissions,'extension.read','extension.manage']});
+      expected_revision:grant.revision,permissions:[...new Set([...grant.permissions,'extension.read','extension.manage',...commandPermissions])]});
     approved=await manage('approve',x.request);
   }
   const token=a.token();
   if(!compose)approved=await a.sessions.approveExtension(token,x.request);
   store.configureVirtualDevice({request_id:'resource',device_id:x.registered.device_id});
+  const device=x.registered.device_id;
+  const manual=compose?await prepareManualSimulator({store,operator:a,device}):null;
   const planRequest={request_id:'plan',slot_id:x.installed.slot.record.slot_id,
     expected_slot_revision:x.installed.slot.slot_ref.revision,selection:{kind:compose?'enable':'activate',source_installation_ref:null,
       target_installation_ref:x.installed.installation_ref,reuse_content_ref:null,configuration_ref:x.config.configuration_ref}};
@@ -115,7 +119,7 @@ try{
   const activationRequest={request_id:'activate',slot_id:plan.slot_ref.object_id,expected_slot_revision:plan.slot_ref.revision,
     target_installation_ref:x.installed.installation_ref,approval_ref:approved.approval_ref,dependency_plan_ref:plan.plan_ref};
   const activation=compose?await manage('enable',activationRequest):await a.sessions.activateExtension(token,activationRequest);
-  let key,adopted=null,module=null,execution=null;
+  let key,adopted=null,module=null,execution=null,simulatorEvent=null;
   if(compose){
     const request={activation_ref:activation.operation_ref,launch_id:input.launchId,containment_ref:input.containment};
     assert.deepEqual(await manage('lookup-plan',{request_id:planRequest.request_id}),plan);
@@ -129,6 +133,24 @@ try{
     assert.equal(adopted.binding.gate_state,'closed');
     assert.equal(started.execution.worker_boot_id,adopted.binding.admission_receipt.member_boot_id);
     assert.deepEqual(await manage('start',request),started);
+    const command=await writeManualSimulator({store,operator:a,supervision,key,device,manual,value:7});
+    const until=performance.now()+3000;
+    for(;;){
+      const published=store.workerLaunches.deviceEvents(device);
+      const acknowledged=inspect(input.data,db=>db.prepare(
+        "SELECT count(*) FROM device_module_frame WHERE direction='w2c' AND message_type='EVENT_ACKED'").pluck().get());
+      if(published.events.length&&acknowledged===1){
+        assert.equal(published.events.length,1);
+        const event=published.events[0];
+        assert.deepEqual(event.origin.payload.value,{value:7,write_sequence:'1'});
+        assert.equal(event.origin.source_sequence,'1');
+        assert.equal(hash(event.origin),event.origin_digest);
+        simulatorEvent={command,device,event};
+        break;
+      }
+      assert.ok(performance.now()<until,'没有提交实际模拟器事件');
+      await delay(20);
+    }
   }else{
     const intent={...workerIntent(store,binding,x.host.content,approved,[x.registered.device_id]),launch_id:input.launchId,containment_ref:input.containment};
     const prepared=await store.workerLaunches.prepare(Buffer.from(JSON.stringify(intent)));
@@ -187,7 +209,7 @@ try{
   await assert.rejects(supervision.putFence({...next,digest:hash(next)}),{code:'supervisor_unauthorized'});
   assert.equal((await supervision.queryLaunch(key)).state,terminal);
   fs.writeFileSync(input.result,JSON.stringify({ok:true,key,deniedRevision:fence.revision,coreReceipt:binding.receipt.receipt_id,
-    workerReceipt:adopted?.binding.admission_receipt??null}));
+    workerReceipt:adopted?.binding.admission_receipt??null,simulatorEvent}));
 }catch(error){
   fs.writeFileSync(input.result,JSON.stringify({ok:false,error:error.stack}));process.exitCode=1;
 }finally{

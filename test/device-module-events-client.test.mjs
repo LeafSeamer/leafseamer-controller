@@ -49,7 +49,7 @@ test('事件响应错摘要、描述符或版本不能进入可确认批次',{sk
 });
 test('来源持久化失败关闭实际IPC且不得发送ACK',{skip:process.platform!=='win32'},async t=>{
  const f=await fixture(t,()=>{},{start(){},accept(){throw new Error('source_commit_failed');}});
- await assert.rejects(f.client.readEvents('device'),/source_commit_failed/);assert.equal(f.failed,true);assert.equal(f.frames.filter(v=>v.frame.type==='EVENT_ACK').length,0);
+ await assert.rejects(f.client.collectEvents('device'),/source_commit_failed/);assert.equal(f.failed,true);assert.equal(f.frames.filter(v=>v.frame.type==='EVENT_ACK').length,0);
  await assert.rejects(f.client.acknowledgeEvents('device',{through_sequence:'1',batch_digest:hash('batch')}),{code:'module_closed'});
 });
 test('已读取失败不能恢复为active，跨批次时钟不能倒退',{skip:process.platform!=='win32'},async t=>{

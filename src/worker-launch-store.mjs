@@ -111,6 +111,13 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     need(expectedSourceRef===null||hash(deviceEventSourceRef(value.registration))===hash(expectedSourceRef),'device_events_source_changed');return value;
   }
   function readDeviceEvents(...args){available();return db.transaction(()=>readDeviceEventsCurrent(...args)).immediate();}
+  function currentExecution(value){
+    available();const selected=key(value);
+    runtime.current(selected);
+    const client=executionClients.get(selected.launch_id);
+    need(client?.state.phase==='ready','execution_client_unavailable');
+    return client;
+  }
   const eventScopes=Number(service.schema_revision)>=65?deviceEventScopeStore({db,service,bootId,currentSource:readDeviceEventsCurrent}):null;
   async function applyRunProtection(plan,assertCurrent=()=>{}){
     available();assertCurrent();
@@ -151,6 +158,7 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     return {state:targets.every(target=>target.state==='acknowledged')?'acknowledged':'pending',targets};
   }
   const starting=new Set();
+  const managedEventLaunches=new Set();
   const api=Object.freeze({runtime,authorization,controlBarrier,eventScopes,
     async startLinux(input,assertOperator=()=>{}){
       available();need(process.platform==='linux'&&Number(service.schema_revision)>=109&&extensionSource?.acceptedActivation,'worker_launch_linux_unavailable');
@@ -202,7 +210,10 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
         const module=await api.openModule(selected,{events});
         for(const device of intent.object_scope.device_ids){await module.connectReadOnly(device);await module.captureBaseline(device);}
         if(execution){await api.openExecution(selected);for(const device of intent.object_scope.device_ids)await module.configureExecution(device);}
-        if(events)for(const device of intent.object_scope.device_ids)await module.startEvents(device);
+        if(events){
+          for(const device of intent.object_scope.device_ids)await module.startEvents(device);
+          managedEventLaunches.add(launch_id);
+        }
         return result();
       }catch(error){
         if(ownsStart){
@@ -211,19 +222,21 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
         throw error;
       }finally{starting.delete(launch_id);}
     },
+    initialDeviceFence(value,device){return currentExecution(value).initialFence(device);},
+    openInitialDevice(value,reference){return currentExecution(value).initialOpen(reference,{ready:true});},
     ...(Number(service.schema_revision)>=79&&{applyRunProtection}),
     queueCommandEncoding(id){
       if(commandTasks.has(id))return;
       // 受理响应先完成本轮微任务；后台执行从下一事件轮开始，避免占用响应校验预算。
       const task=new Promise(resolve=>setImmediate(resolve)).then(()=>{
         available();need(Number(service.schema_revision)>=51,'execution_encoding_migration');
-        const candidate=db.prepare(`SELECT r.launch_id FROM command_admission_source c JOIN device_execution_binding b USING(binding_id)
+        const candidate=db.prepare(`SELECT r.launch_id,c.device_id FROM command_admission_source c JOIN device_execution_binding b USING(binding_id)
           JOIN execution_session s USING(ipc_session_id) JOIN worker_runtime_binding r USING(runtime_id)
-          WHERE c.command_id=? AND s.service_boot_id=?`).pluck().get(id,bootId);
+          WHERE c.command_id=? AND s.service_boot_id=?`).raw().get(id,bootId);
         need(candidate,'execution_encoding_source');
-        const client=executionClients.get(candidate);need(client,'execution_encoding_source');
+        const [launch_id,device_id]=candidate,client=executionClients.get(launch_id);need(client,'execution_encoding_source');
         // 同一Execution会话只有一个有序控制出口；多个已受理命令不能互相抢占它。
-        const preceding=encodingTails.get(candidate)??Promise.resolve();
+        const preceding=encodingTails.get(launch_id)??Promise.resolve();
         const encoded=preceding.catch(()=>{}).then(()=>client.encodeCommand(id));
         const admitted=encoded.then(result=>Number(service.schema_revision)>=52&&result.response?.value.disposition==='prepared'?
           client.commandFinalAdmission(result.value.prepare_id):null);
@@ -236,7 +249,11 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
         const settled=dispatched.then(result=>Number(service.schema_revision)>=55&&result?client.closeCommand(id):null);
         settlementTasks.set(id,settled);settled.catch(()=>{});
         const cleaned=settled.then(result=>Number(service.schema_revision)>=56&&result?client.cleanupCommand(id):null);
-        cleanupTasks.set(id,cleaned);cleaned.catch(()=>{});encodingTails.set(candidate,cleaned);return encoded;
+        cleanupTasks.set(id,cleaned);cleaned.catch(()=>{});
+        const collected=managedEventLaunches.has(launch_id)?cleaned.then(async()=>{
+          if((await dispatched)?.report)await modules.get(launch_id)?.collectEvents(device_id);
+        }):cleaned;
+        collected.catch(()=>{});encodingTails.set(launch_id,collected);return encoded;
       });
       commandTasks.set(id,task);task.catch(()=>{});
     },
@@ -325,7 +342,7 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
         socket=runtime.openChannel(selected,'module');
         module=await connectDeviceModule({events,eventSource,current,invalidate:()=>runtime.invalidate(selected),configuration,socket,
         journal:{open:journal.open,record(direction,frame){journal.record(direction,frame);if(direction==='w2c')catalog.receive(frame);}},catalog,
-        onClose:()=>{try{eventSource?.close();}finally{modules.delete(selected.launch_id);}}});
+        onClose:()=>{try{eventSource?.close();}finally{managedEventLaunches.delete(selected.launch_id);modules.delete(selected.launch_id);}}});
         available();current();modules.set(selected.launch_id,module);return module;
       }catch(error){modules.delete(selected.launch_id);socket?.destroy();module?.close();try{runtime.invalidate(selected);}catch{}throw error;}
     },

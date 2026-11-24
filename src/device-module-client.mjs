@@ -42,7 +42,7 @@ export async function connectDeviceModule({current,invalidate,configuration,jour
   monitor=setInterval(()=>{try{check();}catch{fail();}},100);monitor.unref();
   const loaded=await request('LOAD',{runtime:initial.binding,configuration},'LOADED');need(loaded.body.entry_id===initial.binding.launch_intent.extension_binding.entry_id,'module_entry');
  }catch(error){fail();throw error;}
- return Object.freeze({binding,
+ const client=Object.freeze({binding,
   async connectReadOnly(deviceId){
    check();need(!pending,'module_busy');need(devices.includes(deviceId)&&!sessions.has(deviceId),'module_device');const session=crypto.randomUUID();sessions.set(deviceId,{session,state:'connecting'});
    const frame=await request('CONNECT',{device_id:deviceId,device_session_id:session},'CONNECTED');sessions.set(deviceId,{session,state:'connected'});return frame;
@@ -104,6 +104,13 @@ export async function connectDeviceModule({current,invalidate,configuration,jour
     if(match){c.lastTick=c.pending.batch.events.at(-1)?.capture_interval.after_tick_ns??c.lastTick;c.acknowledged=receipt.through_sequence;c.pending=null;c.lastAck={...receipt};}return frame;
    }catch(error){fail();throw error;}
   },
+  async collectEvents(deviceId){
+   if(!captures.has(deviceId))return;
+   need(eventSource,'module_event_source_unavailable');
+   const {body:{result}}=await client.readEvents(deviceId);
+   // readEvents returns after the source transaction. Only its exact batch may release the module's retained records.
+   await client.acknowledgeEvents(deviceId,{through_sequence:result.batch.through_sequence,batch_digest:result.batch_digest});
+  },
   async stopEvents(deviceId){
    const {capture:c}=eventSession(deviceId);c.stopping=true;
    try{const frame=await request('EVENT_STOP',c.body,'EVENT_STOPPED'),closed=frame.body.closed;
@@ -112,4 +119,5 @@ export async function connectDeviceModule({current,invalidate,configuration,jour
   },
   close:fail
  });
+ return client;
 }
