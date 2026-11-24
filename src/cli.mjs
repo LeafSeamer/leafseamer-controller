@@ -20,7 +20,8 @@ import {discoverObsScenes,inspectObsCut,ObsDiscoveryError} from './obs-discovery
 import {initializeLinuxSecretStore,initializeWindowsSecretStore,openLinuxSecretStore,openWindowsSecretStore} from './secret-store.mjs';
 import {windowsSecretDirectory} from './windows-secret-files.mjs';
 const authenticatedCore = process.argv[2] === 'contained-core-auth';
-const linuxCore = process.argv[2] === 'contained-core-linux';
+const composeCore = process.argv[2] === 'contained-compose-linux';
+const linuxCore = process.argv[2] === 'contained-core-linux' || composeCore;
 const emit = value => (authenticatedCore ? process.stderr : process.stdout).write(JSON.stringify(value) + '\n');
 const trustedStartupError = code => /^(pairing_(profile|clock)|standalone_profile)_[a-z_]+$/.test(code);
 let app;
@@ -30,6 +31,7 @@ try {
   const secretCommands = ['init-obs-secret-store', 'seal-obs-resource-credential', 'observe-obs-resource'];
   const allowed = secretCommands.includes(command) ? ['--data-dir','--secret-dir',...(command==='init-obs-secret-store'?['--new-key-dir']:[])] :
     command === 'start-protected-ingress' ? ['--data-dir','--ingress-profile'] :
+    composeCore ? ['--data-dir','--ingress-profile','--bootstrap-policy'] :
     linuxCore ? ['--data-dir','--host','--port','--bootstrap-policy','--clock-evidence-profile','--pairing-profile'] :
     command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile','--standalone-profile'] : []), ...(command==='supervise'?['--stdin-control']:[])] : [];
   if ((!allowed.length && !obsInspector) || args.length % 2) throw new Error('arguments');
@@ -121,7 +123,7 @@ try {
     const rawPort = options['--port'] ?? '0';
     if (!/^(0|[1-9][0-9]{0,4})$/.test(rawPort)) throw new Error('arguments');
     const launch = {dataDir: options['--data-dir'], host: options['--host'] ?? '127.0.0.1', port: Number(rawPort)};
-    if (command === 'start-protected-ingress') Object.assign(launch, readProtectedIngressProfile(options['--ingress-profile']));
+    if (command === 'start-protected-ingress' || composeCore) Object.assign(launch, readProtectedIngressProfile(options['--ingress-profile']));
     const pairingPath=options['--pairing-profile'],standalonePath=options['--standalone-profile'];
     if(pairingPath!==undefined&&standalonePath!==undefined)throw new Error('standalone_profile_conflict');
     let profile=null;
@@ -169,7 +171,7 @@ try {
         Object.assign(launch,{tls:profile.tls,pairing:profile.pairing,localPairingManagement:true});
         if(profile.gui)Object.assign(launch,{guiDirectory:profile.gui.directory,guiManifestSha256:profile.gui.manifest_sha256});
       }
-      linuxChannel=openLinuxCoreBootstrap(policy,'controller');
+      linuxChannel=openLinuxCoreBootstrap(policy,'controller',{compose:composeCore});
       launch.coreBootstrap=identity=>linuxChannel.accept({identity,source:openNativeClock()});
     }
     if (authenticatedCore) {

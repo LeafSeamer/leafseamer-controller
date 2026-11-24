@@ -22,7 +22,7 @@ import {createHash} from 'node:crypto';
 export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null, guiManifestSha256 = null, coreBootstrap = null, pairing = null, referenceTimeAuthorization = null, localPairingManagement = false, standalone = false, protectedIngressIdentity = null, linuxClockEvidenceProfile = null} = {}) {
   const protectedIngress = protectedIngressIdentity !== null;
   if (protectedIngress) {
-    if (process.platform !== 'linux' || !tls || authenticationProvider || guiDirectory || coreBootstrap || pairing ||
+    if (process.platform !== 'linux' || !tls || authenticationProvider || guiDirectory || linuxClockEvidenceProfile || pairing ||
         referenceTimeAuthorization || localPairingManagement || standalone) throw new Error('protected_ingress_options');
     pairingFields(protectedIngressIdentity, 'database_instance_id,service_id');
     pairingUuid(protectedIngressIdentity.service_id);
@@ -54,8 +54,8 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       if (linuxClockEvidenceProfile !== null) {
         linuxSource = openNativeClock({linuxWithoutSystemSleep: linuxClockEvidenceProfile.authentication});
         clockEvidence = inspectLinuxClockEvidence(linuxClockEvidenceProfile, storage.authenticationClock.scope, result, linuxSource);
-        if (linuxPairing) linuxRuntime = result;
       }
+      if ((linuxPairing||protectedIngress)&&typeof result.assertLive==='function') linuxRuntime=result;
       result.assertCurrent?.();
       if(supervision)storage.workerLaunches?.runtime?.bindSource(supervision);
       if(supervision)storage.extensionInstallations?.bindRuntimeSource?.(supervision);

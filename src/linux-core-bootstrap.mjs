@@ -22,7 +22,7 @@ function verifyArtifact(policy,serviceKind){
     'bootstrap_artifact');
 }
 
-function localGroup(descriptor,serviceKind){
+function localGroup(descriptor,serviceKind,compose){
   const generation=descriptor.runtime_generation;
   check(uuid.test(generation)&&fs.statfsSync('/proc').type===0x9fa0,'bootstrap_linux_group');
   const boot=fs.readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim(),bound=descriptor.os_boot_identity;
@@ -30,17 +30,23 @@ function localGroup(descriptor,serviceKind){
     bound.value===boot&&bound.evidence_ref===boot,'bootstrap_linux_boot');
   const membership=fs.readFileSync('/proc/self/cgroup','utf8');
   const stem='/leafseamer_'+generation.replaceAll('-','')+'_'+serviceKind;
-  const groupPath=[stem+'/core',stem+'.slice/core'].find(candidate=>membership==='0::'+candidate+'\n');
-  check(groupPath,'bootstrap_linux_group');
+  const groupPath=compose?'':[stem+'/core',stem+'.slice/core'].find(candidate=>membership==='0::'+candidate+'\n');
+  if(compose){
+    const mounts=fs.readFileSync('/proc/self/mountinfo','utf8').split('\n').map(line=>line.split(' '))
+      .filter(fields=>fields[4]==='/sys/fs/cgroup');
+    check(process.pid===1&&membership==='0::/\n'&&mounts.length===1&&mounts[0][5]?.split(',').includes('ro'),
+      'bootstrap_linux_group');
+  }else check(groupPath,'bootstrap_linux_group');
   const filename='/sys/fs/cgroup'+groupPath;
   check(fs.realpathSync.native(filename)===filename&&fs.statfsSync(filename).type===0x63677270,'bootstrap_linux_group');
   const status=fs.lstatSync(filename,{bigint:true});
   check(status.isDirectory(),'bootstrap_linux_group');
   const group={device:String(status.dev),inode:String(status.ino)};
-  return {backend:'linux_cgroup_v2',generation,group_id:'group_'+hash(canonicalize({boot_id:boot,group_path:groupPath,group}))};
+  const identity=compose?{boot_id:boot,generation,service_kind:serviceKind,group}:{boot_id:boot,group_path:groupPath,group};
+  return {backend:'linux_cgroup_v2',generation,group_id:'group_'+hash(canonicalize(identity))};
 }
 
-export function openLinuxCoreBootstrap(policy,serviceKind){
+export function openLinuxCoreBootstrap(policy,serviceKind,{compose=false}={}){
   check(serviceKind==='controller'||serviceKind==='seamer','bootstrap_linux_service');
   check(process.platform==='linux'&&fs.fstatSync(3).isSocket(),'bootstrap_linux_channel');
   verifyArtifact(policy,serviceKind);
@@ -54,11 +60,11 @@ export function openLinuxCoreBootstrap(policy,serviceKind){
       const descriptor=assignment.clock_domain_descriptor;
       const namespace=source.capture().raw.namespace_after;
       verifyCoreAssignment(assignment,policy,identity,{clockBackend:'linux_boottime',namespace:'linux_'+namespace.replace(':','_')});
-      const containment=localGroup(descriptor,serviceKind);
+      const containment=localGroup(descriptor,serviceKind,compose);
       const issued=BigInt(assignment.issued_tick_ns),expires=BigInt(assignment.expires_tick_ns);
       function assertLive(){
         check(!signal.aborted&&!socket.destroyed&&!socket.readableEnded,'bootstrap_linux_channel');
-        check(canonicalize(localGroup(descriptor,serviceKind))===canonicalize(containment),'bootstrap_linux_group');
+        check(canonicalize(localGroup(descriptor,serviceKind,compose))===canonicalize(containment),'bootstrap_linux_group');
         const current=fs.statSync('/proc/self/ns/time',{bigint:true});
         check(String(current.dev)+':'+current.ino===namespace,'bootstrap_linux_clock');
       }
