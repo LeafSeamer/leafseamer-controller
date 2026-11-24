@@ -615,6 +615,10 @@ CLI 在写入 boot 记录前校验数据库身份及最低 Schema 5。此入口�
 
 可信 Linux 宿主可经 Suite 启动账本执行 `contained-core-linux`，提供 `--data-dir`、可选回环监听 `--host`／`--port` 和规范 JSON 的 `--bootstrap-policy`。核心从定向继承的 FD 3 完成 DF02 引导，核验 Node 和构建清单摘要、本机启动身份、cgroup、单调时间域及数据库。最低 Schema 11 的业务库保存闭锁回执后才监听，监督通道断开即关闭。该入口提供保护态回环诊断，业务授权、可信授时和跨服务连接仍需完整部署装配。
 
+可选的 `--clock-evidence-profile <绝对路径>` 启用回环授时证据诊断。配置格式为 `leafseamer.controller-linux-clock-evidence-profile/1`，字段为 `format`、`service_id`、`database_instance_id`、`policy_digest`、`public_key_file`、`exchange_directory`。服务和库标识必须匹配引导策略。配置、Ed25519 公钥和交换目录可由 root 或服务账户持有，目录及其上级须防止其他账户写入，交换目录须允许服务账户写入，两个路径字段使用绝对路径。交换目录按启动实例管理。
+
+核心保存闭锁回执后，在交换目录发布 `challenge-<service_boot_id>.json`。授时签发方使用该原件生成 `clock-evidence.mjs` 的输入，并将签名证据写入相同目录的 `evidence-<service_boot_id>.json`。签发器按 `0600` 发布。若由独立的 root 签发，安装方须在受保护目录中给服务账户授予证据读取权限，例如使用只含授权服务账户的组及 `0640` 模式。回环 `GET /health/ready` 仍返回 503，新增 `authentication_clock_evidence` 表示当前为 `missing`、`verified`、`expired`、`rejected` 或原生诊断故障时的 `unavailable`。`verified` 仅表示本次核心启动的签名、策略、时钟域及证据原期限通过核验。授时证据诊断不会授予认证时钟或业务操作资格。关停后可清理交换目录中的本次启动文件。
+
 ## 原生时钟诊断
 
 schema 3 服务每500毫秒调用原生采集器。Windows 顺序为 `QueryInterruptTimePrecise → GetSystemTimePreciseAsFileTime → QueryInterruptTimePrecise`，FILETIME 用整数减纪元再转纳秒；Linux 实现使用 `CLOCK_BOOTTIME → CLOCK_REALTIME → CLOCK_BOOTTIME` 并检查时间命名空间。没有 `Date.now()` 或浮点秒替代路径。原生接口依据：[Microsoft 单调时间](https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-queryinterrupttimeprecise)、[精确系统时间](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemtimepreciseasfiletime)、[Linux clock_gettime](https://www.man7.org/linux/man-pages/man2/clock_gettime.2.html)。

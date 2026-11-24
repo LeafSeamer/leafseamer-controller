@@ -5,6 +5,7 @@ import {openStorage} from './storage.mjs';
 import {openNativeClock} from './native-clock.mjs';
 import {startClockMonitor} from './clock-monitor.mjs';
 import {startAuthenticationClock} from './auth-clock.mjs';
+import {inspectLinuxClockEvidence} from './linux-clock-evidence.mjs';
 import {createAuthenticationHttp} from './auth-http.mjs';
 import {loadGuiAssets} from './gui-assets.mjs';
 import {startPeerPairingTransport} from './peer-pairing-transport.mjs';
@@ -18,7 +19,7 @@ import {referenceTimeScheduler} from './reference-time-scheduler.mjs';
 import canonicalize from './runtime/canonicalize.mjs';
 import {createHash} from 'node:crypto';
 
-export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null, guiManifestSha256 = null, coreBootstrap = null, pairing = null, referenceTimeAuthorization = null, localPairingManagement = false, standalone = false, protectedIngressIdentity = null} = {}) {
+export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null, guiManifestSha256 = null, coreBootstrap = null, pairing = null, referenceTimeAuthorization = null, localPairingManagement = false, standalone = false, protectedIngressIdentity = null, linuxClockEvidenceProfile = null} = {}) {
   const protectedIngress = protectedIngressIdentity !== null;
   if (protectedIngress) {
     if (process.platform !== 'linux' || !tls || authenticationProvider || guiDirectory || coreBootstrap || pairing ||
@@ -33,11 +34,14 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   if ((!protectedIngress && !['127.0.0.1', '::1'].includes(host)) ||
       !Number.isInteger(port) || port < (protectedIngress ? 1 : 0) || port > 65535) throw new Error('listen_options');
   if (authenticationProvider !== null && typeof authenticationProvider !== 'function') throw new Error('authentication_provider');
+  if (linuxClockEvidenceProfile !== null && (process.platform !== 'linux' || !coreBootstrap || authenticationProvider)) {
+    throw new Error('linux_clock_evidence_binding');
+  }
   if (tls !== null && (!tls || Object.keys(tls).sort().join(',') !== 'cert,key,origin' || typeof tls.origin !== 'string')) throw new Error('tls_options');
   if (guiDirectory !== null && tls === null) throw new Error('gui_requires_https');
   if (pairing !== null) pairingUuid(pairing.credential_id);
   const storage = openStorage(dataDir, protectedIngressIdentity);
-  let supervision = null, timeProviderLink = null, timeProviderBinding = null;
+  let supervision = null, timeProviderLink = null, timeProviderBinding = null, clockEvidenceStatus = null;
   const assertRuntimeCurrent = () => { supervision?.assertCurrent(); timeProviderLink?.assertCurrent(); };
   try {
     if (coreBootstrap !== null) {
@@ -46,6 +50,10 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       supervision = result.supervision ?? null; supervision?.assertCurrent();
       result.assertCurrent?.();
       timeProviderBinding = storage.bindCoreRuntime(binding, policy, supervision);
+      if (linuxClockEvidenceProfile !== null) {
+        clockEvidenceStatus = inspectLinuxClockEvidence(linuxClockEvidenceProfile, storage.authenticationClock.scope,
+          result, openNativeClock());
+      }
       result.assertCurrent?.();
       if(supervision)storage.workerLaunches?.runtime?.bindSource(supervision);
       if(supervision)storage.extensionInstallations?.bindRuntimeSource?.(supervision);
@@ -230,6 +238,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     if (req.url === '/health/live') { status = 200; body = {status: 'alive'}; }
     else if (req.url === '/health/ready') {
       status = 503; body = {ready: false, reason: authentication?.status().qualified ? 'business_incomplete' : clock ? (clock.status().state === 'faulted' ? 'authentication_clock_unavailable' : 'authentication_clock_unqualified') : 'bootstrap_incomplete'};
+      if (clockEvidenceStatus) body.authentication_clock_evidence = body.reason === 'authentication_clock_unqualified' ? clockEvidenceStatus() : 'unavailable';
     }
     else if (req.url === '/.well-known/leafseamer-contracts') { res.writeHead(503); res.end(); return; }
     else { res.writeHead(404); res.end(); return; }

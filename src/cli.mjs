@@ -11,6 +11,7 @@ import canonicalize from 'canonicalize';
 import {openNativeClock} from './native-clock.mjs';
 import {BootstrapError, validateBootstrapPolicy, createCoreBootstrapChannel, verifyCoreAssignment, verifyCoreAdmission} from './core-bootstrap.mjs';
 import {openLinuxCoreBootstrap} from './linux-core-bootstrap.mjs';
+import {readLinuxClockEvidenceProfile} from './linux-clock-evidence.mjs';
 import {connectCoreSupervisor, SupervisorError} from './supervisor-control.mjs';
 import {openTrustedControllerClock, readTrustedPairingProfile, readTrustedStandaloneProfile} from './trusted-pairing-profile.mjs';
 import {readProtectedIngressProfile} from './protected-ingress-profile.mjs';
@@ -29,7 +30,7 @@ try {
   const secretCommands = ['init-obs-secret-store', 'seal-obs-resource-credential', 'observe-obs-resource'];
   const allowed = secretCommands.includes(command) ? ['--data-dir','--secret-dir',...(command==='init-obs-secret-store'?['--new-key-dir']:[])] :
     command === 'start-protected-ingress' ? ['--data-dir','--ingress-profile'] :
-    linuxCore ? ['--data-dir','--host','--port','--bootstrap-policy'] :
+    linuxCore ? ['--data-dir','--host','--port','--bootstrap-policy','--clock-evidence-profile'] :
     command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile','--standalone-profile'] : []), ...(command==='supervise'?['--stdin-control']:[])] : [];
   if ((!allowed.length && !obsInspector) || args.length % 2) throw new Error('arguments');
   const options = {};
@@ -158,6 +159,9 @@ try {
       if(typeof rawPolicy!=='string'||Buffer.byteLength(rawPolicy)>8192)throw new BootstrapError('bootstrap_policy');
       const policy=validateBootstrapPolicy(JSON.parse(rawPolicy));
       if(canonicalize(policy)!==rawPolicy)throw new BootstrapError('bootstrap_policy');
+      if (options['--clock-evidence-profile'] !== undefined) {
+        launch.linuxClockEvidenceProfile=readLinuxClockEvidenceProfile(options['--clock-evidence-profile'],policy);
+      }
       linuxChannel=openLinuxCoreBootstrap(policy,'controller');
       launch.coreBootstrap=identity=>linuxChannel.accept({identity,source:openNativeClock()});
     }
@@ -241,7 +245,8 @@ try {
   const known = error instanceof StorageError || error instanceof IdentityError || error instanceof ProcessHostError ||
     error instanceof BootstrapError || error instanceof SupervisorError || error instanceof LocalPairingError ||
     error instanceof ObsDiscoveryError || trustedStartupError(code) ||
-    ['protected_ingress_profile','protected_ingress_platform','protected_ingress_address'].includes(code);
+    ['protected_ingress_profile','protected_ingress_platform','protected_ingress_address',
+      'linux_clock_evidence_profile','linux_clock_evidence_binding','linux_clock_evidence_directory'].includes(code);
   process.stderr.write(JSON.stringify({error: known ? code : 'startup_failed'}) + '\n');
   process.exitCode = 1;
 }
