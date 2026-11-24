@@ -10,6 +10,7 @@ import {requireLocalAdministrator, requirePrivatePipes, readEnrollmentInput} fro
 import canonicalize from 'canonicalize';
 import {openNativeClock} from './native-clock.mjs';
 import {BootstrapError, validateBootstrapPolicy, createCoreBootstrapChannel, verifyCoreAssignment, verifyCoreAdmission} from './core-bootstrap.mjs';
+import {openLinuxCoreBootstrap} from './linux-core-bootstrap.mjs';
 import {connectCoreSupervisor, SupervisorError} from './supervisor-control.mjs';
 import {openTrustedControllerClock, readTrustedPairingProfile, readTrustedStandaloneProfile} from './trusted-pairing-profile.mjs';
 import {readProtectedIngressProfile} from './protected-ingress-profile.mjs';
@@ -18,6 +19,7 @@ import {discoverObsScenes,inspectObsCut,ObsDiscoveryError} from './obs-discovery
 import {initializeLinuxSecretStore,initializeWindowsSecretStore,openLinuxSecretStore,openWindowsSecretStore} from './secret-store.mjs';
 import {windowsSecretDirectory} from './windows-secret-files.mjs';
 const authenticatedCore = process.argv[2] === 'contained-core-auth';
+const linuxCore = process.argv[2] === 'contained-core-linux';
 const emit = value => (authenticatedCore ? process.stderr : process.stdout).write(JSON.stringify(value) + '\n');
 const trustedStartupError = code => /^(pairing_(profile|clock)|standalone_profile)_[a-z_]+$/.test(code);
 let app;
@@ -27,6 +29,7 @@ try {
   const secretCommands = ['init-obs-secret-store', 'seal-obs-resource-credential', 'observe-obs-resource'];
   const allowed = secretCommands.includes(command) ? ['--data-dir','--secret-dir',...(command==='init-obs-secret-store'?['--new-key-dir']:[])] :
     command === 'start-protected-ingress' ? ['--data-dir','--ingress-profile'] :
+    linuxCore ? ['--data-dir','--host','--port','--bootstrap-policy'] :
     command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile','--standalone-profile'] : []), ...(command==='supervise'?['--stdin-control']:[])] : [];
   if ((!allowed.length && !obsInspector) || args.length % 2) throw new Error('arguments');
   const options = {};
@@ -149,7 +152,15 @@ try {
     } else {
     const contained = command === 'contained-core' || authenticatedCore;
     if (contained) requirePrivatePipes();
-    let channel = null;
+    let channel = null, linuxChannel = null;
+    if (linuxCore) {
+      const rawPolicy=options['--bootstrap-policy'];
+      if(typeof rawPolicy!=='string'||Buffer.byteLength(rawPolicy)>8192)throw new BootstrapError('bootstrap_policy');
+      const policy=validateBootstrapPolicy(JSON.parse(rawPolicy));
+      if(canonicalize(policy)!==rawPolicy)throw new BootstrapError('bootstrap_policy');
+      linuxChannel=openLinuxCoreBootstrap(policy);
+      launch.coreBootstrap=linuxChannel.accept;
+    }
     if (authenticatedCore) {
       const rawPolicy = options['--bootstrap-policy'];
       if (typeof rawPolicy !== 'string' || Buffer.byteLength(rawPolicy) > 8192) throw new BootstrapError('bootstrap_policy');
@@ -198,15 +209,17 @@ try {
       };
     }
     try { app = await startController(launch); }
-    catch (error) { channel?.close(); if (contained) process.stdin.destroy(); throw error; }
+    catch (error) { channel?.close(); linuxChannel?.close(); if (contained) process.stdin.destroy(); throw error; }
     let shuttingDown = false;
     const shutdown = async () => {
       if (shuttingDown) return; shuttingDown = true;
+      linuxChannel?.close();
       if (contained) { process.stdin.removeAllListeners('data'); process.stdin.removeAllListeners('end'); process.stdin.destroy(); }
       try { await app.close(); emit({event: 'stopped'}); }
       catch { process.stderr.write('{"error":"shutdown_failed"}\n'); process.exitCode = 1; }
     };
     process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
+    linuxChannel?.monitor(shutdown);
     if (contained) {
       let control = '';
       process.stdin.setEncoding('utf8').on('data', data => {

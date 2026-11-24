@@ -25,13 +25,15 @@ export function validateBootstrapPolicy(input) {
 }
 
 // 只接受已经由独立SDK入口解析的对象；政策由可信本机装配提供，不能由网络或Assignment自证。
-export function verifyCoreAssignment(assignment, policy, identity) {
+export function verifyCoreAssignment(assignment, policy, identity, {
+  clockBackend='windows_interrupt_precise',namespace='windows-global'
+}={}) {
   const descriptor = assignment.clock_domain_descriptor;
   check(assignment.role === 'core' && descriptor.authority_service_id === identity.service_id && policy.service_id === identity.service_id &&
     policy.database_instance_id === identity.database_instance_id, 'bootstrap_scope');
   check(same(assignment.artifact_manifest_ref, policy.artifact_manifest_ref) && descriptor.platform_profile_id === policy.platform_profile_ref.profile_id &&
     descriptor.platform_profile_revision === policy.platform_profile_ref.revision && descriptor.clock_backend_revision === policy.clock_backend_revision &&
-    descriptor.clock_backend_id === 'windows_interrupt_precise' && descriptor.namespace_identity === 'windows-global' &&
+    descriptor.clock_backend_id === clockBackend && descriptor.namespace_identity === namespace &&
     descriptor.tick_unit === 'ns' && descriptor.suspend_accounting === 'included', 'bootstrap_policy');
   for (const value of Object.values(descriptor)) if (typeof value === 'string') check(value === 'clock-domain/1' || scalar.test(value), 'bootstrap_descriptor');
   const {clock_domain_id, descriptor_digest, ...body} = descriptor;
@@ -54,11 +56,13 @@ export function bootstrapProof(assignment) {
 }
 export const coreProof = bootstrapProof;
 
-export async function verifyCoreAdmission(assignment, receipt, policy) {
+export async function verifyCoreAdmission(assignment, receipt, policy, expectedContainment=null) {
   for (const name of proofFields.filter(n => !['bootstrap_version', 'challenge_id'].includes(n))) check(same(receipt[name], assignment[name]), 'bootstrap_receipt_binding');
   const descriptor = assignment.clock_domain_descriptor;
   check(receipt.gate_state === 'closed' && receipt.domain_ref.clock_domain_id === descriptor.clock_domain_id &&
-    receipt.domain_ref.descriptor_digest === descriptor.descriptor_digest && receipt.containment_ref.backend === 'windows_job', 'bootstrap_receipt_binding');
+    receipt.domain_ref.descriptor_digest === descriptor.descriptor_digest &&
+    (expectedContainment===null?receipt.containment_ref.backend==='windows_job':same(receipt.containment_ref,expectedContainment)),
+  'bootstrap_receipt_binding');
   check(BigInt(receipt.admitted_tick_ns) >= BigInt(assignment.issued_tick_ns) && BigInt(receipt.admitted_tick_ns) < BigInt(assignment.expires_tick_ns), 'bootstrap_receipt_expired');
   const intent = await decodeProtectedLaunchIntent(Buffer.from(canonicalize({launch_id: receipt.launch_id, service_id: policy.service_id,
     supervisor_instance_id: descriptor.supervisor_instance_id, runtime_generation: descriptor.runtime_generation, member_id: receipt.member_id, role: 'core',

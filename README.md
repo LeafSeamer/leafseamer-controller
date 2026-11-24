@@ -611,7 +611,9 @@ node --disallow-code-generation-from-strings dist/cli.mjs migrate-storage --data
 
 配置的 `format` 为 `leafseamer.controller-protected-ingress/1`，包含 `service_id`、`database_instance_id`、`address`、`port`、`origin`、`certificate_file` 和 `private_key_file`。地址必须精确匹配容器或主机当前分配的接口地址，端口固定。证书和私钥使用绝对路径，部署者负责保护配置目录和 TLS 材料。证书覆盖 Nginx 上游校验名，`origin` 填浏览器实际访问的规范 HTTPS 源。
 
-CLI 在写入 boot 记录前校验数据库身份及最低 Schema 5。此入口只提供保护态 HTTPS 与诊断。登录返回 503，服务保持未就绪。完整部署仍需建立受监督运行域和可信认证时钟。
+CLI 在写入 boot 记录前校验数据库身份及最低 Schema 5。此入口只提供保护态 HTTPS 与诊断。登录返回 503，服务保持未就绪。完整部署需要受监督运行域和可信认证时钟。
+
+可信 Linux 宿主可经 Suite 启动账本执行 `contained-core-linux`，提供 `--data-dir`、可选回环监听 `--host`／`--port` 和规范 JSON 的 `--bootstrap-policy`。核心从定向继承的 FD 3 完成 DF02 引导，核验 Node 和构建清单摘要、本机启动身份、cgroup、单调时间域及数据库。最低 Schema 11 的业务库保存闭锁回执后才监听，监督通道断开即关闭。该入口提供保护态回环诊断，业务授权、可信授时和跨服务连接仍需完整部署装配。
 
 ## 原生时钟诊断
 
