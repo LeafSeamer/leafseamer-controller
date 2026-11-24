@@ -22,7 +22,8 @@ import {createHash} from 'node:crypto';
 export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null, guiManifestSha256 = null, coreBootstrap = null, pairing = null, referenceTimeAuthorization = null, localPairingManagement = false, standalone = false, protectedIngressIdentity = null, linuxClockEvidenceProfile = null} = {}) {
   const protectedIngress = protectedIngressIdentity !== null;
   if (protectedIngress) {
-    if (process.platform !== 'linux' || !tls || authenticationProvider || guiDirectory || linuxClockEvidenceProfile || pairing ||
+    if (process.platform !== 'linux' || !tls || authenticationProvider || guiDirectory || pairing ||
+        (linuxClockEvidenceProfile !== null && (!coreBootstrap || linuxClockEvidenceProfile.authentication !== true)) ||
         referenceTimeAuthorization || localPairingManagement || standalone) throw new Error('protected_ingress_options');
     pairingFields(protectedIngressIdentity, 'database_instance_id,service_id');
     pairingUuid(protectedIngressIdentity.service_id);
@@ -35,7 +36,8 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       !Number.isInteger(port) || port < (protectedIngress ? 1 : 0) || port > 65535) throw new Error('listen_options');
   if (authenticationProvider !== null && typeof authenticationProvider !== 'function') throw new Error('authentication_provider');
   const linuxPairing = linuxClockEvidenceProfile?.authentication === true && pairing !== null && tls !== null && localPairingManagement;
-  if (linuxClockEvidenceProfile !== null && (process.platform !== 'linux' || !coreBootstrap || authenticationProvider || (!linuxPairing && (tls || pairing)))) {
+  if (linuxClockEvidenceProfile !== null && (process.platform !== 'linux' || !coreBootstrap || authenticationProvider ||
+      (!linuxPairing && !protectedIngress && (tls || pairing)))) {
     throw new Error('linux_clock_evidence_binding');
   }
   if (tls !== null && (!tls || Object.keys(tls).sort().join(',') !== 'cert,key,origin' || typeof tls.origin !== 'string')) throw new Error('tls_options');

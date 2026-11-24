@@ -615,7 +615,7 @@ CLI 在写入 boot 记录前校验数据库身份及最低 Schema 5。此入口�
 
 可信 Linux 宿主可经 Suite 启动账本执行 `contained-core-linux`，提供 `--data-dir`、可选回环监听 `--host`／`--port` 和规范 JSON 的 `--bootstrap-policy`。核心从定向继承的 FD 3 完成 DF02 引导，核验 Node 和构建清单摘要、本机启动身份、cgroup、单调时间域及数据库。最低 Schema 11 的业务库保存闭锁回执后才监听，监督通道断开即关闭。该入口提供保护态回环诊断，业务授权、可信授时和跨服务连接仍需完整部署装配。
 
-Suite 的 Compose 计划可使用 `contained-compose-linux --data-dir <绝对数据目录> --ingress-profile <绝对路径> --bootstrap-policy <规范 JSON>`。核心从 FD 3 完成闭锁准入，核对容器自己的只读 cgroup 根，保存回执后开启配置中的保护态 HTTPS。认证时钟和配对继续作为独立部署条件。[Suite](https://github.com/LeafSeamer/leafseamer-suite)
+Suite 的 Compose 计划可使用 `contained-compose-linux --data-dir <绝对数据目录> --ingress-profile <绝对路径> --bootstrap-policy <规范 JSON>`。核心从 FD 3 完成闭锁准入，核对容器自己的只读 cgroup 根，保存回执后开启配置中的保护态 HTTPS。可附加 `--clock-evidence-profile <绝对路径>` 采用受保护的 `/2` 配置，在通过内核核验后按角色接收签名授时证据。该启动组合的登录保持闭锁。[Suite](https://github.com/LeafSeamer/leafseamer-suite)
 
 可选的 `--clock-evidence-profile <绝对路径>` 启用回环授时证据诊断。配置格式为 `leafseamer.controller-linux-clock-evidence-profile/1`，字段为 `format`、`service_id`、`database_instance_id`、`policy_digest`、`public_key_file`、`exchange_directory`。服务和库标识必须匹配引导策略。配置、Ed25519 公钥和交换目录可由 root 或服务账户持有，目录及其上级须防止其他账户写入，交换目录须允许服务账户写入，两个路径字段使用绝对路径。交换目录按启动实例管理。
 

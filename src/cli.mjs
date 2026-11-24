@@ -31,7 +31,7 @@ try {
   const secretCommands = ['init-obs-secret-store', 'seal-obs-resource-credential', 'observe-obs-resource'];
   const allowed = secretCommands.includes(command) ? ['--data-dir','--secret-dir',...(command==='init-obs-secret-store'?['--new-key-dir']:[])] :
     command === 'start-protected-ingress' ? ['--data-dir','--ingress-profile'] :
-    composeCore ? ['--data-dir','--ingress-profile','--bootstrap-policy'] :
+    composeCore ? ['--data-dir','--ingress-profile','--bootstrap-policy','--clock-evidence-profile'] :
     linuxCore ? ['--data-dir','--host','--port','--bootstrap-policy','--clock-evidence-profile','--pairing-profile'] :
     command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile','--standalone-profile'] : []), ...(command==='supervise'?['--stdin-control']:[])] : [];
   if ((!allowed.length && !obsInspector) || args.length % 2) throw new Error('arguments');

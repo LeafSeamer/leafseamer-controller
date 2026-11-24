@@ -22,7 +22,7 @@ const guestErrorLimit=100000000n;
 
 test(guestDiscipline?'隔离客体实际校时后签发，失联后保留最后签发原件':'独立 Chrony 实际追踪已批准源，-x、配置改变与源失联拒绝签发',{
   skip:process.platform!=='linux'||!guestDiscipline&&process.env.LEAFSEAMER_TEST_CHRONY_HOST!=='1',
-  timeout:guestDiscipline&&process.env.LEAFSEAMER_TEST_CHRONY_SUITE?145000:35000
+  timeout:guestDiscipline&&process.env.LEAFSEAMER_TEST_CHRONY_SUITE?215000:35000
 },async t=>{
   function kernelClock(){
     const probe=spawnSync('/proof/read-kernel-clock',[],{encoding:'utf8',timeout:2000});
@@ -148,12 +148,13 @@ test(guestDiscipline?'隔离客体实际校时后签发，失联后保留最后�
       fs.writeFileSync(chronyProfile,canonical(profile),{mode:0o600});
       const env={...process.env};
       delete env.NODE_TEST_CONTEXT;
-      const child=spawn(process.execPath,['--disallow-code-generation-from-strings','--test','test/linux-core-bootstrap.integration.mjs'],{
+      const integration=env.LEAFSEAMER_TEST_CHRONY_COMPOSE==='1'?'test/linux-compose.integration.mjs':'test/linux-core-bootstrap.integration.mjs';
+      const child=spawn(process.execPath,['--disallow-code-generation-from-strings','--test',integration],{
         cwd:suite,env:{...env,LEAFSEAMER_TEST_NATIVE_CGROUP:'1',LEAFSEAMER_CONTROLLER_BOOTSTRAP_DIST:file('../dist'),
           LEAFSEAMER_TEST_CHRONY_PROFILE:chronyProfile},stdio:['ignore','inherit','inherit']});
       const service={child,exit:once(child,'close')};children.push(service);
       const [status]=await service.exit;
-      assert.equal(status,0,'Controller did not verify a live Chrony signature');
+      assert.equal(status,0,'Product cores did not verify live Chrony signatures');
     }
   }else{
     rejectSigner('clock_evidence_chrony_tracking_only');
