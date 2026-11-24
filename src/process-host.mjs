@@ -76,7 +76,7 @@ export function installedTimeProviderDigest() {
 }
 
 // bootstrapPolicy仅由可信本机装配选择；状态帧不替代持久化AdmissionReceipt或生产profile批准。
-export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, onCoreOutput = () => {}, bootstrapPolicy = null,installationPeer=null,timeProviderPolicy=null,pairingProfile=null} = {}) {
+export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, onCoreOutput = () => {}, bootstrapPolicy = null,installationPeer=null,timeProviderPolicy=null,pairingProfile=null,standaloneProfile=null} = {}) {
   const {root, executable, env} = prepareProcessHost();
   const policy = bootstrapPolicy === null ? null : validateBootstrapPolicy(bootstrapPolicy);
   if (policy) check(policy.artifact_manifest_ref.digest === installedCoreDigest(), 'bootstrap_artifact');
@@ -88,6 +88,10 @@ export async function startProcessHost({dataDir, host = '127.0.0.1', port = 0, o
   if (pairingProfile !== null) {
     check(policy && typeof pairingProfile === 'string' && path.isAbsolute(pairingProfile), 'pairing_profile_path');
     args.push('--pairing-profile', pairingProfile);
+  }
+  if(standaloneProfile!==null){
+    check(policy&&pairingProfile===null&&typeof standaloneProfile==='string'&&path.isAbsolute(standaloneProfile),'standalone_profile_path');
+    args.push('--standalone-profile',standaloneProfile);
   }
   if (timeProviderPolicy !== null) {
     const format = 'leafseamer-time-provider-bootstrap-policy/1';

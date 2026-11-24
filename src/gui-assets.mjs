@@ -10,7 +10,7 @@ const types = {'.html': 'text/html; charset=utf-8', '.json': 'application/json',
 const csp = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 // 本地可信装配输入；启动时核验并固定字节，HTTP请求不能选择目录或改写站点身份。
-export function loadGuiAssets(directory, identity, origin, {manifestSha256 = null, seamerIdentity = null} = {}) {
+export function loadGuiAssets(directory, identity, origin, {manifestSha256 = null, seamerIdentity = null, standalone = false} = {}) {
   const url = new URL(origin);
   if (url.protocol !== 'https:' || url.origin !== origin || typeof directory !== 'string' || !path.isAbsolute(directory)) throw new Error('gui_options');
   const read = (name, limit) => {
@@ -41,6 +41,7 @@ export function loadGuiAssets(directory, identity, origin, {manifestSha256 = nul
       site.site_label.length < 1 || site.site_label.length > 120 || /[\u0000-\u001f\u007f]/.test(site.site_label)) throw new Error('gui_site_scope');
   let policy=csp;
   if(v2&&site.seamer!==null){
+    if(standalone)throw new Error('gui_seamer_scope');
     const s=site.seamer,uuid=v=>typeof v==='string'&&v.length===36&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v);
     if(!exact(s,v3?'base_url,binding_source,database_instance_id,service_id,service_label':'base_url,database_instance_id,service_id,service_label')||!uuid(s.service_id)||!uuid(s.database_instance_id)||s.service_id===identity.service_id||typeof s.service_label!=='string'||s.service_label.length<1||s.service_label.length>120||/[\u0000-\u001f\u007f]/.test(s.service_label)||typeof s.base_url!=='string'||s.base_url.length>1024)throw new Error('gui_seamer_scope');
     if(seamerIdentity!==null&&(s.service_id!==seamerIdentity.service_id||s.database_instance_id!==seamerIdentity.database_instance_id))throw new Error('gui_seamer_scope');

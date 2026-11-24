@@ -17,7 +17,7 @@ import {referenceTimeScheduler} from './reference-time-scheduler.mjs';
 import canonicalize from './runtime/canonicalize.mjs';
 import {createHash} from 'node:crypto';
 
-export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null, guiManifestSha256 = null, coreBootstrap = null, pairing = null, referenceTimeAuthorization = null, localPairingManagement = false} = {}) {
+export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null, guiManifestSha256 = null, coreBootstrap = null, pairing = null, referenceTimeAuthorization = null, localPairingManagement = false, standalone = false} = {}) {
   if (!['127.0.0.1', '::1'].includes(host) || !Number.isInteger(port) || port < 0 || port > 65535) throw new Error('listen_options');
   if (authenticationProvider !== null && typeof authenticationProvider !== 'function') throw new Error('authentication_provider');
   if (tls !== null && (!tls || Object.keys(tls).sort().join(',') !== 'cert,key,origin' || typeof tls.origin !== 'string')) throw new Error('tls_options');
@@ -40,6 +40,8 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     if (localPairingManagement && (!supervision || !tls || !pairing || Number(storage.identity.schema_revision) < 93)) {
       throw new Error('pairing_profile_management_unavailable');
     }
+    if(standalone&&(!supervision||!tls||!authenticationProvider||!guiDirectory||!guiManifestSha256||pairing||localPairingManagement||
+      storage.enrollment?.summary().mode!=='standalone'))throw new Error('standalone_profile_runtime');
   } catch (error) { try { storage.close(); } finally { timeProviderLink?.close(); supervision?.close(); } throw error; }
   let clock = null, authentication = null, sessions = null;
   if (storage.clockJournal) {
@@ -53,7 +55,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     }
     catch (error) {
       clock?.stop(); authentication?.stop(); sessions = null;
-      if (pairing !== null) { try { storage.close(); } finally { supervision?.close(); } throw error; }
+      if (pairing !== null || standalone) { try { storage.close(); } finally { supervision?.close(); } throw error; }
       try { storage.clockJournal.fault('native_clock_unavailable'); }
       catch (error) { try { storage.close(); } finally { timeProviderLink?.close(); supervision?.close(); } throw error; }
       clock = {status: () => ({state: 'faulted', qualified: false}), stop() {}};
@@ -160,7 +162,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       });
     }
     const gui = guiDirectory === null ? null : loadGuiAssets(guiDirectory, storage.identity, tls.origin, {
-      manifestSha256: guiManifestSha256, seamerIdentity: localPairingManagement ? pairing.peers?.[0]?.identity ?? null : null
+      manifestSha256: guiManifestSha256, seamerIdentity: localPairingManagement ? pairing.peers?.[0]?.identity ?? null : null, standalone
     });
     async function managePairing(auth, operation, input) {
       if (closing || !peerTransport) throw new Error('pairing_runtime_unavailable');
@@ -226,6 +228,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   server.on('clientError', (_error, socket) => { if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); });
   try {
     assertRuntimeCurrent();
+    if(standalone&&!authentication?.status().qualified)throw new Error('standalone_profile_clock_unqualified');
     if (pairing !== null && !authentication?.status().qualified) throw new Error('pairing_clock_unqualified');
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); }); assertRuntimeCurrent();
     if (pairing !== null) {

@@ -30,6 +30,27 @@ npm start -- --data-dir /absolute/controller-data --port 8081
 
 Windows 使用绝对目录参数，运行文件与业务数据分开存放。当前为开发启动入口，尚非 C12 的安装器或受监督生产启动流程；Windows 目录 ACL、Linux 服务账户、TLS 和发行制品仍需各自验收。监听仅允许 `127.0.0.1` 或 `::1`，没有将 HTTP 扩展到远端的开关。
 
+### Windows 独立现场的受监督 HTTPS 入口
+
+使用已核验的 Controller、GUI 和 SDK 组合。首次安装初始化专用业务目录和原生监督日志，按本机 `enroll-admin` 流程登记 `standalone` 管理员。停机时运行 `migrate-storage --data-dir <绝对目录> --to-revision current`，可迁移至当前构建支持的版本。也可显式指定存储版本号。GUI 制品的站点配置须绑定该库的 `service_id` 与 `database_instance_id`，并使用同一 SDK 选择。
+
+将 `leafseamer.controller-standalone-profile/1` 配置保存到受保护的本机绝对路径。配置包含 `format` 和以下四个对象，TLS 私钥及认证证据均从本机文件读取。
+
+| 字段 | 配置内容 |
+| --- | --- |
+| `bootstrap` | 已核验的原生核心准入政策，绑定当前服务、数据库、制品摘要和平台配置 |
+| `https` | `origin`、`certificate_file`、`private_key_file`。`origin` 必须匹配指定的回环地址和端口 |
+| `clock` | `policy_digest`、`evidence_file`、`public_key_file`。可信提供者须为本次启动及原生时钟域提交签名证据 |
+| `gui` | `directory`、`manifest_sha256`。摘要为 GUI 清单原字节的 `sha256:` 值 |
+
+```powershell
+leafseamer-controller supervise --data-dir <绝对数据目录> --host 127.0.0.1 --port 7443 --standalone-profile <绝对配置路径>
+```
+
+此配置使用 Controller 内置 HTTPS 提供静态 GUI 和本机人员认证。核心准入、认证时钟和 GUI 清单核验成功后才开始监听。启动保持设备保护态。Windows 服务注册、生产认证时钟和完整套件安装仍按 C12 单独验收。
+
+受信启动器可用私有管道运行 `supervise --stdin-control pipe`，通过标准输入发送 `stop` 加换行，或关闭管道。监督器确认本次进程组退出后输出 `process_group_empty`。启动器以该回执核对退出，再启动同一实例的新运行代。
+
 ### Windows 进程容纳启动
 
 Windows x64 开发包须先显式执行 `node --disallow-code-generation-from-strings dist/cli.mjs init-process-host --data-dir <绝对目录>` 安装启动日志，然后使用 `node --disallow-code-generation-from-strings dist/cli.mjs supervise --data-dir <绝对目录> --port 8081`。该入口先核验包内构建资产，再启动随包的原生进程宿主，由宿主创建 Controller 核心。Node 入口和参数固定解析，不经过 shell；子进程环境仅保留 Windows 系统及临时目录变量，不继承 Node 预加载／调试环境。核心仍使用原有排他业务库与保护态 HTTP，`/health/ready` 返回503。

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import path from 'node:path';
 import {initializeStorage, migrateStorage, openStorage, StorageError} from './storage.mjs';
+import {currentStorageRevision} from './storage-revision.mjs';
 import {startController} from './server.mjs';
 import {startProcessHost, initializeProcessHost, upgradeProcessHost, installedCoreDigest, ProcessHostError} from './process-host.mjs';
 import {IdentityError} from './identity-crypto.mjs';
@@ -10,21 +11,21 @@ import canonicalize from 'canonicalize';
 import {openNativeClock} from './native-clock.mjs';
 import {BootstrapError, validateBootstrapPolicy, createCoreBootstrapChannel, verifyCoreAssignment, verifyCoreAdmission} from './core-bootstrap.mjs';
 import {connectCoreSupervisor, SupervisorError} from './supervisor-control.mjs';
-import {openTrustedPairingClock, readTrustedPairingProfile} from './trusted-pairing-profile.mjs';
+import {openTrustedControllerClock, readTrustedPairingProfile, readTrustedStandaloneProfile} from './trusted-pairing-profile.mjs';
 import {LocalPairingError, runLocalPairingAdmin} from './local-pairing-admin.mjs';
 import {discoverObsScenes,inspectObsCut,ObsDiscoveryError} from './obs-discovery.mjs';
 import {initializeLinuxSecretStore,initializeWindowsSecretStore,openLinuxSecretStore,openWindowsSecretStore} from './secret-store.mjs';
 import {windowsSecretDirectory} from './windows-secret-files.mjs';
 const authenticatedCore = process.argv[2] === 'contained-core-auth';
 const emit = value => (authenticatedCore ? process.stderr : process.stdout).write(JSON.stringify(value) + '\n');
-const pairingStartupError = code => /^pairing_(profile|clock)_[a-z_]+$/.test(code);
+const trustedStartupError = code => /^(pairing_(profile|clock)|standalone_profile)_[a-z_]+$/.test(code);
 let app;
 try {
   const [command, ...args] = process.argv.slice(2);
   const obsInspector=command==='inspect-obs'?discoverObsScenes:command==='inspect-obs-cut'?inspectObsCut:null;
   const secretCommands = ['init-obs-secret-store', 'seal-obs-resource-credential', 'observe-obs-resource'];
   const allowed = secretCommands.includes(command) ? ['--data-dir','--secret-dir',...(command==='init-obs-secret-store'?['--new-key-dir']:[])] :
-    command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile'] : [])] : [];
+    command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile','--standalone-profile'] : []), ...(command==='supervise'?['--stdin-control']:[])] : [];
   if ((!allowed.length && !obsInspector) || args.length % 2) throw new Error('arguments');
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
@@ -48,8 +49,8 @@ try {
     emit({event: 'storage_initialized', ...identity, ready: false});
   } else if (command === 'migrate-storage') {
     const target = options['--to-revision'];
-    if (target !== undefined && !/^[1-9][0-9]?$/.test(target)) throw new Error('arguments');
-    emit({event: 'storage_migrated', ...await migrateStorage(options['--data-dir'], target === undefined ? undefined : Number(target)), ready: false});
+    if (target !== undefined && target!=='current' && !/^[1-9][0-9]*$/.test(target)) throw new Error('arguments');
+    emit({event: 'storage_migrated', ...await migrateStorage(options['--data-dir'], target==='current'?currentStorageRevision:target===undefined?undefined:Number(target)), ready: false});
   } else if (command === 'register-device') {
     requireLocalAdministrator(); requirePrivatePipes();
     const storage = openStorage(options['--data-dir']);
@@ -114,16 +115,34 @@ try {
     const rawPort = options['--port'] ?? '0';
     if (!/^(0|[1-9][0-9]{0,4})$/.test(rawPort)) throw new Error('arguments');
     const launch = {dataDir: options['--data-dir'], host: options['--host'] ?? '127.0.0.1', port: Number(rawPort)};
-    const profilePath = options['--pairing-profile'];
-    const profile = profilePath === undefined ? null : readTrustedPairingProfile(profilePath, launch.host, launch.port);
+    const pairingPath=options['--pairing-profile'],standalonePath=options['--standalone-profile'];
+    if(pairingPath!==undefined&&standalonePath!==undefined)throw new Error('standalone_profile_conflict');
+    let profile=null;
+    if(standalonePath!==undefined)profile=readTrustedStandaloneProfile(standalonePath,launch.host,launch.port);
+    if(pairingPath!==undefined)profile=readTrustedPairingProfile(pairingPath,launch.host,launch.port);
     if (command === 'supervise') {
+      const stdinControl=options['--stdin-control'];
+      if(stdinControl!==undefined){
+        if(stdinControl!=='pipe')throw new Error('arguments');
+        requirePrivatePipes();
+      }
       app = await startProcessHost({...launch, onCoreOutput: chunk => process.stderr.write(chunk),
-        ...(profile && {bootstrapPolicy: profile.policy, pairingProfile: profilePath})});
+        ...(profile && {bootstrapPolicy: profile.policy, pairingProfile: pairingPath??null, standaloneProfile: standalonePath??null})});
       emit(app.containment);
       const stop = () => { app.close().catch(() => {}); };
       process.once('SIGINT', stop); process.once('SIGTERM', stop);
-      const result = await app.exited; emit(result); process.exitCode = result.exitCode;
-      process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop);
+      let control='';
+      const receive=data=>{
+        if(control.length+data.length<=5)control+=data;
+        else control='';
+        if(control==='stop\n'||control===''||!'stop\n'.startsWith(control)){process.stdin.pause();stop();}
+      };
+      if(stdinControl){process.stdin.setEncoding('utf8').on('data',receive).once('end',stop).once('error',stop);process.stdin.resume();}
+      try{const result=await app.exited;emit(result);process.exitCode=result.exitCode;}
+      finally{
+        process.removeListener('SIGINT',stop);process.removeListener('SIGTERM',stop);
+        if(stdinControl){process.stdin.removeListener('data',receive).removeListener('end',stop).removeListener('error',stop);process.stdin.destroy();}
+      }
     } else {
     const contained = command === 'contained-core' || authenticatedCore;
     if (contained) requirePrivatePipes();
@@ -133,23 +152,23 @@ try {
       if (typeof rawPolicy !== 'string' || Buffer.byteLength(rawPolicy) > 8192) throw new BootstrapError('bootstrap_policy');
       const policy = validateBootstrapPolicy(JSON.parse(rawPolicy));
       if (canonicalize(policy) !== rawPolicy || policy.artifact_manifest_ref.digest !== installedCoreDigest()) throw new BootstrapError('bootstrap_artifact');
-      if (profile && canonicalize(profile.policy) !== rawPolicy) throw new BootstrapError('pairing_profile_bootstrap');
+      if (profile && canonicalize(profile.policy) !== rawPolicy) throw new BootstrapError(standalonePath===undefined?'pairing_profile_bootstrap':'standalone_profile_bootstrap');
       let admittedCore;
       if (profile) {
         launch.tls = profile.tls;
-        launch.pairing = profile.pairing;
-        launch.localPairingManagement = true;
+        if(profile.pairing){launch.pairing=profile.pairing;launch.localPairingManagement=true;}
+        launch.standalone=standalonePath!==undefined;
         if (profile.gui) {
           launch.guiDirectory = profile.gui.directory;
           launch.guiManifestSha256 = profile.gui.manifest_sha256;
         }
         launch.authenticationProvider = async input => {
-          try { return await openTrustedPairingClock(profile, input, admittedCore.binding, admittedCore.supervision, emit); }
+          try { return await openTrustedControllerClock(profile, input, admittedCore.binding, admittedCore.supervision, emit); }
           catch (error) {
             const reason = error.code ?? error.message;
             // 核心关闭控制通道前交付诊断，此后由宿主确认退役。
             await new Promise(resolve => process.stderr.write(JSON.stringify({event: 'authentication_clock_rejected',
-              reason: pairingStartupError(reason) ? reason : 'pairing_clock_evidence_invalid'}) + '\n', resolve));
+              reason: trustedStartupError(reason) ? reason : 'pairing_clock_evidence_invalid'}) + '\n', resolve));
             throw error;
           }
         };
@@ -197,7 +216,7 @@ try {
     }
     emit({event: 'listening', host: app.address.address, port: app.address.port, service_id: app.identity.service_id,
       database_instance_id: app.identity.database_instance_id, service_boot_id: app.serviceBootId,
-      ...(profile && {pairing_origin: app.pairing.transport.origin}), ready: false});
+      ...(app.pairing && {pairing_origin: app.pairing.transport.origin}), ready: false});
     }
   }
 } catch (error) {
@@ -205,7 +224,7 @@ try {
   const code = error.code ?? error.message;
   const known = error instanceof StorageError || error instanceof IdentityError || error instanceof ProcessHostError ||
     error instanceof BootstrapError || error instanceof SupervisorError || error instanceof LocalPairingError ||
-    error instanceof ObsDiscoveryError || pairingStartupError(code);
+    error instanceof ObsDiscoveryError || trustedStartupError(code);
   process.stderr.write(JSON.stringify({error: known ? code : 'startup_failed'}) + '\n');
   process.exitCode = 1;
 }
