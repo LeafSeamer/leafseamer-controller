@@ -50,8 +50,8 @@ function localGroup(descriptor,serviceKind,compose){
 
 export function openLinuxCoreBootstrap(policy,serviceKind,{compose=false,workerControl=false,workerChannelDirectory}={}){
   check(serviceKind==='controller'||serviceKind==='seamer','bootstrap_linux_service');
-  check(!workerControl||serviceKind==='controller'&&!compose,'bootstrap_linux_control');
-  check(workerChannelDirectory===undefined||workerControl,'bootstrap_linux_control');
+  check(!workerControl||serviceKind==='controller','bootstrap_linux_control');
+  check(workerChannelDirectory===undefined||workerControl&&!compose,'bootstrap_linux_control');
   check(process.platform==='linux'&&fs.fstatSync(3).isSocket(),'bootstrap_linux_channel');
   verifyArtifact(policy,serviceKind);
   function channelDirectory(){
