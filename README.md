@@ -625,6 +625,10 @@ CLI 在写入 boot 记录前校验数据库身份及最低 Schema 5。此入口�
 
 续签时保留同一 `policy` 和 `runtime` 原件，在旧健康原件到期前发布绑定到该运行域的新 `health` 原件。旧采集仍受将它写入数据库时的健康截止约束。新原件只有完成新一次采集事务后才成为该次采集的依据。若采集中途发生合法续签，Controller 可以用新原件重新采集一次，并继续核对旧原期限。到期或撤下原件产生的运行域故障保持锁闭。
 
+在 `contained-core-linux` 同时提供 `--pairing-profile <绝对路径>` 可开启受信配对。Linux 配对配置使用 `leafseamer.controller-pairing-profile/2`，沿用 `bootstrap`、`https`、`local`、`seamer` 和可选 `gui` 字段。认证时钟独立使用 `--clock-evidence-profile` 的 `/2` 格式。`bootstrap` 必须与监督器传入的规范原件一致。最低 Schema 93，启动前须完成管理员初始化，并用 `--port` 指定配置中的回环 HTTPS 端口。配置与 TLS 文件须位于受保护的绝对路径，当前服务账户须有读取权限。
+
+初次认证采集可用后才开启人员 HTTPS 和配对双向 TLS。管理员经既有本机 `pairing-admin` 流程暂存配对、签发一次性授权和激活。Seamer 在本机导入该原件后参与双向证明。等待认证采集期间监督通道关闭会取消启动，运行后通道关闭会关闭监听。该入口的整体就绪诊断仍返回 503。
+
 ## 原生时钟诊断
 
 schema 3 服务每500毫秒调用原生采集器。Windows 顺序为 `QueryInterruptTimePrecise → GetSystemTimePreciseAsFileTime → QueryInterruptTimePrecise`，FILETIME 用整数减纪元再转纳秒；Linux 实现使用 `CLOCK_BOOTTIME → CLOCK_REALTIME → CLOCK_BOOTTIME` 并检查时间命名空间。没有 `Date.now()` 或浮点秒替代路径。原生接口依据：[Microsoft 单调时间](https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-queryinterrupttimeprecise)、[精确系统时间](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemtimepreciseasfiletime)、[Linux clock_gettime](https://www.man7.org/linux/man-pages/man2/clock_gettime.2.html)。

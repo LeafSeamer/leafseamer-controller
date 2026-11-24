@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import {setTimeout as delay} from 'node:timers/promises';
 import {canonical, context, fields, need} from './auth-clock-value.mjs';
 import {clockInteger} from './native-clock.mjs';
 import {pairingUuid} from './peer-pairing-value.mjs';
@@ -39,6 +40,7 @@ function read(file, limit) {
     return bytes.subarray(0, offset);
   } finally { fs.closeSync(fd); }
 }
+export {read as readLinuxProtectedFile};
 
 export function readLinuxClockEvidenceProfile(file, policy, role) {
   try {
@@ -72,7 +74,15 @@ function publishChallenge(directory, challenge) {
   } finally { fs.unlinkSync(temp); }
 }
 
-export function inspectLinuxClockEvidence(profile, scope, {policy, binding}, source) {
+function immutableEvidence(value) {
+  if (value !== null && typeof value === 'object') {
+    for (const entry of Object.values(value)) immutableEvidence(entry);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+export function inspectLinuxClockEvidence(profile, scope, {policy, binding, assertLive}, source) {
   const {descriptor, receipt} = binding;
   need(descriptor.clock_backend_id === 'linux_boottime' && descriptor.authority_service_id === scope.service_id &&
     receipt.containment_ref.backend === 'linux_cgroup_v2' && receipt.gate_state === 'closed', 'linux_clock_evidence_binding');
@@ -81,15 +91,23 @@ export function inspectLinuxClockEvidence(profile, scope, {policy, binding}, sou
   const directory = profile.exchange_directory;
   publishChallenge(directory, challenge);
   const evidenceFile = path.join(directory, 'evidence-'+scope.service_boot_id+'.json');
+  let verifiedBytes, verifiedEvidence;
   function current() {
+    if (profile.authentication) assertLive();
     let bytes;
     try {
       bytes = read(evidenceFile, 65536);
     } catch (error) {
+      verifiedBytes = verifiedEvidence = undefined;
       if (error.code === 'ENOENT') return null;
       throw error;
     }
-    const evidence = verifyClockEvidence(bytes, profile.key);
+    // 仅对完全相同的字节复用验签结果，每次仍重新读取受保护文件并核对运行域和截止。
+    if (!verifiedBytes?.equals(bytes)) {
+      verifiedEvidence = immutableEvidence(verifyClockEvidence(bytes, profile.key));
+      verifiedBytes = bytes;
+    }
+    const evidence = verifiedEvidence;
     const capture = source.capture(), now = source.tick();
     need(evidence?.policy?.digest === profile.policy_digest && capture.continuity === challenge.continuity &&
       evidence.runtime?.continuity === challenge.continuity && evidence.runtime.clock_domain_id === challenge.clock_domain_id &&
@@ -107,4 +125,15 @@ export function inspectLinuxClockEvidence(profile, scope, {policy, binding}, sou
       catch (error) { return error.code === 'auth_clock_evidence_expired' ? 'expired' : 'rejected'; }
     }
   });
+}
+
+export async function waitForLinuxAuthentication(authentication, signal) {
+  const deadline = performance.now() + 10000;
+  for (;;) {
+    signal.throwIfAborted();
+    const status = authentication.status();
+    if (status.qualified) return;
+    need(status.state !== 'faulted' && performance.now() < deadline, 'pairing_clock_unqualified');
+    await delay(50, undefined, {signal});
+  }
 }

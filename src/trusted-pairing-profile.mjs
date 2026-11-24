@@ -7,6 +7,7 @@ import {context,fields} from './auth-clock-value.mjs';
 import {pairingUuid} from './peer-pairing-value.mjs';
 import {validateBootstrapPolicy} from './core-bootstrap.mjs';
 import {authenticationClockChallenge, verifyClockEvidence} from './clock-evidence-envelope.mjs';
+import {readLinuxProtectedFile} from './linux-clock-evidence.mjs';
 
 const hash = value => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value);
 const read = (file, limit = 65536) => {
@@ -29,11 +30,11 @@ function httpsOrigin(value) {
   need(url.protocol === 'https:' && url.origin === value, 'pairing_profile_endpoint');
   return url;
 }
-function listener(https,host,port) {
+function listener(https,host,port,readFile=read) {
   fields(https,['origin','certificate_file','private_key_file']);
   const site=httpsOrigin(https.origin),hostname=host==='::1'?'[::1]':host;
   need(site.hostname===hostname&&Number(site.port||443)===port,'pairing_profile_endpoint');
-  return {origin:https.origin,cert:read(https.certificate_file),key:read(https.private_key_file)};
+  return {origin:https.origin,cert:readFile(https.certificate_file,65536),key:readFile(https.private_key_file,65536)};
 }
 function trustedClock(clock) {
   fields(clock,['policy_digest','evidence_file','public_key_file']);
@@ -59,14 +60,15 @@ export function readTrustedStandaloneProfile(file,host,port) {
   } catch { throw Object.assign(new Error('standalone_profile_invalid'),{code:'standalone_profile_invalid'}); }
 }
 
-export function readTrustedPairingProfile(file, host, port) {
+export function readTrustedPairingProfile(file, host, port, {linux = false} = {}) {
   try {
-    const profile = json(read(file)), {bootstrap, https, local, seamer, clock} = profile;
-    fields(profile, ['format', 'bootstrap', 'https', 'local', 'seamer', 'clock', ...(Object.hasOwn(profile, 'gui') ? ['gui'] : [])]);
-    need(profile.format === 'leafseamer.controller-pairing-profile/1', 'pairing_profile_format');
+    const readFile = linux ? readLinuxProtectedFile : read;
+    const profile = json(readFile(file,65536)), {bootstrap, https, local, seamer, clock} = profile;
+    fields(profile, ['format', 'bootstrap', 'https', 'local', 'seamer', ...(linux ? [] : ['clock']), ...(Object.hasOwn(profile, 'gui') ? ['gui'] : [])]);
+    need(profile.format === 'leafseamer.controller-pairing-profile/'+(linux ? '2' : '1'), 'pairing_profile_format');
     const policy = validateBootstrapPolicy(bootstrap);
     pairingUuid(policy.service_id); pairingUuid(policy.database_instance_id);
-    const tls=listener(https,host,port);
+    const tls=listener(https,host,port,readFile);
     fields(local, ['credential_id', 'host', 'port', 'certificate_file', 'private_key_file', 'ca_files',
       ...(Object.hasOwn(local,'network')?['network']:[]), ...(Object.hasOwn(local,'server_name')?['server_name']:[])]);
     fields(seamer, ['identity', 'origin', 'server_name', 'certificate_file', 'trust_bundle_digest']);
@@ -84,11 +86,11 @@ export function readTrustedPairingProfile(file, host, port) {
       typeof seamer.server_name === 'string' && seamer.server_name.length > 0 && seamer.server_name.length <= 253 &&
       hash(seamer.trust_bundle_digest), 'pairing_profile_scope');
     const gui=Object.hasOwn(profile,'gui')?trustedGui(profile.gui):null;
-    return {policy,gui,clock:trustedClock(clock),tls,
-      pairing: {credential_id: local.credential_id, host: local.host, port: local.port, network, serverName:local.server_name??local.host, cert: read(local.certificate_file),
-        key: read(local.private_key_file), ca: local.ca_files.map(file => read(file)), peers: [{identity: seamer.identity,
+    return {policy,gui,clock:linux ? null : trustedClock(clock),tls,
+      pairing: {credential_id: local.credential_id, host: local.host, port: local.port, network, serverName:local.server_name??local.host, cert: readFile(local.certificate_file,65536),
+        key: readFile(local.private_key_file,65536), ca: local.ca_files.map(file => readFile(file,65536)), peers: [{identity: seamer.identity,
           origin: seamer.origin, server_name: seamer.server_name, trust_bundle_digest: seamer.trust_bundle_digest,
-          cert: read(seamer.certificate_file).toString('utf8')}]}};
+          cert: readFile(seamer.certificate_file,65536).toString('utf8')}]}};
   } catch { throw Object.assign(new Error('pairing_profile_invalid'), {code: 'pairing_profile_invalid'}); }
 }
 

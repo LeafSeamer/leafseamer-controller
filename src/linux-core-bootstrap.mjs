@@ -46,6 +46,8 @@ export function openLinuxCoreBootstrap(policy,serviceKind){
   verifyArtifact(policy,serviceKind);
   const socket=new Socket({fd:3,readable:true,writable:true});
   const channel=createCoreBootstrapChannel(socket,socket,{timeoutMs:policy.bootstrap_timeout_ms});
+  const loss=new AbortController(),{signal}=loss;
+  const markLost=()=>loss.abort(new BootstrapError('bootstrap_linux_channel'));
   return Object.freeze({
     async accept({identity,source}){
       let assignment=await channel.assignment();
@@ -54,12 +56,17 @@ export function openLinuxCoreBootstrap(policy,serviceKind){
       verifyCoreAssignment(assignment,policy,identity,{clockBackend:'linux_boottime',namespace:'linux_'+namespace.replace(':','_')});
       const containment=localGroup(descriptor,serviceKind);
       const issued=BigInt(assignment.issued_tick_ns),expires=BigInt(assignment.expires_tick_ns);
+      function assertLive(){
+        check(!signal.aborted&&!socket.destroyed&&!socket.readableEnded,'bootstrap_linux_channel');
+        check(canonicalize(localGroup(descriptor,serviceKind))===canonicalize(containment),'bootstrap_linux_group');
+        const current=fs.statSync('/proc/self/ns/time',{bigint:true});
+        check(String(current.dev)+':'+current.ino===namespace,'bootstrap_linux_clock');
+      }
       function assertCurrent(){
-        check(!socket.destroyed&&!socket.readableEnded,'bootstrap_linux_channel');
+        assertLive();
         check(source.capture().continuity==='linux:'+namespace,'bootstrap_linux_clock');
         const now=source.tick();
         check(now>=issued&&now<expires,'bootstrap_expired');
-        check(canonicalize(localGroup(descriptor,serviceKind))===canonicalize(containment),'bootstrap_linux_group');
       }
       assertCurrent();
       const receipt=await channel.proveAndReceive(assignment);
@@ -68,12 +75,13 @@ export function openLinuxCoreBootstrap(policy,serviceKind){
       assignment=null;
       assertCurrent();
       channel.release();
-      return {binding,policy,assertCurrent};
+      socket.once('end',markLost).once('close',markLost).once('error',markLost).once('data',markLost);
+      socket.resume();
+      return {binding,policy,assertCurrent,assertLive,signal};
     },
     monitor(stop){
-      socket.once('end',stop).once('close',stop).once('error',stop).on('data',stop);
-      if(socket.destroyed||socket.readableEnded)stop();
-      else socket.resume();
+      if(signal.aborted)stop();
+      else signal.addEventListener('abort',stop,{once:true});
     },
     close(){channel.close();socket.destroy();}
   });

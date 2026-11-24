@@ -5,7 +5,7 @@ import {openStorage} from './storage.mjs';
 import {openNativeClock} from './native-clock.mjs';
 import {startClockMonitor} from './clock-monitor.mjs';
 import {startAuthenticationClock} from './auth-clock.mjs';
-import {inspectLinuxClockEvidence} from './linux-clock-evidence.mjs';
+import {inspectLinuxClockEvidence, waitForLinuxAuthentication} from './linux-clock-evidence.mjs';
 import {createAuthenticationHttp} from './auth-http.mjs';
 import {loadGuiAssets} from './gui-assets.mjs';
 import {startPeerPairingTransport} from './peer-pairing-transport.mjs';
@@ -34,15 +34,16 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   if ((!protectedIngress && !['127.0.0.1', '::1'].includes(host)) ||
       !Number.isInteger(port) || port < (protectedIngress ? 1 : 0) || port > 65535) throw new Error('listen_options');
   if (authenticationProvider !== null && typeof authenticationProvider !== 'function') throw new Error('authentication_provider');
-  if (linuxClockEvidenceProfile !== null && (process.platform !== 'linux' || !coreBootstrap || authenticationProvider || tls || pairing)) {
+  const linuxPairing = linuxClockEvidenceProfile?.authentication === true && pairing !== null && tls !== null && localPairingManagement;
+  if (linuxClockEvidenceProfile !== null && (process.platform !== 'linux' || !coreBootstrap || authenticationProvider || (!linuxPairing && (tls || pairing)))) {
     throw new Error('linux_clock_evidence_binding');
   }
   if (tls !== null && (!tls || Object.keys(tls).sort().join(',') !== 'cert,key,origin' || typeof tls.origin !== 'string')) throw new Error('tls_options');
   if (guiDirectory !== null && tls === null) throw new Error('gui_requires_https');
   if (pairing !== null) pairingUuid(pairing.credential_id);
   const storage = openStorage(dataDir, protectedIngressIdentity);
-  let supervision = null, timeProviderLink = null, timeProviderBinding = null, clockEvidence = null, linuxSource = null;
-  const assertRuntimeCurrent = () => { supervision?.assertCurrent(); timeProviderLink?.assertCurrent(); };
+  let supervision = null, timeProviderLink = null, timeProviderBinding = null, clockEvidence = null, linuxSource = null, linuxRuntime = null;
+  const assertRuntimeCurrent = () => { supervision?.assertCurrent(); linuxRuntime?.assertLive(); timeProviderLink?.assertCurrent(); };
   try {
     if (coreBootstrap !== null) {
       if (typeof coreBootstrap !== 'function' || Number(storage.identity.schema_revision) < 11) throw new Error('core_runtime_migration_required');
@@ -53,6 +54,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       if (linuxClockEvidenceProfile !== null) {
         linuxSource = openNativeClock({linuxWithoutSystemSleep: linuxClockEvidenceProfile.authentication});
         clockEvidence = inspectLinuxClockEvidence(linuxClockEvidenceProfile, storage.authenticationClock.scope, result, linuxSource);
+        if (linuxPairing) linuxRuntime = result;
       }
       result.assertCurrent?.();
       if(supervision)storage.workerLaunches?.runtime?.bindSource(supervision);
@@ -60,7 +62,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       if(supervision)storage.workerLaunches?.authorization?.bindSource(supervision);
       assertRuntimeCurrent();
     }
-    if (localPairingManagement && (!supervision || !tls || !pairing || Number(storage.identity.schema_revision) < 93)) {
+    if (localPairingManagement && ((!supervision && !linuxPairing) || !tls || !pairing || Number(storage.identity.schema_revision) < 93)) {
       throw new Error('pairing_profile_management_unavailable');
     }
     if(standalone&&(!supervision||!tls||!authenticationProvider||!guiDirectory||!guiManifestSha256||pairing||localPairingManagement||
@@ -77,7 +79,8 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
         const provider = linuxAuthentication ? clockEvidence : await authenticationProvider?.(Object.freeze({scope: storage.authenticationClock.scope, source}));
         authentication = startAuthenticationClock(source, storage.authenticationClock, provider ?? null,
           {waitForInitialEvidence: linuxAuthentication, renewableHealth: linuxAuthentication});
-        if (Number(storage.identity.schema_revision) >= 5 && !linuxAuthentication) sessions = storage.sessions(authentication);
+        if (linuxPairing) await waitForLinuxAuthentication(authentication, linuxRuntime.signal);
+        if (Number(storage.identity.schema_revision) >= 5 && (!linuxAuthentication || linuxPairing)) sessions = storage.sessions(authentication);
       }
     }
     catch (error) {
@@ -246,6 +249,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       if (clockEvidence) {
         body.authentication_clock_evidence = body.reason === 'authentication_clock_unavailable' ? 'unavailable' : clockEvidence.status();
         if (linuxClockEvidenceProfile.authentication) body.authentication_clock = authStatus?.state ?? 'faulted';
+        if (linuxPairing && authStatus?.state === 'faulted') body.authentication_clock_reason = authStatus.reason;
       }
     }
     else if (req.url === '/.well-known/leafseamer-contracts') { res.writeHead(503); res.end(); return; }
