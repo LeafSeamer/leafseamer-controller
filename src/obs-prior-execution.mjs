@@ -34,7 +34,10 @@ function closedExecution(db,device,bindingId,activeSession,resource){
    const saved=readCommandRecord(db,id),{record,lifecycle}=saved;
    need(record.state.phase==='finished'&&record.state.resource_status==='clear'&&same(saved.source.binding,old.binding),'holds');
    let evidence=null;
-   if(lifecycle?.unsent){
+   if(lifecycle?.reconciliation){
+    evidence=lifecycle.reconciliation.evidence[2].source_ref;
+    need(record.state.outcome==='unknown'&&db.prepare('SELECT 1 FROM command_hold_clearance WHERE command_id=?').pluck().get(id),'reconciled');
+   }else if(lifecycle?.unsent){
     evidence=lifecycle.unsent.evidence[0].source_ref;
     need(record.state.effect_status==='not_sent'&&db.prepare('SELECT 1 FROM command_hold_clearance WHERE command_id=?').pluck().get(id),'unsent');
    }else if(lifecycle?.settlement?.succeeded){

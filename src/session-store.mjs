@@ -21,6 +21,7 @@ import {remotePermissionStore} from './remote-permission-store.mjs';
 import {tokenIntrospection} from './token-introspection.mjs';
 import {sessionDenialStore} from './session-denial-store.mjs';
 import {confirmObsSceneCatalog} from './obs-scene-confirmation.mjs';
+import {reconcileObsCut} from './obs-cut-reconciliation.mjs';
 
 const HOUR = 3600000000000n, MINUTE = 60000000000n, MAX = (1n << 64n) - 1n;
 const fail = code => { throw new IdentityError(code); };
@@ -229,6 +230,22 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
       return confirmObsSceneCatalog(db,catalog,request,last);
     }));
   }
+  function reconcileObsCutCommand(input,csrf,request){
+    if(Number(contextBinding?.service.schema_revision)<108||!contextBinding)fail('obs_cut_reconciliation_unavailable');
+    function authorize(){
+      const proof=tokenWithCsrf(input,csrf);if(proof.denied)fail(proof.denied);
+      const recent=db.prepare('SELECT recent_before_ns FROM auth_session WHERE session_id=?').pluck().get(proof.session_id);
+      if(proof.principal_kind!=='human'||!['device.recover','device.command'].every(permission=>proof.permissions.includes(permission))||
+        !recent||time().upper>=BigInt(recent))fail('obs_cut_reconciliation_permission');
+      return proof;
+    }
+    return writer(()=>{
+      const proof=authorize();
+      return reconcileObsCut(db,request,proof,contextBinding.bootId,()=>{
+        if(authorize().authorization_digest!==proof.authorization_digest)fail('obs_cut_reconciliation_permission');
+      });
+    });
+  }
   const peerPairings=Number(contextBinding?.service.schema_revision)>=59?peerPairingStore({db,service:contextBinding.service,bootId:contextBinding.bootId,writer,authenticated,authority,
     time(){
       if(typeof clock.pairingSample!=='function')fail('peer_pairing_clock_unavailable');
@@ -288,6 +305,7 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
       return readCurrentDeviceCatalog(input,deviceId,sceneCatalogCurrent);
     },
     confirmSceneCatalog,
+    reconcileObsCutCommand,
     getControl(input, deviceId) { return readDevice(input, 'control.read', () => devices.control(deviceId)); },
     localPermissions(input) {
       if (!authority?.current) fail('local_authorization_unavailable');

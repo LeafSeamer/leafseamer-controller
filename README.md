@@ -323,6 +323,8 @@ Controller 重启后，人员可以凭当前会话发起控制变更。如果旧
 
 Schema 107 支持隔离 OBS 的跨 Controller 重启恢复。停机后使用 `migrate-storage --data-dir ABSOLUTE_PATH --to-revision 107`。人员释放并重新取得控制，接管时由新监督域核验旧核心和 Worker 组已退出。当前批准、安装内容和设备资源仍有效时，这次接管可登记一个新封闭启动。新会话须重新确认场景目录，且首次开闸须核对旧会话和命令占用。旧命令效果未决且占用未核销时，设备继续保持保护。
 
+Schema 108 支持隔离 OBS 已派发 Cut 的核对与占用释放。停机后使用 `migrate-storage --data-dir ABSOLUTE_PATH --to-revision 108`。当原关闭回执缺失、原发送报告与关联四帧已在原期限内入库时，可信装配可调用 `sessions.reconcileObsCutCommand`。调用需要当前重新接管的人员、近期认证、会话 CSRF、`device.recover`、`device.command` 和精确的原状态引用。Controller 以原报文与回执核对效果，以已退役的原写出口和固定无重传政策核对释放，再同事务追加 Resolution、释放证据和命令修订。原终态继续显示 `unknown`，自动化继续暂停，设备开闸仍须重新确认和采样。缺少原关联证据的命令继续占用资源。
+
 ### 执行会话与初始控制屏障
 
 schema42将人员执行来源改为实际挑战／响应：`beginManualExecutionChallenge`核验人员令牌、当前持有人、权限和运行装配，生成32字节随机nonce，将挑战与提交审计同事务保存；`completeManualExecutionChallenge`核验实际令牌秘密、完整挑战引用和nonce，响应关联与人员来源／审计同事务提交。挑战绑定实际token、会话、凭据、控制原件、完整执行Binding及原核心观察；截止不超过挑战开始后两秒和原观察期限。相同请求只返回仍有效的原件，不换nonce或续期；错误nonce、不同响应内容、过期及旧单步取证入口均拒绝。

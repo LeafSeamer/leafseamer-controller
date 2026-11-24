@@ -149,7 +149,10 @@ export function fixedMemoryCompletion({source,report,observation,receivedTick,ba
 const unsigned=value=>typeof value==='string'&&/^(?:0|[1-9][0-9]{0,19})$(?![\s\S])/.test(value);
 const requestId=value=>typeof value==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$(?![\s\S])/.test(value);
 export function fixedObsCutCompletion({source,report,observation,receivedTick,committedTick,coverage,scene}){
- if(!observation||report.transport_entered_tick_ns===null||coverage?.proof!=='transport_entered'||
+ return coverage?.proof==='transport_entered'&&fixedObsCutWireEffect({source,report,observation,receivedTick,committedTick,scene});
+}
+function fixedObsCutWireEffect({source,report,observation,receivedTick,committedTick,scene}){
+ if(!observation||report.transport_entered_tick_ns===null||
   report.disposition!=='in_flight'||report.proof!=='transport_entered'||observation.bytes_written!==obsCutPacketBytes)return false;
  const entered=BigInt(report.transport_entered_tick_ns),before=entered+BigInt(source.deadline.evidence_timeout_ms)*1000000n;
  const wire=observation.response,kinds=['set_send','set_ack','query_send','query_result'];
@@ -170,14 +173,36 @@ export function fixedObsCutCompletion({source,report,observation,receivedTick,co
   query.protocol_request_id===result.protocol_request_id&&set.protocol_request_id!==query.protocol_request_id&&
   BigInt(observation.observed_tick_ns)<=receivedTick;
 }
+function settlementResource(db,ready){
+ const resource=row(db,'SELECT body_jcs,body_digest FROM device_initial_resource WHERE source_id=?',ready.dispatch.plan.resource_source_ref.id);
+ need(resource,'resource');const saved=JSON.parse(resource.body_jcs),{digest:resourceDigest,...body}=saved;
+ need(canonical(saved)===resource.body_jcs&&digest(body)===resourceDigest&&resourceDigest===resource.body_digest&&
+  resourceDigest===ready.dispatch.plan.resource_source_ref.digest,'resource');
+ return saved;
+}
+function obsCutScene(db,closed,resource){
+ const {dispatch,initial}=closed.source,s=initial.source;
+ const encoded=readCommandEncoding(db,dispatch.final.value.prepare_id),catalog=encoded.bound.primitive_plan.scene_catalog;
+ const scene=readObsCutPacket(encoded.response.bytes,catalog,s.binding),catalogDigest=digest(catalog);
+ need(s.policies.completion.target_scene_uuid===scene&&s.policies.completion.scene_catalog_digest===catalogDigest&&
+  resource.inventory.obs_cut_observation?.scene_catalog_digest===catalogDigest&&
+  same(resource.inventory.external_resources,s.policies.release.external_resources),'obs_profile');
+ return scene;
+}
+export function readInterruptedObsCutEffect(db,closed){
+ const {dispatch,initial}=closed.source,source=initial.source,evidence=dispatch.evidence;
+ if(source.policies.completion.format!=='fixed-obs-cut-completion/1'||!dispatch.report||!evidence)return null;
+ const scene=obsCutScene(db,closed,settlementResource(db,closed.source.ready)),reply=evidence.reply;
+ if(!fixedObsCutWireEffect({source,report:dispatch.report.reply.frame.body,observation:reply.frame.body.payload.observation,
+  receivedTick:reply.observedTick,committedTick:reply.committedTick,scene}))return null;
+ return {target_scene_uuid:scene,report_ref:dispatch.report.ref,observation_ref:evidence.ref};
+}
 function settlement(db,closed,commit,evidenceRef=undefined){
  need(closed.ack,'closure_required');const {dispatch:d,initial}=closed.source,p=d.final.value.permit,s=initial.source;
  need(d.report,'report_required');const evidenceSource=evidenceRef===null?null:d.evidence;
  if(evidenceRef!==undefined&&evidenceRef!==null)need(evidenceSource&&same(evidenceSource.ref,evidenceRef),'observation_reference');
  const r=d.report.reply.frame.body,o=evidenceSource?.reply.frame.body.payload.observation,
-  encoded=readCommandEncoding(db,d.final.value.prepare_id),resourceRow=row(db,'SELECT body_jcs,body_digest FROM device_initial_resource WHERE source_id=?',closed.source.ready.dispatch.plan.resource_source_ref.id);
- need(resourceRow,'resource');const resource=JSON.parse(resourceRow.body_jcs),{digest:resourceDigest,...resourceBody}=resource;
- need(canonical(resource)===resourceRow.body_jcs&&digest(resourceBody)===resourceDigest&&resourceDigest===resourceRow.body_digest&&resourceDigest===closed.source.ready.dispatch.plan.resource_source_ref.digest,'resource');
+  resource=settlementResource(db,closed.source.ready);
  const sampleRef=resource.inventory.baseline_ref,sample=row(db,'SELECT body_jcs,body_digest FROM device_baseline_sample WHERE sample_id=?',sampleRef.id);
  need(sample,'sample');const baseline=parse(sample.body_jcs,sample.body_digest);
  need(same(ref(baseline.sample_id,baseline),sampleRef)&&baseline.device_id===s.binding.device_id&&baseline.device_session_id===p.device_session_id,'sample');
@@ -186,11 +211,7 @@ function settlement(db,closed,commit,evidenceRef=undefined){
  const obs=s.policies.completion.format==='fixed-obs-cut-completion/1';
  let scene=null,succeeded;
  if(obs){
-  const catalog=encoded.bound.primitive_plan.scene_catalog,sceneCatalogDigest=digest(catalog);
-  scene=readObsCutPacket(encoded.response.bytes,catalog,s.binding);
-  need(s.policies.completion.target_scene_uuid===scene&&s.policies.completion.scene_catalog_digest===sceneCatalogDigest&&
-   resource.inventory.obs_cut_observation?.scene_catalog_digest===sceneCatalogDigest&&
-   same(resource.inventory.external_resources,s.policies.release.external_resources),'obs_profile');
+  scene=obsCutScene(db,closed,resource);
   succeeded=fixedObsCutCompletion({...inputs,scene,committedTick:evidenceSource?.reply.committedTick});
  }else succeeded=fixedMemoryCompletion(inputs);
  const id=s.command_id,policy=initial.record.policy,closure={format:obs?'fixed-obs-cut-future-writes-closed/1':'fixed-memory-future-writes-closed/1',command_id:id,binding:s.binding,

@@ -12,6 +12,7 @@ import {readDispatchLifecycle} from './command-dispatch.mjs';
 import {readSettlementLifecycle} from './command-settlement.mjs';
 import {readCommandInterruption} from './command-dispatch-interruption.mjs';
 import {readUnsentCommand} from './command-unsent-recovery.mjs';
+import {readObsCutReconciliation} from './obs-cut-reconciliation.mjs';
 import {readCommandFinalAdmission} from './command-final-admission.mjs';
 import {verifyCommandReferenceAcceptance} from './reference-time-anchor.mjs';
 import {obsCutModuleDefinition} from './obs-module-profile.mjs';
@@ -131,6 +132,13 @@ export function unsentCommandProjection(previous,release){
   resource_status:'clear',automation_continuation:'paused_latched',reason_code:'execution_closed',resource_evidence_refs:[release.source_ref]},
   manifest={command_id:source.command_id,revision,members:[{source_ref:release.source_ref,kind:release.kind,view_digest:release.view_digest}]};
  return {state,manifest,record:publicRecord(source,record.policy,state,manifest,attempts)};
+}
+export function reconciledObsCutProjection(previous,evidence){
+ const {record,source}=previous,revision='6';
+ const [,resolution,release]=evidence;
+ const state={...record.state,revision,resource_status:'clear',resolution_ref:resolution.source_ref,resource_evidence_refs:[release.source_ref]};
+ const manifest={command_id:source.command_id,revision,members:evidence.map(v=>({source_ref:v.source_ref,kind:v.kind,view_digest:v.view_digest}))};
+ return {state,manifest,record:publicRecord(source,record.policy,state,manifest,record.attempts)};
 }
 export function prepareCommandRecord({value,content,identity,current,domain,commitRef,referenceAcceptance=null}){
  const {execution,proof}=current,scope=identity.key.target_scope,policies=commandPolicyInput(value,execution),id=crypto.randomUUID();
@@ -406,6 +414,7 @@ function readLifecycleOriginal(db,initial,head){
   JOIN command_lifecycle_commit c USING(command_id,revision,commit_id) WHERE r.command_id=? AND r.revision=? AND r.commit_id=?`)
   .raw().get(initial.source.command_id,...head);
  need(row&&row[10]===head[0]&&row[11]===initial.source.command_id,'lifecycle_head');
+ if(head[0]===6&&Number(db.pragma('user_version',{simple:true}))>=108)return readObsCutReconciliation(db,initial,head,row);
  if(head[0]===3&&Number(db.pragma('user_version',{simple:true}))>=105&&
    db.prepare('SELECT 1 FROM command_unsent_closure WHERE commit_id=?').pluck().get(head[1]))
   return readUnsentCommand(db,initial,head,row);

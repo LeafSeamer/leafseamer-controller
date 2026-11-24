@@ -552,6 +552,30 @@ if(input.runtime){
   const control=manager.sessions.getControl(commandToken,device);report({event:'command-control',control,operation});
   if(obsRestart)report({event:'obs-boot-control',boot:business.serviceBootId,domain:receipt.domain_ref,old_launch:oldLaunch,old_context:oldContext,
    before_acquisition:beforeAcquisition,released,acquired:operation,control,historical:manager.sessions.getCommand(commandToken,obsRestart.command_id).record});
+  if(input.obs_reconcile){
+   const previous=manager.sessions.getCommand(commandToken,obsRestart.command_id).record;
+   const request={command_id:previous.command_id,expected_state_ref:previous.state_ref};
+   const reconcile=(value=request,token=commandToken,csrf=manager.auth.csrf)=>manager.sessions.reconcileObsCutCommand(token,csrf,value);
+   const rejected=action=>{try{action();return 'unexpected_success';}catch(error){return error.code;}};
+   const denied=rejected(()=>reconcile(request,manager.token(['command.read']))),csrf=rejected(()=>reconcile(request,commandToken,'A'.repeat(43)));
+   const stale=rejected(()=>reconcile({...request,expected_state_ref:{...previous.state_ref,digest:hash('different state')}}));
+   if(input.obs_interruption==='report'){
+    report({event:'obs-reconciliation-refused',denied,csrf,stale,code:rejected(reconcile),previous});
+   }else{
+    report({event:'obs-reconciliation-failed-commit',code:rejected(reconcile),current:manager.sessions.getCommand(commandToken,previous.command_id).record});
+    const until=performance.now()+10000;
+    while(!fs.existsSync(options['--fixture']+'.reconcile-ready')){
+     if(performance.now()>=until)throw new Error('fixture_reconcile_ready_timeout');await delay(20);
+    }
+    manager.real.refresh();
+    const receipt=reconcile(),replayed=reconcile(),route='/api/v1/commands/'+previous.command_id+'/evidence';
+    const result=manager.sessions.getCommand(commandToken,previous.command_id).record;
+    const evidence=await commandHttp('GET',route+'?state_revision='+result.revision+'&limit=8');
+    const decision=evidence.body?.items?.find(item=>item.kind==='resolution');
+    const resolved=decision?await commandHttp('GET',route+'/'+decision.source_ref.id+'/revisions/1'):null;
+    report({event:'obs-reconciled',denied,csrf,stale,previous,result,receipt,replayed,evidence,resolved,control:manager.sessions.getControl(commandToken,device)});
+   }
+  }
   if(automaticReady){
    const released=await change(device,'releaseControl','automation.target.release');
    report({event:'automatic-released',released,control:manager.sessions.getControl(commandToken,device)});
