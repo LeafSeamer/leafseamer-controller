@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {openNativeClock} from './native-clock.mjs';
 import {coreRuntimeSource} from './core-runtime-source.mjs';
+import {checkHistoricalControlReceipt,historicalWorkerTarget} from './historical-control-retirement.mjs';
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 const same=(a,b)=>canonicalize(a)===canonicalize(b);
 const need=(ok,code)=>{if(!ok){const error=new Error('worker_authorization_'+code);error.code=error.message;throw error;}};
@@ -10,7 +11,7 @@ const freeze=value=>{if(value&&typeof value==='object'){Object.values(value).for
 // 仅核心内部使用。授权来自当前受理与资源原件；短授权不赋予设备写入资格。
 export function workerAuthorizationStore({db,service,bootId,isOpen,core,prepared,all,extension,verifyDependencies}){
  let source=null,clock=null,receipt=null,closed=false,failed=false,unsubscribe=null,timer=null,tail=Promise.resolve(),pending=0;
- const denied=new Set();
+ const denied=new Set(),historicalReceipts=new WeakMap();
  const available=()=>need(!closed&&!failed&&isOpen()&&db.open&&!db.inTransaction,'unavailable');
  function connected(){
   need(!closed&&!failed&&isOpen()&&db.open&&source,'source');source.assertCurrent();
@@ -121,6 +122,27 @@ export function workerAuthorizationStore({db,service,bootId,isOpen,core,prepared
   domain(){connected();return freeze({ref:structuredClone(receipt.domain_ref),tick:String(clock.tick())});},
   selectCoreSource(){need(runtimeSource,'core_source_unavailable');return runtimeSource.select();},
   currentCoreSource(reference){need(runtimeSource,'core_source_unavailable');return runtimeSource.current(reference);},
+  observeHistoricalExit(target){
+   const fixedTarget=structuredClone(target);
+   return enqueue(async()=>{
+    const prior=db.transaction(()=>historicalWorkerTarget(db,fixedTarget))();
+    if(!prior||typeof source.observeWorkerRetirement!=='function'||typeof source.assertWorkerRetirement!=='function')return null;
+    const observed=await source.observeWorkerRetirement(prior.coreReceipt,prior.intent,prior.workerReceipt);
+    connected();if(!observed)return null;
+    const {format,receiving_domain_ref,received_tick_ns,record:{core_exit,core_receipt,worker_record}}=observed;
+    const {service_boot_id,...key}=fixedTarget,base={service_boot_id:bootId,domain_ref:receipt.domain_ref};
+    const result=freeze({key,record:worker_record,retirement:worker_record.retirement_evidence,
+     historical_observation:{format,receiving_domain_ref,received_tick_ns,core_exit,core_receipt,
+      receiving_service_boot_id:bootId,receiving_core_receipt_id:receipt.receipt_id}});
+    checkHistoricalControlReceipt(db,fixedTarget,base,result);source.assertWorkerRetirement(observed);
+    historicalReceipts.set(result,observed);return result;
+   });
+  },
+  assertHistoricalExit(target,result){
+   need(db.inTransaction&&historicalReceipts.has(result),'historical_exit_source');connected();
+   source.assertWorkerRetirement(historicalReceipts.get(result));
+   checkHistoricalControlReceipt(db,target,{service_boot_id:bootId,domain_ref:receipt.domain_ref},result);
+  },
   retireForControl(key){const copy=fixed(key);return enqueue(async()=>{
    db.transaction(()=>deny(copy.launch_id,'requested')).immediate();const fence=await sync();
    const record=await source.queryLaunch(copy);connected();

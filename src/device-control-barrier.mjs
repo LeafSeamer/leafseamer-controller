@@ -3,6 +3,7 @@ import {setTimeout as delay} from 'node:timers/promises';
 import canonicalize from 'canonicalize';
 import {controlNeed as need,controlHash as hash,controlSame as same,controlFrozen as frozen} from './device-control-value.mjs';
 import {classifyControlCommands,readControlCommandCut} from './control-command-cut.mjs';
+import {checkHistoricalControlReceipt} from './historical-control-retirement.mjs';
 
 // 当前产品只有受登记监督的模块出口；所有历史准备均进入切点，未知旧boot不作空集合。
 export function deviceControlBarrier({db,bootId,authorization,runtime,isOpen}){
@@ -24,9 +25,13 @@ export function deviceControlBarrier({db,bootId,authorization,runtime,isOpen}){
    const index=body.targets.findIndex(value=>same(value,target));if(index<0)continue;
    const receipt=body.receipts[index];need(receipt&&same(receipt.key,{launch_id:target.launch_id,launch_intent_digest:target.launch_intent_digest})&&
     (receipt.record===null&&receipt.retirement===null||receipt.record?.state==='retired'&&receipt.retirement?.result==='confirmed_empty'),'old_exit_unresolved');
+   if(receipt.historical_observation){
+    if(receipt.prior_barrier)continue;
+    checkHistoricalControlReceipt(db,target,body,receipt);
+   }
    return frozen({...receipt,prior_barrier:{operation_id,digest}});
   }
-  need(false,'old_exit_unresolved');
+  return null;
  }
  return Object.freeze({
   domain(){need(isOpen()&&db.open,'unavailable');try{return authorization.domain();}
@@ -40,7 +45,11 @@ export function deviceControlBarrier({db,bootId,authorization,runtime,isOpen}){
   async protect(operation){
    need(!db.inTransaction,'writer');pending(operation);const domain=authorization.domain(),selected=targets(operation.operation_id),receipts=[];
    for(const target of selected){
-    if(target.service_boot_id!==bootId){receipts.push(historical(target));continue;}
+    if(target.service_boot_id!==bootId){
+     const existing=historical(target);
+     const evidence=existing??(Number(db.pragma('user_version',{simple:true}))>=106?await authorization.observeHistoricalExit(target):null);
+     need(evidence,'old_exit_unresolved');receipts.push(evidence);continue;
+    }
     const key={launch_id:target.launch_id,launch_intent_digest:target.launch_intent_digest};runtime.invalidate(key);
     const deadline=performance.now()+5000;let result;
     for(;;){pending(operation);try{result=await authorization.retireForControl(key);break;}catch(error){
@@ -62,6 +71,9 @@ export function deviceControlBarrier({db,bootId,authorization,runtime,isOpen}){
    const actual=db.prepare('SELECT p.launch_id,p.intent_digest,p.service_boot_id FROM worker_launch_preparation p JOIN worker_launch_device d USING(launch_id) WHERE d.device_id=? ORDER BY p.launch_id').raw().all(operation.device_id)
     .map(([launch_id,launch_intent_digest,service_boot_id])=>({launch_id,launch_intent_digest,service_boot_id}));
    need(canonicalize(actual)===canonicalize(evidence.targets),'barrier_coverage');
+   for(const [index,receipt] of evidence.receipts.entries()){
+    if(receipt.historical_observation&&!receipt.prior_barrier)authorization.assertHistoricalExit(actual[index],receipt);
+   }
    if(Number(db.pragma('user_version',{simple:true}))>=58)need(same(evidence.command_selection,classifyControlCommands(db,operation)),'command_barrier_changed');
   }
  });

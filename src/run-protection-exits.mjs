@@ -1,4 +1,5 @@
 import {readRunFence} from './execution-run-fence.mjs';
+import {checkHistoricalControlReceipt} from './historical-control-retirement.mjs';
 import {controlNeed as need,controlHash as hash,controlSame as same,controlRead as document} from './device-control-value.mjs';
 
 export function confirmedRetirement(db,target,intent,runtimeId,operationId=null){
@@ -17,6 +18,11 @@ export function confirmedRetirement(db,target,intent,runtimeId,operationId=null)
    operation.operation_id===operationId&&operation.state==='effective'&&same(operation.barrier_selection_ref,{id:evidence.selection_id,revision:'1',digest})&&
    receipt&&same(receipt.key,key),'run_protection_retirement');
   if(receipt.prior_barrier)continue;
+  const barrier_ref={id:evidence.selection_id,revision:'1',digest};
+  if(receipt.historical_observation){
+   const retirement_ref=checkHistoricalControlReceipt(db,target,evidence,receipt);
+   return {state:'retired',barrier_ref,retirement_ref};
+  }
   need(evidence.service_boot_id===service_boot_id,'run_protection_retirement');
   const {fence,record,retirement}=receipt;
   const saved=db.prepare(`SELECT s.body_jcs,s.body_digest,a.body_jcs FROM worker_fence_snapshot s JOIN worker_fence_ack a
@@ -27,7 +33,7 @@ export function confirmedRetirement(db,target,intent,runtimeId,operationId=null)
    same(fence.scope.domain_ref,evidence.domain_ref)&&fence.scope.supervisor_instance_id===intent.supervisor_instance_id&&fence.scope.service_id===intent.service_id&&
    fence.items.some(item=>same(item,{...key,disposition:'deny'}))&&
    db.prepare('SELECT 1 FROM worker_launch_denial WHERE launch_id=?').pluck().get(key.launch_id),'run_protection_retirement');
-  const barrier_ref={id:evidence.selection_id,revision:'1',digest},fence_ref={revision:fence.revision,digest:snapshotDigest};
+  const fence_ref={revision:fence.revision,digest:snapshotDigest};
   if(record===null&&retirement===null&&!runtimeId)return {state:'never_started',barrier_ref,fence_ref};
   if(!record||record.state!=='retired'||retirement?.result!=='confirmed_empty')continue;
   need(same(record.key,key)&&record.supervisor_instance_id===intent.supervisor_instance_id&&same(record.retirement_evidence,retirement)&&

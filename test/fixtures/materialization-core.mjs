@@ -192,6 +192,8 @@ async function observeInterruptedObsCut(request){
  const evidenceItem=evidence?.body?.items?.[0];
  const evidenceRevision=evidenceItem?await commandHttp('GET',route+'/'+id+'/evidence/'+evidenceItem.source_ref.id+'/revisions/1'):null;
  report({event:'obs-cut-interrupted',admitted,finished,replayed,blocked,control,evidence,evidenceRevision});
+ if(input.obs_export_restart)fs.writeFileSync(options['--fixture']+'.restart-state',JSON.stringify({
+  device_id:request.device_id,command_id:id,old_context:request.context_id,old_launch:key,old_boot:business.serviceBootId}));
  return {id,record};
 }
 async function resumeObsOnNewWorker(device,request,previous){
@@ -518,7 +520,7 @@ if(input.runtime){
  }
  if(controlFlow){
   const armTarget=input.automation_peer?.arm_target;
-  const permissions=['control.read','control.acquire','device.command','device.recover','command.read','command.evidence.read','command.cancel','request.create',...(automaticReady||armTarget||input.obs_resume||input.mode.endsWith('_successor_control')||input.mode.includes('_control_queued')||input.mode.endsWith('_control_unresolved')?['control.release']:[])];
+  const permissions=['control.read','control.acquire','device.command','device.recover','command.read','command.evidence.read','command.cancel','request.create',...(automaticReady||armTarget||input.obs_resume||input.obs_export_restart||input.mode.endsWith('_successor_control')||input.mode.includes('_control_queued')||input.mode.endsWith('_control_unresolved')?['control.release']:[])];
   if(obsOpen)permissions.push('device.read');
   const before=manager.sessions.localPermissions(manager.auth);manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id:manager.logged.session.principal_id,expected_revision:before.revision,permissions:[...new Set([...before.permissions,...permissions,...(input.gui?['device.read']:[])])]});
   commandToken=manager.token(permissions);const device=intent.object_scope.device_ids[0],{contractSelection:selection}=await import('../../dist/sdk/index.mjs');
