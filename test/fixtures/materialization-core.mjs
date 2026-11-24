@@ -166,6 +166,28 @@ async function completeObsCut(request,ordinal,browserAdmission=null){
   replayed=await commandHttp('POST',route,request),control=manager.sessions.getControl(commandToken,request.device_id);
  report({event:'obs-cut-command-result',ordinal,finished,evidence,replayed,control});
 }
+async function observeInterruptedObsCut(request){
+ const route='/api/v1/commands',admitted=await commandHttp('POST',route,request);
+ if(admitted.status!==202)throw new Error('obs_cut_interruption_admission');
+ const id=admitted.body.command_ref.object_id,until=performance.now()+10000;
+ const wait=input.obs_interruption==='report'?'whenCommandDispatched':'whenCommandSettled';
+ try{await business.workerLaunches[wait](id);}
+ catch(error){report({event:'obs-cut-interruption-error',code:error.code});}
+ let finished;
+ do{
+  manager.real.refresh();
+  finished=await commandHttp('GET',route+'/'+id);
+  if(finished.body?.record?.state?.phase==='finished')break;
+  if(performance.now()>=until){
+   report({event:'obs-cut-interruption-timeout',finished,execution:executionClient.state});
+   throw new Error('obs_cut_interruption_timeout');
+  }
+  await delay(30);
+ }while(true);
+ const replayed=await commandHttp('POST',route,request),control=manager.sessions.getControl(commandToken,request.device_id);
+ const blocked=await commandHttp('POST',route,{...request,idempotency_key:crypto.randomUUID()});
+ report({event:'obs-cut-interrupted',admitted,finished,replayed,blocked,control});
+}
 async function obsBrowserMarker(file){
  const until=performance.now()+15000;
  while(!fs.existsSync(file)){
@@ -564,8 +586,9 @@ try{
                 }else await completeObsCut(body,1,response);
                 fs.writeFileSync(input.gui.obs.settled,'settled');
                 await obsBrowserMarker(input.gui.obs.checked);
-              }else await completeObsCut(request,1);
-              if(!input.gui?.obs?.recovery){
+              }else if(input.obs_interruption)await observeInterruptedObsCut(request);
+              else await completeObsCut(request,1);
+              if(!input.obs_interruption&&!input.gui?.obs?.recovery){
                 const original=ready.entries.find(entry=>entry.obs_scene_uuid===second.body.value.program_scene_uuid);
                 const next={...request,idempotency_key:crypto.randomUUID(),parameters:{scene_ref:{...scene_ref,scene_id:original.scene_id}}};
                 const blocked=await commandHttp('POST',route,next);

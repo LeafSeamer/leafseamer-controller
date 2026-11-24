@@ -10,6 +10,7 @@ import {readInitialReady} from './device-initial-ready.mjs';
 import {memoExecutionRead,withExecutionReadView} from './execution-read-view.mjs';
 import {readDispatchLifecycle} from './command-dispatch.mjs';
 import {readSettlementLifecycle} from './command-settlement.mjs';
+import {readCommandInterruption} from './command-dispatch-interruption.mjs';
 import {readCommandFinalAdmission} from './command-final-admission.mjs';
 import {verifyCommandReferenceAcceptance} from './reference-time-anchor.mjs';
 import {obsCutModuleDefinition} from './obs-module-profile.mjs';
@@ -111,6 +112,15 @@ export function settledCommandProjection(initial,previous,evidence,succeeded){
   reason_code:succeeded?null:'evidence_unresolved',terminal_revision:'5',completion_evidence_refs:succeeded?[decision.source_ref]:[],resource_evidence_refs:release?[release.source_ref]:[]},
   manifest={command_id:initial.source.command_id,revision:'5',members:evidence.map(v=>({source_ref:v.source_ref,kind:v.kind,view_digest:v.view_digest}))};
  return {state,manifest,record:publicRecord(initial.source,initial.record.policy,state,manifest,attempts,succeeded?'effect_verified':null)};
+}
+export function interruptedCommandProjection(initial,previous){
+ const revision=String(Number(previous.revision)+1),attempts=structuredClone(previous.attempts);
+ need(attempts.length===1&&['dispatching','awaiting_evidence'].includes(previous.state.phase),'interruption_previous');
+ attempts[0].outcome='unknown';
+ const state={...previous.state,revision,terminal_revision:revision,phase:'finished',outcome:'unknown',effect_status:'possible',
+  resource_status:'unresolved',automation_continuation:'paused_latched',reason_code:'evidence_unresolved'},
+  manifest={command_id:initial.source.command_id,revision,members:[]};
+ return {state,manifest,record:publicRecord(initial.source,initial.record.policy,state,manifest,attempts)};
 }
 export function prepareCommandRecord({value,content,identity,current,domain,commitRef,referenceAcceptance=null}){
  const {execution,proof}=current,scope=identity.key.target_scope,policies=commandPolicyInput(value,execution),id=crypto.randomUUID();
@@ -386,6 +396,9 @@ function readLifecycleOriginal(db,initial,head){
   JOIN command_lifecycle_commit c USING(command_id,revision,commit_id) WHERE r.command_id=? AND r.revision=? AND r.commit_id=?`)
   .raw().get(initial.source.command_id,...head);
  need(row&&row[10]===head[0]&&row[11]===initial.source.command_id,'lifecycle_head');
+ if(head[0]>=4&&Number(db.pragma('user_version',{simple:true}))>=104&&
+   db.prepare('SELECT 1 FROM command_dispatch_interruption WHERE commit_id=?').pluck().get(head[1]))
+  return readCommandInterruption(db,initial,head,row);
  if(head[0]===5)return readSettlementLifecycle(db,initial,head,row);
  if(head[0]>=3)return readDispatchLifecycle(db,initial,head,row);
  need(head[0]===2,'lifecycle_head');
