@@ -12,6 +12,7 @@ import {openNativeClock} from './native-clock.mjs';
 import {BootstrapError, validateBootstrapPolicy, createCoreBootstrapChannel, verifyCoreAssignment, verifyCoreAdmission} from './core-bootstrap.mjs';
 import {connectCoreSupervisor, SupervisorError} from './supervisor-control.mjs';
 import {openTrustedControllerClock, readTrustedPairingProfile, readTrustedStandaloneProfile} from './trusted-pairing-profile.mjs';
+import {readProtectedIngressProfile} from './protected-ingress-profile.mjs';
 import {LocalPairingError, runLocalPairingAdmin} from './local-pairing-admin.mjs';
 import {discoverObsScenes,inspectObsCut,ObsDiscoveryError} from './obs-discovery.mjs';
 import {initializeLinuxSecretStore,initializeWindowsSecretStore,openLinuxSecretStore,openWindowsSecretStore} from './secret-store.mjs';
@@ -25,6 +26,7 @@ try {
   const obsInspector=command==='inspect-obs'?discoverObsScenes:command==='inspect-obs-cut'?inspectObsCut:null;
   const secretCommands = ['init-obs-secret-store', 'seal-obs-resource-credential', 'observe-obs-resource'];
   const allowed = secretCommands.includes(command) ? ['--data-dir','--secret-dir',...(command==='init-obs-secret-store'?['--new-key-dir']:[])] :
+    command === 'start-protected-ingress' ? ['--data-dir','--ingress-profile'] :
     command === 'pairing-admin' ? ['--origin','--ca-file'] : command === 'migrate-storage' ? ['--data-dir', '--to-revision'] : ['init-storage', 'init-process-host', 'upgrade-process-host', 'enroll-admin', 'identity-status', 'register-device', 'register-obs-resource'].includes(command) ? ['--data-dir'] : ['start', 'supervise', 'contained-core', 'contained-core-auth'].includes(command) ? ['--data-dir', '--host', '--port', ...(authenticatedCore ? ['--bootstrap-policy', '--supervisor-pipe', '--supervisor-channel','--time-provider-intent'] : []), ...((authenticatedCore || command === 'supervise') ? ['--pairing-profile','--standalone-profile'] : []), ...(command==='supervise'?['--stdin-control']:[])] : [];
   if ((!allowed.length && !obsInspector) || args.length % 2) throw new Error('arguments');
   const options = {};
@@ -115,6 +117,7 @@ try {
     const rawPort = options['--port'] ?? '0';
     if (!/^(0|[1-9][0-9]{0,4})$/.test(rawPort)) throw new Error('arguments');
     const launch = {dataDir: options['--data-dir'], host: options['--host'] ?? '127.0.0.1', port: Number(rawPort)};
+    if (command === 'start-protected-ingress') Object.assign(launch, readProtectedIngressProfile(options['--ingress-profile']));
     const pairingPath=options['--pairing-profile'],standalonePath=options['--standalone-profile'];
     if(pairingPath!==undefined&&standalonePath!==undefined)throw new Error('standalone_profile_conflict');
     let profile=null;
@@ -224,7 +227,8 @@ try {
   const code = error.code ?? error.message;
   const known = error instanceof StorageError || error instanceof IdentityError || error instanceof ProcessHostError ||
     error instanceof BootstrapError || error instanceof SupervisorError || error instanceof LocalPairingError ||
-    error instanceof ObsDiscoveryError || trustedStartupError(code);
+    error instanceof ObsDiscoveryError || trustedStartupError(code) ||
+    ['protected_ingress_profile','protected_ingress_platform','protected_ingress_address'].includes(code);
   process.stderr.write(JSON.stringify({error: known ? code : 'startup_failed'}) + '\n');
   process.exitCode = 1;
 }

@@ -1,5 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
+import {networkInterfaces} from 'node:os';
 import {openStorage} from './storage.mjs';
 import {openNativeClock} from './native-clock.mjs';
 import {startClockMonitor} from './clock-monitor.mjs';
@@ -17,13 +18,25 @@ import {referenceTimeScheduler} from './reference-time-scheduler.mjs';
 import canonicalize from './runtime/canonicalize.mjs';
 import {createHash} from 'node:crypto';
 
-export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null, guiManifestSha256 = null, coreBootstrap = null, pairing = null, referenceTimeAuthorization = null, localPairingManagement = false, standalone = false} = {}) {
-  if (!['127.0.0.1', '::1'].includes(host) || !Number.isInteger(port) || port < 0 || port > 65535) throw new Error('listen_options');
+export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null, guiManifestSha256 = null, coreBootstrap = null, pairing = null, referenceTimeAuthorization = null, localPairingManagement = false, standalone = false, protectedIngressIdentity = null} = {}) {
+  const protectedIngress = protectedIngressIdentity !== null;
+  if (protectedIngress) {
+    if (process.platform !== 'linux' || !tls || authenticationProvider || guiDirectory || coreBootstrap || pairing ||
+        referenceTimeAuthorization || localPairingManagement || standalone) throw new Error('protected_ingress_options');
+    pairingFields(protectedIngressIdentity, 'database_instance_id,service_id');
+    pairingUuid(protectedIngressIdentity.service_id);
+    pairingUuid(protectedIngressIdentity.database_instance_id);
+    if (!Object.values(networkInterfaces()).flat().some(iface => iface.address === host)) {
+      throw new Error('protected_ingress_address');
+    }
+  }
+  if ((!protectedIngress && !['127.0.0.1', '::1'].includes(host)) ||
+      !Number.isInteger(port) || port < (protectedIngress ? 1 : 0) || port > 65535) throw new Error('listen_options');
   if (authenticationProvider !== null && typeof authenticationProvider !== 'function') throw new Error('authentication_provider');
   if (tls !== null && (!tls || Object.keys(tls).sort().join(',') !== 'cert,key,origin' || typeof tls.origin !== 'string')) throw new Error('tls_options');
   if (guiDirectory !== null && tls === null) throw new Error('gui_requires_https');
   if (pairing !== null) pairingUuid(pairing.credential_id);
-  const storage = openStorage(dataDir);
+  const storage = openStorage(dataDir, protectedIngressIdentity);
   let supervision = null, timeProviderLink = null, timeProviderBinding = null;
   const assertRuntimeCurrent = () => { supervision?.assertCurrent(); timeProviderLink?.assertCurrent(); };
   try {

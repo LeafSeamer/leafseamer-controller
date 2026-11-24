@@ -388,11 +388,16 @@ function clockJournal(db, bootId) {
     }
   });
 }
-export function openStorage(dataDir) {
+export function openStorage(dataDir, expectedIdentity = null) {
   let db;
   try {
     db = open(filename(dataDir));
     const state = validateStorage(db), bootId = crypto.randomUUID();
+    if (expectedIdentity !== null) {
+      require(state.service_id === expectedIdentity.service_id && state.database_instance_id === expectedIdentity.database_instance_id,
+        'protected_ingress_identity');
+      require(Number(state.schema_revision) >= 5, 'protected_ingress_migration_required');
+    }
     db.transaction(() => {
       db.prepare("INSERT INTO service_boot VALUES (?, ?, ?, ?, NULL, 'started')")
         .run(state.service_id, state.database_instance_id, bootId, new Date().toISOString());

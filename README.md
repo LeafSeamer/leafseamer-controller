@@ -599,6 +599,16 @@ node --disallow-code-generation-from-strings dist/cli.mjs migrate-storage --data
 
 密码采用 `identity-runtime/1`：Argon2id v19，65536 KiB、3轮、并行度1，独立16字节盐和32字节结果。仅执行登记成本的PHC；驱动0.45.1的参数顺序固定为 `m,p,t`。密码工作全进程同时2项、等待8项，超额报 `password_busy`，不占数据库事务等待计算。高熵opaque验证值按六种具名用途分域，不能代替人员密码。上述数值沿Suite既定profile；实现调用[官方node-argon2](https://github.com/ranisalt/node-argon2/tree/v0.45.1)，不自行实现密码算法。
 
+## Linux 保护态 HTTPS 启动
+
+先通过本机安装流程初始化并显式迁移数据库，再用产物内的 CLI 启动。
+
+`node --disallow-code-generation-from-strings dist/cli.mjs start-protected-ingress --data-dir /srv/leafseamer/controller --ingress-profile /etc/leafseamer/controller-ingress.json`
+
+配置的 `format` 为 `leafseamer.controller-protected-ingress/1`，包含 `service_id`、`database_instance_id`、`address`、`port`、`origin`、`certificate_file` 和 `private_key_file`。地址必须精确匹配容器或主机当前分配的接口地址，端口固定。证书和私钥使用绝对路径，部署者负责保护配置目录和 TLS 材料。证书覆盖 Nginx 上游校验名，`origin` 填浏览器实际访问的规范 HTTPS 源。
+
+CLI 在写入 boot 记录前校验数据库身份及最低 Schema 5。此入口只提供保护态 HTTPS 与诊断。登录返回 503，服务保持未就绪。完整部署仍需建立受监督运行域和可信认证时钟。
+
 ## 原生时钟诊断
 
 schema 3 服务每500毫秒调用原生采集器。Windows 顺序为 `QueryInterruptTimePrecise → GetSystemTimePreciseAsFileTime → QueryInterruptTimePrecise`，FILETIME 用整数减纪元再转纳秒；Linux 实现使用 `CLOCK_BOOTTIME → CLOCK_REALTIME → CLOCK_BOOTTIME` 并检查时间命名空间。没有 `Date.now()` 或浮点秒替代路径。原生接口依据：[Microsoft 单调时间](https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-queryinterrupttimeprecise)、[精确系统时间](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemtimepreciseasfiletime)、[Linux clock_gettime](https://www.man7.org/linux/man-pages/man2/clock_gettime.2.html)。
