@@ -47,7 +47,14 @@ export function deviceControlBarrier({db,bootId,authorization,runtime,isOpen}){
    for(const target of selected){
     if(target.service_boot_id!==bootId){
      const existing=historical(target);
-     const evidence=existing??(Number(db.pragma('user_version',{simple:true}))>=106?await authorization.observeHistoricalExit(target):null);
+     const schema=Number(db.pragma('user_version',{simple:true}));
+     const obsAcquisition=schema>=107&&operation.kind==='acquire'&&db.prepare(`SELECT 1 FROM device_execution_binding b
+      JOIN execution_session s USING(ipc_session_id) JOIN worker_runtime_binding r USING(runtime_id)
+      WHERE r.launch_id=? AND b.device_id=? AND json_extract(b.body_jcs,'$.transport_profile.format')='leafseamer-obs-cut-transport/1'`)
+      .pluck().get(target.launch_id,operation.device_id);
+     // OBS 封闭启动绑定本次接管的原生退出观察，已有退出证据仍可用于单纯接管。
+     const observed=schema>=106&&(!existing||obsAcquisition)?await authorization.observeHistoricalExit(target):null;
+     const evidence=observed??existing;
      need(evidence,'old_exit_unresolved');receipts.push(evidence);continue;
     }
     const key={launch_id:target.launch_id,launch_intent_digest:target.launch_intent_digest};runtime.invalidate(key);

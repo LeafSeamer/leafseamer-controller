@@ -32,18 +32,19 @@ export function extensionActivationStore({db,service,bootId,available,reference,
  function forLaunch(intent){
   need(db.inTransaction,'writer_required');const binding=intent.extension_binding;
   const row=db.prepare('SELECT operation_id,service_boot_id,body_jcs,body_digest,graph_jcs,graph_digest,slot_id,slot_revision FROM extension_activation WHERE installation_id=?').raw().get(binding.installation_ref.object_id);
-  need(row&&row[1]===bootId,'required');const body=read(row[2],row[3]),graph=read(row[4],row[5]);
+  const schema=Number(service.schema_revision);
+  need(row&&(row[1]===bootId||schema>=107),'required');const body=read(row[2],row[3]),graph=read(row[4],row[5]);
   need(same(body.approval_ref,binding.approval_ref)&&same(body.target_installation_ref,binding.installation_ref),'binding');
   const slot=db.prepare('SELECT r.body_jcs,r.body_digest FROM extension_slot_head h JOIN extension_slot_revision r USING(slot_id,revision) WHERE h.slot_id=? AND h.revision=?').raw().get(row[6],row[7]);
   need(slot,'slot_changed');const current=read(slot[0],slot[1]);need(current.desired_state==='enabled'&&same(current.pending_operation_ref,body.operation_ref),'slot_changed');
   const held=db.prepare('SELECT o.resource_ref_jcs FROM extension_resource_owner o JOIN extension_resource_owner_head h USING(owner_id,resource_id) WHERE o.operation_id=? ORDER BY o.resource_id COLLATE BINARY').pluck().all(row[0]);
   const expected=[...graph.resources].sort((a,b)=>a.object_id<b.object_id?-1:1);need(same(held.map(value=>JSON.parse(value)),expected),'owner_changed');
-  const existing=db.prepare('SELECT intent_digest FROM worker_launch_preparation WHERE activation_operation_id=? AND launch_id=?').pluck().get(row[0],intent.launch_id);
-  if(existing){need(existing===hash(intent),'launch_used');return {id:row[0],replacement:null};}
+  const existing=db.prepare('SELECT intent_digest,service_boot_id FROM worker_launch_preparation WHERE activation_operation_id=? AND launch_id=?').raw().get(row[0],intent.launch_id);
+  if(existing){need(existing[0]===hash(intent)&&existing[1]===bootId,'launch_used');return {id:row[0],replacement:null};}
   const used=db.prepare('SELECT 1 FROM worker_launch_preparation WHERE activation_operation_id=? LIMIT 1').pluck().get(row[0]);
-  if(!used)return {id:row[0],replacement:null};
-  need(Number(service.schema_revision)>=106,'launch_used');
-  return {id:row[0],replacement:selectObsLaunchReplacement(db,row[0],intent)};
+  if(!used){need(row[1]===bootId,'required');return {id:row[0],replacement:null};}
+  need(schema>=106,'launch_used');
+  return {id:row[0],replacement:selectObsLaunchReplacement(db,row[0],intent,bootId,schema>=107)};
  }
  return Object.freeze({forLaunch,management(authorize){return Object.freeze({
   async accept(token,kind,input){

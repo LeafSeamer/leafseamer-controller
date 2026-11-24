@@ -193,7 +193,8 @@ async function observeInterruptedObsCut(request){
  const evidenceRevision=evidenceItem?await commandHttp('GET',route+'/'+id+'/evidence/'+evidenceItem.source_ref.id+'/revisions/1'):null;
  report({event:'obs-cut-interrupted',admitted,finished,replayed,blocked,control,evidence,evidenceRevision});
  if(input.obs_export_restart)fs.writeFileSync(options['--fixture']+'.restart-state',JSON.stringify({
-  device_id:request.device_id,command_id:id,old_context:request.context_id,old_launch:key,old_boot:business.serviceBootId}));
+  device_id:request.device_id,command_id:id,old_context:request.context_id,old_launch:key,old_boot:business.serviceBootId,
+  old_scene_ref:request.parameters.scene_ref}));
  return {id,record};
 }
 async function resumeObsOnNewWorker(device,request,previous){
@@ -376,6 +377,7 @@ report({event:'module-events-new-session',started,empty:newEmpty,stopped:newStop
 const boot=createCoreBootstrapChannel(process.stdin,process.stdout,{timeoutMs:10000});
 const assignment=await boot.assignment(),receipt=await boot.proveAndReceive(assignment);boot.release();
 const policy=JSON.parse(options['--bootstrap-policy']),input=JSON.parse(fs.readFileSync(options['--fixture']));
+const obsRestart=input.obs_restart;
 const scheduling=input.automation_peer?.verify_armed_target_dispatch?monitorEventLoopDelay({resolution:20}):null;
 scheduling?.enable();
 const omitRetirementRequest=input.mode.endsWith('_reference_restart_missing');
@@ -452,9 +454,10 @@ async function collectCommandReference(binding){
  }finally{udp.close();}
 }
 const ref=kind=>({kind,authority_service_id:policy.service_id,database_instance_id:policy.database_instance_id,object_id:kind,revision:'1',digest:hash(kind)});
-const intent={launch_id:'worker.launch',service_id:policy.service_id,supervisor_instance_id:source.scope.supervisor_instance_id,
-  runtime_generation:assignment.clock_domain_descriptor.runtime_generation,member_id:'worker.member',role:'worker',artifact_manifest_ref:policy.artifact_manifest_ref,
-  containment_ref:{group_id:'worker.group',generation:'worker.generation',backend:'windows_job'},object_scope:{kind:'devices',device_ids:input.runtime?.devices??['device.synthetic']},policy_revision:policy.policy_revision,
+const workerId=obsRestart?'worker.restart':'worker.launch';
+const intent={launch_id:workerId,service_id:policy.service_id,supervisor_instance_id:source.scope.supervisor_instance_id,
+  runtime_generation:assignment.clock_domain_descriptor.runtime_generation,member_id:obsRestart?'worker.restart.member':'worker.member',role:'worker',artifact_manifest_ref:policy.artifact_manifest_ref,
+  containment_ref:{group_id:obsRestart?'worker.restart.group':'worker.group',generation:'worker.generation',backend:'windows_job'},object_scope:{kind:'devices',device_ids:input.runtime?.devices??['device.synthetic']},policy_revision:policy.policy_revision,
   extension_binding:{installation_ref:ref('installation'),approval_ref:ref('approval'),review_ref:ref('review'),role_resolution_ref:ref('role_resolution'),configuration_ref:ref('configuration'),
     ...input.binding,entry_id:input.mode==='supervisor_bad_entry'?'missing':input.materials?'worker':'simulator',permissions_digest:hash('permissions'),...(input.runtime?{installation_ref:input.runtime.approved.record.installation_ref,approval_ref:input.runtime.approved.approval_ref,review_ref:input.runtime.approved.record.review_ref,role_resolution_ref:input.runtime.approved.record.role_resolution_ref,configuration_ref:input.runtime.approved.record.configuration_ref,permissions_digest:input.runtime.approved.record.permissions_digest}:{})}};
 const key={launch_id:intent.launch_id,launch_intent_digest:hash(intent)};
@@ -520,12 +523,12 @@ if(input.runtime){
  }
  if(controlFlow){
   const armTarget=input.automation_peer?.arm_target;
-  const permissions=['control.read','control.acquire','device.command','device.recover','command.read','command.evidence.read','command.cancel','request.create',...(automaticReady||armTarget||input.obs_resume||input.obs_export_restart||input.mode.endsWith('_successor_control')||input.mode.includes('_control_queued')||input.mode.endsWith('_control_unresolved')?['control.release']:[])];
+  const permissions=['control.read','control.acquire','device.command','device.recover','command.read','command.evidence.read','command.cancel','request.create',...(automaticReady||armTarget||input.obs_resume||input.obs_export_restart||obsRestart||input.mode.endsWith('_successor_control')||input.mode.includes('_control_queued')||input.mode.endsWith('_control_unresolved')?['control.release']:[])];
   if(obsOpen)permissions.push('device.read');
   const before=manager.sessions.localPermissions(manager.auth);manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id:manager.logged.session.principal_id,expected_revision:before.revision,permissions:[...new Set([...before.permissions,...permissions,...(input.gui?['device.read']:[])])]});
   commandToken=manager.token(permissions);const device=intent.object_scope.device_ids[0],{contractSelection:selection}=await import('../../dist/sdk/index.mjs');
   const context=manager.sessions.createRequestContext(commandToken,{audience:business.identity.service_id,
-   operations:automaticReady||armTarget||input.obs_resume?['acquireControl','releaseControl','submitCommand']:['acquireControl','submitCommand'],selection,ttl_ms:60000,max_unique_requests:8});
+   operations:automaticReady||armTarget||input.obs_resume||obsRestart?['acquireControl','releaseControl','submitCommand']:['acquireControl','submitCommand'],selection,ttl_ms:60000,max_unique_requests:8});
   async function change(selected,method,key){
    const original=manager.sessions.getControl(commandToken,selected);
    const accepted=await manager.sessions.changeControl(commandToken,method,{device_id:selected},{context_id:context.context_id,idempotency_key:key,
@@ -535,8 +538,20 @@ if(input.runtime){
    if(operation.state!=='effective')throw new Error('command_control_not_effective');return operation;
   }
   changeFixtureControl=change;
-  const operation=await change(device,'acquireControl','manual.command.owner');
+  let released,oldContext,oldLaunch,beforeAcquisition;
+  if(obsRestart){
+   const denied=async action=>{try{await action();return 'unexpected_success';}catch(error){return error.code;}};
+   oldLaunch=await denied(()=>business.workerLaunches.authorization.authorize(obsRestart.old_launch));
+   beforeAcquisition=await denied(()=>business.workerLaunches.prepare(Buffer.from(canonicalize(intent))));
+   const current=manager.sessions.getControl(commandToken,device);
+   oldContext=await denied(()=>manager.sessions.changeControl(commandToken,'releaseControl',{device_id:device},{
+    context_id:obsRestart.old_context,idempotency_key:crypto.randomUUID(),expected_control:{epoch:current.control_epoch,version:current.effective_version},reason:'校验旧上下文'}));
+   released=await change(device,'releaseControl','restart.obs.release');
+  }
+  const operation=await change(device,'acquireControl',obsRestart?'restart.obs.acquire':'manual.command.owner');
   const control=manager.sessions.getControl(commandToken,device);report({event:'command-control',control,operation});
+  if(obsRestart)report({event:'obs-boot-control',boot:business.serviceBootId,domain:receipt.domain_ref,old_launch:oldLaunch,old_context:oldContext,
+   before_acquisition:beforeAcquisition,released,acquired:operation,control,historical:manager.sessions.getCommand(commandToken,obsRestart.command_id).record});
   if(automaticReady){
    const released=await change(device,'releaseControl','automation.target.release');
    report({event:'automatic-released',released,control:manager.sessions.getControl(commandToken,device)});
@@ -549,7 +564,8 @@ if(input.runtime){
   commandRequest={device_id:device,action_id:'leafseamer.simulator.value.set',capability_version:'1.0.0',parameters:{value:7},context_id:context.context_id,
    expected_control:{epoch:control.control_epoch,version:control.effective_version},origin:'manual',automation_binding:null,required_completion:'sent',preconditions:[],dispatch:{mode:'immediate',max_queue_ms:1000},evidence_timeout_ms:1000};
  }
- {
+ if(obsRestart)await business.workerLaunches.prepare(Buffer.from(canonicalize(intent)));
+ else {
   const token=manager.token(),plan=await manager.sessions.planExtension(token,{request_id:'runtime.plan',slot_id:content.slot_id,expected_slot_revision:input.runtime.slot_ref.revision,
    selection:{kind:'activate',source_installation_ref:null,target_installation_ref:input.runtime.approved.record.installation_ref,reuse_content_ref:null,configuration_ref:input.runtime.approved.record.configuration_ref}});
   await manager.sessions.getCurrentExtensionPlan(token,plan.plan_ref);report({event:'plan-created',plan});
@@ -564,8 +580,13 @@ if(input.runtime){
  const coordinatorDeadline=performance.now()+10000;
  while(!fs.existsSync(options['--fixture']+'.coordinator-ready')){if(performance.now()>=coordinatorDeadline)throw new Error('fixture_coordinator_ready_timeout');await delay(20);}
 }
+async function retireFixtureWorker(selected){
+ const until=performance.now()+5000;
+ for(;;){try{return await source.retireWorker(selected,'revoked');}
+  catch(error){if(error.code!=='supervisor_indeterminate'||performance.now()>=until)throw error;await delay(25);}}
+}
 try{
- if(input.materials){
+ workerWork: if(input.materials){
   const held=await source.loadWorkerContent(key,input.materials);report({event:'loaded',load_id:held.load_id});
   const until=performance.now()+10000;
   while(!fs.existsSync(options['--fixture']+'.continue')){if(performance.now()>=until)throw new Error('fixture_wait');await delay(20);}
@@ -599,7 +620,7 @@ try{
           noPermission:await commandHttp('GET',route,undefined,manager.token()),
           noToken:await commandHttp('GET',route,undefined,null)});
         const token=manager.token(['device.read','extension.manage']);
-        const request={request_id:'obs.confirm',expected_catalog_digest:hash(accepted.scene_catalog)};
+        const request={request_id:obsRestart?'obs.confirm.restart':'obs.confirm',expected_catalog_digest:hash(accepted.scene_catalog)};
         const confirm=(fields=request,credential=token,csrf=manager.auth.csrf)=>manager.sessions.confirmSceneCatalog(credential,csrf,device,fields);
         const rejected=(action)=>{
           try{action();return 'unexpected_success';}catch(error){return error.code;}
@@ -628,14 +649,25 @@ try{
             await business.workerLaunches.runtime.refreshCurrent(key);
             await source.refreshCoreObservation();
             manager.real.refresh();
+            if(obsRestart&&input.obs_interruption==='report'){
+              try{await openOrdinaryGate(device,false);throw new Error('fixture_obs_restart_unknown_effect');}
+              catch(error){if(error.code!=='obs_prior_execution_holds')throw error;
+                report({event:'obs-boot-protected',code:error.code,control:manager.sessions.getControl(commandToken,device)});}
+              break moduleWork;
+            }
             const opened=await openOrdinaryGate(device,false);
             report({event:'obs-cut-opened',...opened,state:executionClient.state});
             if(obsCommand){
               const route='/api/v1/commands';
               const request={...commandRequest,action_id:'obs.program_scene.set',parameters:{scene_ref},required_completion:'effect_verified',
                 idempotency_key:crypto.randomUUID(),dispatch:{mode:'immediate',max_queue_ms:10000}};
-              const stale=await commandHttp('POST',route,{...request,parameters:{scene_ref:{...scene_ref,binding_revision:'1'}}});
+              const stale=await commandHttp('POST',route,{...request,parameters:{scene_ref:obsRestart?.old_scene_ref??{...scene_ref,binding_revision:'1'}}});
               report({event:'obs-cut-stale-reference',stale});
+              if(obsRestart){
+                await completeObsCut(request,2);
+                report({event:'obs-boot-cut',target:target.obs_scene_uuid,retained:await commandHttp('GET',route+'/'+obsRestart.command_id)});
+                break moduleWork;
+              }
               if(input.gui?.obs){
                 fs.writeFileSync(input.gui.obs.opened,'ready');
                 const {body,response}=JSON.parse(await obsBrowserMarker(input.gui.obs.submitted));
@@ -668,7 +700,7 @@ try{
         }
         report({event:'obs-module-samples',connected,first,second,accepted});
         const until=performance.now()+20000;
-        while(!fs.existsSync(options['--fixture']+'.obs-stopped')){
+        while(!fs.existsSync(options['--fixture']+(input.obs_keep_running?'.check-old-worker':'.obs-stopped'))){
           if(performance.now()>=until)throw new Error('fixture_obs_stop_timeout');
           await delay(20);
         }
@@ -1101,6 +1133,7 @@ try{
       };
       await act('acquireControl','control.acquire');await act('releaseControl','control.release');
     }
+    if(obsRestart){report({event:'obs-boot-worker-retired',result:await retireFixtureWorker(intent)});break workerWork;}
     let observed;if(current.state==='admitted_closed'&&input.mode!=='supervisor_create_module_control'&&
       !(input.mode.includes('_dispatch_ready')&&executionClient.state.phase==='closed')){observed=await source.observeWorker(intent);source.assertWorkerObservation(observed);report({event:'observed',receipt:observed.receipt});
       try{source.assertWorkerObservation(structuredClone(observed));report({event:'copied-observation',code:'unexpected_success'});}catch(error){report({event:'copied-observation',code:error.code});}}
@@ -1152,11 +1185,7 @@ try{
  }
 }catch(error){report({event:'unavailable',code:error.code,message:error.message,cause:error.cause?.code,stack:error.stack,errors:error.errors?.map(e=>e.code),
  ...(input.mode.includes('_dispatch_ready')?{execution_state:executionClient?.state}:{})});
- if(input.mode.startsWith('supervisor_create_module')){
-  const until=performance.now()+5000;
-  for(;;){try{report({event:'module-failed-retired',result:await source.retireWorker(activeObsIntent,'revoked')});break;}
-   catch(error){if(error.code!=='supervisor_indeterminate'||performance.now()>=until)throw error;await delay(25);}}
- }
+ if(input.mode.startsWith('supervisor_create_module'))report({event:'module-failed-retired',result:await retireFixtureWorker(activeObsIntent)});
 }
 if(input.gui){guiTimer=setInterval(()=>{
  if(!fs.existsSync(input.gui.revoke_request))return;clearInterval(guiTimer);

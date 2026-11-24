@@ -68,7 +68,7 @@ export function verifyObsPriorExecution(db,device,activeSession,resource,values)
  }
 }
 
-export function selectObsLaunchReplacement(db,operation,intent){
+export function selectObsLaunchReplacement(db,operation,intent,bootId,allowHistorical){
  need(db.inTransaction&&intent.object_scope.device_ids.length===1,'replacement_scope');
  const [device]=intent.object_scope.device_ids;
  const rows=db.prepare(`SELECT p.launch_id,p.intent_digest,p.service_boot_id,p.intent_jcs,r.runtime_id,b.body_jcs,b.body_digest,e.ipc_session_id,e.transaction_id
@@ -80,19 +80,25 @@ export function selectObsLaunchReplacement(db,operation,intent){
  need(rows.length===1,'replacement_previous');
  const [launch,launchDigest,boot,intentText,runtimeId,bindingText,bindingHash,session,end]=rows[0];
  const old=original(intentText,launchDigest),binding=original(bindingText,bindingHash);
- const withoutIdentity=({launch_id,member_id,containment_ref:{group_id,...containment},...value})=>({...value,containment_ref:containment});
+ const historical=boot!==bootId;
+ need(!historical||allowHistorical,'replacement_boot');
+ const withoutIdentity=({launch_id,member_id,supervisor_instance_id,runtime_generation,containment_ref:{group_id,...containment},...value})=>
+  ({...value,containment_ref:containment,...(!historical&&{supervisor_instance_id,runtime_generation})});
  need(same(withoutIdentity(old),withoutIdentity(intent))&&binding.transport_profile.format==='leafseamer-obs-cut-transport/1','replacement_binding');
  const {current,authority}=currentControlSource(db,device);
- const acquired=db.prepare(`SELECT o.operation_id,o.body_jcs,o.body_digest FROM control_operation_revision o
+ const acquired=db.prepare(`SELECT o.operation_id,o.body_jcs,o.body_digest,e.body_jcs,e.body_digest FROM control_operation_revision o
   JOIN control_barrier_evidence e USING(operation_id,commit_id) WHERE o.commit_id=?`).raw().get(authority.ref.id);
  need(acquired&&current.value.mode==='manual'&&current.value.holder&&current.value.pending_operation_id===null&&
   current.value.gate_state==='protected','replacement_control');
- const [acquisitionId,text,hash]=acquired,acquisition=original(text,hash);
+ const [acquisitionId,text,hash,evidenceText,evidenceDigest]=acquired,acquisition=original(text,hash),evidence=original(evidenceText,evidenceDigest);
  need(acquisition.device_id===device&&acquisition.kind==='acquire'&&acquisition.state==='effective'&&
   acquisition.target.version===current.value.effective_version&&acquisition.target.holder?.principal_id===current.value.holder.principal_id,
   'replacement_control');
- const retirement=confirmedRetirement(db,{launch_id:launch,launch_intent_digest:launchDigest,service_boot_id:boot},old,runtimeId,acquisitionId);
- need(retirement?.state==='retired','replacement_retirement');
+ const target={launch_id:launch,launch_intent_digest:launchDigest,service_boot_id:boot};
+ const retirement=confirmedRetirement(db,target,old,runtimeId,acquisitionId);
+ const receipt=evidence.receipts[evidence.targets.findIndex(value=>same(value,target))];
+ need(retirement?.state==='retired'&&evidence.service_boot_id===bootId&&
+  (!historical||receipt?.historical_observation?.receiving_service_boot_id===bootId),'replacement_retirement');
  return {format:'leafseamer-obs-worker-launch-replacement/1',activation_operation_id:operation,launch_id:intent.launch_id,
   launch_intent_digest:digest(intent),previous_launch_id:launch,previous_session_id:session,previous_end_transaction_id:end,
   control_operation_id:acquisitionId,control_ref:authority.ref,retirement};
