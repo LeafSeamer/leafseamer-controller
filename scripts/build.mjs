@@ -11,6 +11,7 @@ const names = ['authority-source-window.mjs', 'supervisor-control.mjs', 'core-bo
 names.push('trusted-pairing-profile.mjs', 'local-pairing-admin.mjs', 'clock-evidence.mjs');
 names.push('storage-revision.mjs');
 names.push('command-dispatch-interruption.sql', 'command-dispatch-interruption.mjs');
+names.push('command-unsent-recovery.sql', 'command-unsent-recovery.mjs');
 const files = await Promise.all(names.map(async name => [name, await fs.readFile(path.join(root, 'src', name))]));
 for(const name of ['device-event-source.sql','device-event-source.mjs','device-source-time.sql','device-event-qualification.mjs','simulator-event-review.json'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 for (const name of ['time-provider-runtime.sql', 'time-provider-link.mjs', 'time-provider-polls.sql', 'time-provider-polls.mjs',

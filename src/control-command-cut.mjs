@@ -59,7 +59,8 @@ function classify(db,operation){
  need(same(cut.value.commands.map(v=>v.command_ref.id),ids(db,operation.device_id)),'command_cut_coverage');
  for(const item of cut.value.commands){
   const current=readCommandRecord(db,item.command_ref.id);let disposition='not_issued',reportRef=null;
-  if(item.transmission){
+  if(item.transmission&&current.lifecycle?.unsent)disposition='not_sent';
+  else if(item.transmission){
    disposition='unknown';
    const exists=db.prepare('SELECT 1 FROM command_dispatch_request WHERE permit_id=?').pluck().get(item.transmission.permit_id);
    if(exists){const dispatch=readCommandDispatch(db,item.transmission.permit_id);

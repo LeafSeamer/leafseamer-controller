@@ -133,8 +133,9 @@ function commitFinalAdmission(db,{id,provider,tick,features}){
  const old=db.prepare('SELECT command_id FROM command_final_admission WHERE prepare_id=?').pluck().get(id);
  if(old)return {saved:readCommandRecord(db,old),replay:true};
  const current=selectCommandFinalization(db,{id,provider,tick}),initial=current.actual.command,encoding=current.encoding;
+ const clearance=schema>=105?'command_hold_clearance':'command_hold_release';
  need(!db.prepare(`SELECT 1 FROM command_device_hold h WHERE device_id=?
-  ${Number(db.pragma('user_version',{simple:true}))>=57?'AND NOT EXISTS(SELECT 1 FROM command_hold_release r WHERE r.hold_id=h.hold_id)':''}`).pluck().get(initial.source.binding.device_id),'resource_busy');
+  ${schema>=57?`AND NOT EXISTS(SELECT 1 FROM ${clearance} r WHERE r.hold_id=h.hold_id)`:''}`).pluck().get(initial.source.binding.device_id),'resource_busy');
  const before=db.prepare('SELECT count(*) FROM command_transmission_issue').pluck().get(),previous=commandIssueHead(db);
  need(before<limits.max_transmissions,'budget');
  const ids=Object.fromEntries(['transaction','commit','hold','ownership','guard','budget','intent','permit','transmission','resource','time','seal'].map(k=>[k,crypto.randomUUID()]));

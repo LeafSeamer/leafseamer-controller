@@ -315,6 +315,8 @@ Schema 103 将隔离 OBS 的固定 Cut 接入 `submitCommand`。当前控制持�
 
 停机后可使用 `migrate-storage --data-dir ABSOLUTE_PATH --to-revision 104` 启用出站中断恢复。从已写入发送尝试的命令开始，Controller 在原执行会话持久终止后检查关闭回执。已有持久关闭回执时按原规则结算。缺少关闭回执时，原命令进入 `finished`，结果为 `unknown`，设备占用为 `unresolved`，自动化暂停。按原命令查询可继续读到该结果，同键提交仍返回原受理。Controller 保留原尝试和设备占用，不自动重发。
 
+Schema 105 增加发送前中断恢复。停机后使用 `migrate-storage --data-dir ABSOLUTE_PATH --to-revision 105`。对于已封存固定写入许可的命令，原执行会话持久终止且出站账本无实际发送预约时，Controller 保留原命令和累计扣费，记录 `blocked / not_sent / clear` 以及可查询的 `never_sent` 释放证据。已登记的 DISPATCH 帧会一并核对。设备仍处于保护态，重新建立写入资格须走人员恢复流程。
+
 ### 执行会话与初始控制屏障
 
 schema42将人员执行来源改为实际挑战／响应：`beginManualExecutionChallenge`核验人员令牌、当前持有人、权限和运行装配，生成32字节随机nonce，将挑战与提交审计同事务保存；`completeManualExecutionChallenge`核验实际令牌秘密、完整挑战引用和nonce，响应关联与人员来源／审计同事务提交。挑战绑定实际token、会话、凭据、控制原件、完整执行Binding及原核心观察；截止不超过挑战开始后两秒和原观察期限。相同请求只返回仍有效的原件，不换nonce或续期；错误nonce、不同响应内容、过期及旧单步取证入口均拒绝。

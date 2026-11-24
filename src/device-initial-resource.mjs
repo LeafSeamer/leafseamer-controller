@@ -190,8 +190,9 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
   let successor=null;
   if(preparedRef){
    need(ready&&supportsStorageRevision(Number(service.schema_revision),52),'prepared_version');
+   const clearance=Number(service.schema_revision)>=105?'command_hold_clearance':'command_hold_release';
    const held=db.prepare(`SELECT command_id,transaction_id FROM command_device_hold h WHERE device_id=?
-    ${Number(service.schema_revision)>=57?'AND NOT EXISTS(SELECT 1 FROM command_hold_release r WHERE r.hold_id=h.hold_id)':''}`).raw().all(saved.value.binding.device_id);
+    ${Number(service.schema_revision)>=57?`AND NOT EXISTS(SELECT 1 FROM ${clearance} r WHERE r.hold_id=h.hold_id)`:''}`).raw().all(saved.value.binding.device_id);
    need(held.length===1&&held[0][1]===preparedRef.id,'prepared_hold');
    const command=readCommandRecord(db,held[0][0]),final=command.lifecycle?.final_admission;
    need(final&&same(final.ref,preparedRef)&&same(command.source.ready_ref,readyRef)&&same(command.source.binding,saved.value.binding)&&

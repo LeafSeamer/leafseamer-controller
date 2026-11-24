@@ -11,6 +11,7 @@ import {memoExecutionRead,withExecutionReadView} from './execution-read-view.mjs
 import {readDispatchLifecycle} from './command-dispatch.mjs';
 import {readSettlementLifecycle} from './command-settlement.mjs';
 import {readCommandInterruption} from './command-dispatch-interruption.mjs';
+import {readUnsentCommand} from './command-unsent-recovery.mjs';
 import {readCommandFinalAdmission} from './command-final-admission.mjs';
 import {verifyCommandReferenceAcceptance} from './reference-time-anchor.mjs';
 import {obsCutModuleDefinition} from './obs-module-profile.mjs';
@@ -121,6 +122,15 @@ export function interruptedCommandProjection(initial,previous){
   resource_status:'unresolved',automation_continuation:'paused_latched',reason_code:'evidence_unresolved'},
   manifest={command_id:initial.source.command_id,revision,members:[]};
  return {state,manifest,record:publicRecord(initial.source,initial.record.policy,state,manifest,attempts)};
+}
+export function unsentCommandProjection(previous,release){
+ const {record,source}=previous,attempts=structuredClone(record.attempts),revision='3';
+ need(record.revision==='2'&&attempts.length===1&&record.state.resource_status==='held','unsent_previous');
+ attempts[0].outcome='not_sent';
+ const state={...record.state,revision,terminal_revision:revision,phase:'finished',outcome:'blocked',
+  resource_status:'clear',automation_continuation:'paused_latched',reason_code:'execution_closed',resource_evidence_refs:[release.source_ref]},
+  manifest={command_id:source.command_id,revision,members:[{source_ref:release.source_ref,kind:release.kind,view_digest:release.view_digest}]};
+ return {state,manifest,record:publicRecord(source,record.policy,state,manifest,attempts)};
 }
 export function prepareCommandRecord({value,content,identity,current,domain,commitRef,referenceAcceptance=null}){
  const {execution,proof}=current,scope=identity.key.target_scope,policies=commandPolicyInput(value,execution),id=crypto.randomUUID();
@@ -396,6 +406,9 @@ function readLifecycleOriginal(db,initial,head){
   JOIN command_lifecycle_commit c USING(command_id,revision,commit_id) WHERE r.command_id=? AND r.revision=? AND r.commit_id=?`)
   .raw().get(initial.source.command_id,...head);
  need(row&&row[10]===head[0]&&row[11]===initial.source.command_id,'lifecycle_head');
+ if(head[0]===3&&Number(db.pragma('user_version',{simple:true}))>=105&&
+   db.prepare('SELECT 1 FROM command_unsent_closure WHERE commit_id=?').pluck().get(head[1]))
+  return readUnsentCommand(db,initial,head,row);
  if(head[0]>=4&&Number(db.pragma('user_version',{simple:true}))>=104&&
    db.prepare('SELECT 1 FROM command_dispatch_interruption WHERE commit_id=?').pluck().get(head[1]))
   return readCommandInterruption(db,initial,head,row);

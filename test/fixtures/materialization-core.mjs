@@ -170,7 +170,7 @@ async function observeInterruptedObsCut(request){
  const route='/api/v1/commands',admitted=await commandHttp('POST',route,request);
  if(admitted.status!==202)throw new Error('obs_cut_interruption_admission');
  const id=admitted.body.command_ref.object_id,until=performance.now()+10000;
- const wait=input.obs_interruption==='report'?'whenCommandDispatched':'whenCommandSettled';
+ const wait=['report','no_request','no_write'].includes(input.obs_interruption)?'whenCommandDispatched':'whenCommandSettled';
  try{await business.workerLaunches[wait](id);}
  catch(error){report({event:'obs-cut-interruption-error',code:error.code});}
  let finished;
@@ -186,7 +186,11 @@ async function observeInterruptedObsCut(request){
  }while(true);
  const replayed=await commandHttp('POST',route,request),control=manager.sessions.getControl(commandToken,request.device_id);
  const blocked=await commandHttp('POST',route,{...request,idempotency_key:crypto.randomUUID()});
- report({event:'obs-cut-interrupted',admitted,finished,replayed,blocked,control});
+ const unsent=['no_request','no_write'].includes(input.obs_interruption),record=finished.body?.record;
+ const evidence=unsent?await commandHttp('GET',route+'/'+id+'/evidence?state_revision='+record.state.revision+'&limit=5'):null;
+ const evidenceItem=evidence?.body?.items?.[0];
+ const evidenceRevision=evidenceItem?await commandHttp('GET',route+'/'+id+'/evidence/'+evidenceItem.source_ref.id+'/revisions/1'):null;
+ report({event:'obs-cut-interrupted',admitted,finished,replayed,blocked,control,evidence,evidenceRevision});
 }
 async function obsBrowserMarker(file){
  const until=performance.now()+15000;

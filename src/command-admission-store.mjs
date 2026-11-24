@@ -219,7 +219,7 @@ export function commandAdmissionStore({db, binding, writer, time, authorizeToken
         const revision=query.state_revision,limit=Number(query.limit);
         if(!/^[1-9][0-9]{0,19}$/.test(revision)||!Number.isSafeInteger(limit)||limit<1||limit>64)fail('command_request_invalid');
         const saved=readCommandRevision(db,id,revision),record=saved.record,index=record.evidence_index,
-          evidence=saved.lifecycle?.settlement?.value.evidence??[];let offset=0;
+          evidence=saved.lifecycle?.settlement?.value.evidence??saved.lifecycle?.unsent?.evidence??[];let offset=0;
         if(query.cursor!==undefined){try{
           if(typeof query.cursor!=='string'||query.cursor.length>1024||!/^[A-Za-z0-9_-]+$/.test(query.cursor))throw 0;
           const text=Buffer.from(query.cursor,'base64url').toString(),value=JSON.parse(text),{checksum,...body}=value;
@@ -235,7 +235,9 @@ export function commandAdmissionStore({db, binding, writer, time, authorizeToken
     },
     getCommandEvidenceRevision(input,id,evidenceId,revision){
       return evidenceRead(input,id,saved=>{
-        if(revision!=='1')fail('command_not_found');const found=saved.lifecycle?.settlement?.value.evidence.find(v=>v.source_ref.id===evidenceId);
+        if(revision!=='1')fail('command_not_found');
+        const evidence=saved.lifecycle?.settlement?.value.evidence??saved.lifecycle?.unsent?.evidence;
+        const found=evidence?.find(v=>v.source_ref.id===evidenceId);
         if(!found)fail('command_not_found');return found;
       });
     },

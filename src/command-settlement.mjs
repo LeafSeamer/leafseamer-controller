@@ -133,7 +133,7 @@ export function acceptCommandClosure(db,{binding,decoded,features,tick,receivedT
  dispatchEffect(db,item,id,'fence_ack',value,tick());return readCommandClosure(db,id);
 }
 
-function evidenceRecord(kind,body){
+export function evidenceRecord(kind,body){
  const signed={...body,evidence_digest:digest(body)},value={scope:body.scope,command_id:body.command_id,
   source_ref:{id:body.evidence_id,revision:'1',digest:signed.evidence_digest},kind,body:signed};
  return {...value,view_digest:digest(value)};

@@ -1,12 +1,14 @@
 import {IdentityError} from './identity-crypto.mjs';
 import {closeQueuedCommand} from './command-record-store.mjs';
 import {finishInterruptedDispatches} from './command-dispatch-interruption.mjs';
+import {finishUnsentCommands} from './command-unsent-recovery.mjs';
 
 // 独立于GET执行的有界队列维护。未知存储结果锁存失败，读取不能冒充当前投影。
 export function commandLifecycle({db,service,bootId,writer,domain}){
  let timer=null,closed=false,failure=null,cursor='';
  const enabled=Number(service?.schema_revision)>=50;
  const recoverDispatches=Number(service?.schema_revision)>=104;
+ const recoverUnsent=Number(service?.schema_revision)>=105;
  function currentDomain(){try{return domain();}catch(error){
   if(error instanceof IdentityError&&error.code==='control_source_unavailable')return null;throw error;
  }}
@@ -18,6 +20,7 @@ export function commandLifecycle({db,service,bootId,writer,domain}){
    let ids=select(cursor);if(!ids.length){cursor='';ids=select(cursor);}
    for(const id of ids){closeQueuedCommand(db,id,{bootId,domain:currentDomain});cursor=id;}
    if(recoverDispatches)finishInterruptedDispatches(db);
+   if(recoverUnsent)finishUnsentCommands(db);
   });}catch(error){failure=error;}
   if(!closed&&!failure){timer=setTimeout(run,100);timer.unref();}
  }
