@@ -5,6 +5,7 @@ import {Socket,createConnection} from 'node:net';
 import canonicalize from './runtime/canonicalize.mjs';
 import {BootstrapError,createCoreBootstrapChannel,verifyCoreAssignment,verifyCoreAdmission} from './core-bootstrap.mjs';
 import {connectCoreSupervisor} from './supervisor-control.mjs';
+import {connectLinuxInstallationSource} from './linux-installation-source.mjs';
 
 const hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 const check=(ok,code)=>{if(!ok)throw new BootstrapError(code);};
@@ -48,10 +49,11 @@ function localGroup(descriptor,serviceKind,compose){
   return {backend:'linux_cgroup_v2',generation,group_id:'group_'+hash(canonicalize(identity))};
 }
 
-export function openLinuxCoreBootstrap(policy,serviceKind,{compose=false,workerControl=false,workerChannelDirectory}={}){
+export function openLinuxCoreBootstrap(policy,serviceKind,{compose=false,workerControl=false,workerChannelDirectory,installationRead=false}={}){
   check(serviceKind==='controller'||serviceKind==='seamer','bootstrap_linux_service');
   check(!workerControl||serviceKind==='controller','bootstrap_linux_control');
   check(workerChannelDirectory===undefined||workerControl&&(!compose||workerChannelDirectory==='/run/leafseamer-worker'),'bootstrap_linux_control');
+  check(!installationRead||compose&&serviceKind==='controller'&&workerControl&&workerChannelDirectory!==undefined,'bootstrap_linux_installation');
   check(process.platform==='linux'&&fs.fstatSync(3).isSocket(),'bootstrap_linux_channel');
   verifyArtifact(policy,serviceKind);
   function channelDirectory(){
@@ -65,11 +67,14 @@ export function openLinuxCoreBootstrap(policy,serviceKind,{compose=false,workerC
     }
   }
   if(workerChannelDirectory!==undefined)channelDirectory();
-  function openWorkerChannel(memberBootId,purpose){
-    check(uuid.test(memberBootId)&&['module','execution'].includes(purpose),'bootstrap_linux_worker_channel');
-    const address=path.join(channelDirectory(),memberBootId+'.'+purpose),stat=fs.lstatSync(address,{bigint:true});
+  function openChannel(name){
+    const address=path.join(channelDirectory(),name),stat=fs.lstatSync(address,{bigint:true});
     check(stat.isSocket()&&stat.uid===0n&&stat.gid===BigInt(process.getegid())&&(stat.mode&0o777n)===0o660n,'bootstrap_linux_worker_channel');
     return createConnection(address);
+  }
+  function openWorkerChannel(memberBootId,purpose){
+    check(uuid.test(memberBootId)&&['module','execution'].includes(purpose),'bootstrap_linux_worker_channel');
+    return openChannel(memberBootId+'.'+purpose);
   }
   const socket=new Socket({fd:3,readable:true,writable:true});
   const channel=createCoreBootstrapChannel(socket,socket,{timeoutMs:policy.bootstrap_timeout_ms});
@@ -106,7 +111,13 @@ export function openLinuxCoreBootstrap(policy,serviceKind,{compose=false,workerC
       if(!workerControl){socket.once('data',markLost);socket.resume();return {binding,policy,assertCurrent,assertLive,signal};}
       const supervision=await connectCoreSupervisor({channelId:receipt.channel_binding_id.replaceAll('-',''),binding,policy,
         inherited:{socket,source,assertLive,...(workerChannelDirectory!==undefined&&{openWorkerChannel})}});
-      try{assertCurrent();return {binding,policy,assertCurrent,assertLive,signal,supervision};}
+      try{
+        assertCurrent();
+        const extensionInstallationSource=installationRead?await connectLinuxInstallationSource({socket:openChannel('installation.sock'),
+          receipt,serviceId:policy.service_id,supervision}):null;
+        assertCurrent();
+        return {binding,policy,assertCurrent,assertLive,signal,supervision,extensionInstallationSource};
+      }
       catch(error){supervision.close();throw error;}
     },
     monitor(stop){

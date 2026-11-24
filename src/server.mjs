@@ -51,6 +51,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   if (guiDirectory !== null && tls === null) throw new Error('gui_requires_https');
   if (pairing !== null) pairingUuid(pairing.credential_id);
   const storage = openStorage(dataDir, protectedIngressIdentity);
+  let installationSource=extensionInstallationSource;
   let supervision = null, timeProviderLink = null, timeProviderBinding = null, clockEvidence = null, linuxSource = null, linuxRuntime = null;
   const assertRuntimeCurrent = () => { supervision?.assertCurrent(); linuxRuntime?.assertLive(); timeProviderLink?.assertCurrent(); };
   try {
@@ -69,14 +70,18 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       if(supervision)storage.workerLaunches?.runtime?.bindSource(supervision);
       if(supervision)storage.extensionInstallations?.bindRuntimeSource?.(supervision);
       if(supervision)storage.workerLaunches?.authorization?.bindSource(supervision);
-      if(extensionInstallationSource!==null){
+      if(result.extensionInstallationSource){
+        if(installationSource!==null)throw new Error('worker_launch_linux_source_conflict');
+        installationSource=result.extensionInstallationSource;
+      }
+      if(installationSource!==null){
         if(process.platform!=='linux'||Number(storage.identity.schema_revision)<109||typeof supervision?.openWorkerChannel!=='function')
           throw new Error('worker_launch_linux_unavailable');
-        storage.extensionInstallations.bindSource(extensionInstallationSource);
+        storage.extensionInstallations.bindSource(installationSource);
       }
       assertRuntimeCurrent();
     }
-    if(extensionInstallationSource!==null&&!supervision)throw new Error('worker_launch_linux_unavailable');
+    if(installationSource!==null&&!supervision)throw new Error('worker_launch_linux_unavailable');
     if (localPairingManagement && ((!supervision && !linuxPairing) || !tls || !pairing || Number(storage.identity.schema_revision) < 93)) {
       throw new Error('pairing_profile_management_unavailable');
     }
@@ -378,7 +383,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   let stopping;
   const application = Object.freeze({address: server.address(), identity: storage.identity, serviceBootId: storage.serviceBootId,
     authenticationStatus: () => authentication?.status() ?? null,
-    ...(extensionInstallationSource!==null&&{startLinuxWorker(input){
+    ...(installationSource!==null&&{startLinuxWorker(input){
       if(closing)throw new Error('controller_closing');
       assertRuntimeCurrent();
       return storage.workerLaunches.startLinux(input);

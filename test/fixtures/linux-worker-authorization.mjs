@@ -16,18 +16,28 @@ const input=JSON.parse(fs.readFileSync(inputFile,'utf8'));
 const cleanup=[];
 const fixture={after(fn){cleanup.unshift(fn);}};
 try{
-  const clock=openNativeClock(),channel=openLinuxCoreBootstrap(input.policy,'controller',{compose,workerControl:true,workerChannelDirectory:input.channelDirectory});
+  const clock=openNativeClock(),channel=openLinuxCoreBootstrap(input.policy,'controller',{compose,workerControl:true,
+    workerChannelDirectory:input.channelDirectory,installationRead:compose});
   fixture.after(()=>channel.close());
-  const {binding,supervision,policy}=await channel.accept({identity:input.policy,source:clock});
+  const {binding,supervision,policy,extensionInstallationSource}=await channel.accept({identity:input.policy,source:clock});
+  let installation=null;
   if(compose){
     const until=performance.now()+10000;
     while(!fs.existsSync(input.start)){
       supervision.assertCurrent();assert.ok(performance.now()<until,'Compose supervisor did not finish admitting both cores');
       await delay(25);
     }
+    const query={intake_id:input.intakeRef.object_id,target_authority_service_id:policy.service_id};
+    assert.throws(()=>extensionInstallationSource.describeIntake({...query,target_authority_service_id:'unrelated-service'}),
+      {code:'linux_installation_query'});
+    assert.deepEqual(await extensionInstallationSource.describeIntake({...query,intake_id:'unrelated-intake'}),
+      {status:'unavailable',content:null});
+    const {status,content}=await extensionInstallationSource.describeIntake(query);
+    assert.equal(status,'available');assert.deepEqual(content.intake_ref,input.intakeRef);
+    installation={...extensionInstallationSource,content};
   }
   const capabilityTemplate=input.channelDirectory?JSON.parse(fs.readFileSync(new URL('../../dist/simulator-control-capability.json',import.meta.url),'utf8')):undefined;
-  const x=await setup(fixture,{revision:109,directory:input.data,capabilityTemplate,reviewedActions:capabilityTemplate?.actions.map(action=>action.action_id),prepareHost(host){
+  const x=await setup(fixture,{revision:109,directory:input.data,installation,capabilityTemplate,reviewedActions:capabilityTemplate?.actions.map(action=>action.action_id),prepareHost(host){
     if(input.materialization){
       Object.assign(host.identity,input.materialization.identity);
       Object.assign(host.content,input.materialization.content);

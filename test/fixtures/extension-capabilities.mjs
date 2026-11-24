@@ -2,9 +2,9 @@ import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
 import {prepared} from './extension-role.mjs';
 const template=JSON.parse(await fs.readFile(new URL('./static-capability.json',import.meta.url),'utf8'));
-export async function setup(t,{mutate=()=>{},response=answer=>answer,revision=18,recheck=()=>{},prepareHost=()=>{},prepareBindings=()=>{},directory=null,
+export async function setup(t,{mutate=()=>{},response=answer=>answer,revision=18,recheck=()=>{},prepareHost=()=>{},prepareBindings=()=>{},directory=null,installation=null,
  capabilityTemplate=template,reviewedActions=['get']}={}){
- const f=await prepared(t,{revision,recheck,directory,prepareHost(host){
+ const f=await prepared(t,{revision,recheck,directory,installation,prepareHost(host){
   const document=structuredClone(capabilityTemplate);mutate(document);const bytes=Buffer.from(JSON.stringify(document));
   const file={file_id:'capability',path:'capability.json',size_bytes:String(bytes.length),digest:'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex'),role:'schema',executable:false};
   host.content.inventory.files.push(file);host.content.inventory.files.sort((a,b)=>a.file_id<b.file_id?-1:1);host.content.manifest.capability_template_file_ids=['capability'];prepareHost(host);
