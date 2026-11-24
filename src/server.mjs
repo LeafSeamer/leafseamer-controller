@@ -44,7 +44,9 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       if (typeof coreBootstrap !== 'function' || Number(storage.identity.schema_revision) < 11) throw new Error('core_runtime_migration_required');
       const result = await coreBootstrap(storage.identity), {binding, policy} = result;
       supervision = result.supervision ?? null; supervision?.assertCurrent();
+      result.assertCurrent?.();
       timeProviderBinding = storage.bindCoreRuntime(binding, policy, supervision);
+      result.assertCurrent?.();
       if(supervision)storage.workerLaunches?.runtime?.bindSource(supervision);
       if(supervision)storage.extensionInstallations?.bindRuntimeSource?.(supervision);
       if(supervision)storage.workerLaunches?.authorization?.bindSource(supervision);

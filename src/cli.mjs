@@ -158,8 +158,8 @@ try {
       if(typeof rawPolicy!=='string'||Buffer.byteLength(rawPolicy)>8192)throw new BootstrapError('bootstrap_policy');
       const policy=validateBootstrapPolicy(JSON.parse(rawPolicy));
       if(canonicalize(policy)!==rawPolicy)throw new BootstrapError('bootstrap_policy');
-      linuxChannel=openLinuxCoreBootstrap(policy);
-      launch.coreBootstrap=linuxChannel.accept;
+      linuxChannel=openLinuxCoreBootstrap(policy,'controller');
+      launch.coreBootstrap=identity=>linuxChannel.accept({identity,source:openNativeClock()});
     }
     if (authenticatedCore) {
       const rawPolicy = options['--bootstrap-policy'];
