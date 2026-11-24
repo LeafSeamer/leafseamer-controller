@@ -2,9 +2,10 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import {canonical,context,fields} from './auth-clock-value.mjs';
+import {canonical,context,digest,fields,same} from './auth-clock-value.mjs';
 import {clockInteger,openNativeClock} from './native-clock.mjs';
 import {pairingUuid} from './peer-pairing-value.mjs';
+import {observeLinuxChronyHealth} from './linux-chrony-health.mjs';
 
 const evidenceFormat='leafseamer.authentication-clock-evidence/1';
 const need=(ok,code)=>{if(!ok)throw Object.assign(new Error(code),{code});};
@@ -30,9 +31,9 @@ function readJson(file){
  return value;
 }
 function signingProfile(file){
- const profile=readJson(file);
- fields(profile,['format','service_id','database_instance_id','policy_digest','native_binary_digest','private_key_file','evidence_file']);
- need(profile.format==='leafseamer.authentication-clock-signing-profile/1'&&hash(profile.policy_digest)&&hash(profile.native_binary_digest)&&
+ const profile=readJson(file),linux=process.platform==='linux';
+ fields(profile,['format','service_id','database_instance_id','policy_digest','native_binary_digest','private_key_file','evidence_file',...(linux?['chrony']:[])]);
+ need(profile.format==='leafseamer.authentication-clock-signing-profile/'+(linux?'2':'1')&&hash(profile.policy_digest)&&hash(profile.native_binary_digest)&&
   typeof profile.private_key_file==='string'&&path.isAbsolute(profile.private_key_file)&&
   typeof profile.evidence_file==='string'&&path.isAbsolute(profile.evidence_file),'clock_evidence_profile');
  pairingUuid(profile.service_id);pairingUuid(profile.database_instance_id);
@@ -53,6 +54,18 @@ function checkStatement(statement,profile,now){
  const runtime=evidence.runtime;
  need(runtime.continuity===challenge.continuity&&(!supervised||runtime.clock_domain_id===challenge.clock_domain_id&&
   runtime.descriptor_digest===challenge.descriptor_digest),'clock_evidence_runtime');
+}
+function linuxHealth(profile,statement,clock){
+ const {policy,health}=statement.evidence;
+ need(profile.native_binary_digest===clock.artifactDigest&&digest(profile.chrony)===policy.health_profile_ref.digest&&
+  health.state==='synchronized'&&health.holdover_ref===null,'clock_evidence_chrony_binding');
+ const capture=clock.capture();
+ need(capture.continuity===statement.challenge.continuity,'clock_evidence_chrony_namespace');
+ const {state,source,identity,reportedErrorNs}=observeLinuxChronyHealth(profile.chrony);
+ need(state==='synchronized','clock_evidence_chrony_tracking_only');
+ need(capture.continuity==='linux:'+identity.time_namespace,'clock_evidence_chrony_namespace');
+ need(reportedErrorNs<=clockInteger(policy.max_system_error_ns),'clock_evidence_chrony_error');
+ return {source,identity};
 }
 function replaceFile(file,bytes){
  const prior=fs.lstatSync(file,{throwIfNoEntry:false});
@@ -78,18 +91,26 @@ try{
  const output=path.join(fs.realpathSync.native(path.dirname(profile.evidence_file)),path.basename(profile.evidence_file));
  const matchPath=process.platform==='win32'?value=>value.toLowerCase():value=>value;
  need(!inputs.map(matchPath).includes(matchPath(output)),'clock_evidence_output');
- checkStatement(statement,profile,clock.tick());
+ const start=clock.tick();
+ checkStatement(statement,profile,start);
+ let healthObservation;
+ if(process.platform==='linux'){
+  need(clockInteger(statement.evidence.health.valid_before_tick_ns)<=start+clockInteger(statement.evidence.policy.sample_ttl_ns),
+   'clock_evidence_chrony_deadline');
+  healthObservation=linuxHealth(profile,statement,clock);
+ }
  const keyBytes=readFile(profile.private_key_file,16384);
  let key;
  try{key=crypto.createPrivateKey(keyBytes);}finally{keyBytes.fill(0);}
  need(key.asymmetricKeyType==='ed25519','clock_evidence_signer');
  const {evidence}=statement;
  const signature=crypto.sign(null,Buffer.from(evidenceFormat+'\0'+canonical(evidence)),key).toString('base64url');
+ if(healthObservation)need(same(healthObservation,linuxHealth(profile,statement,clock)),'clock_evidence_chrony_changed');
  checkStatement(statement,profile,clock.tick());
  replaceFile(output,canonical({format:evidenceFormat,evidence,signature}));
  process.stdout.write(canonical({state:'published',service_id:profile.service_id,service_boot_id:evidence.runtime.service_boot_id})+'\n');
 }catch(error){
- const code=/^(clock_evidence_|auth_clock_)[a-z_]+$/.test(error.code??'')?error.code:'clock_evidence_failed';
+ const code=/^(?:(?:clock_evidence_|auth_clock_)[a-z_]+|clock_wall_(?:discontinuity|monitor_unavailable))$/.test(error.code??'')?error.code:'clock_evidence_failed';
  process.stderr.write(JSON.stringify({error:code})+'\n');
  process.exitCode=1;
 }

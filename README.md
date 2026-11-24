@@ -168,7 +168,9 @@ node --disallow-code-generation-from-strings dist/cli.mjs supervise --data-dir <
 node --disallow-code-generation-from-strings dist/clock-evidence.mjs --profile C:\protected\clock-signer.json --statement C:\protected\clock-statement.json
 ```
 
-签发配置使用 `format: "leafseamer.authentication-clock-signing-profile/1"`，固定 `service_id`、`database_instance_id`、`policy_digest`、`native_binary_digest`、`private_key_file` 和 `evidence_file`。签发输入为 `{challenge, evidence}`，其中 `challenge` 是实际启动记录，`evidence` 包含部署方已批准的 `policy`、本次运行的 `runtime` 和当前 `health` 原件。环境误差界、健康观察和各自截止由部署批准及实际监测提供。Seamer 可在自身宿主用同一工具签发自身证据，Controller 的挑战另含监督域及描述符摘要。
+Windows 签发配置使用 `format: "leafseamer.authentication-clock-signing-profile/1"`，固定 `service_id`、`database_instance_id`、`policy_digest`、`native_binary_digest`、`private_key_file` 和 `evidence_file`。签发输入为 `{challenge, evidence}`，其中 `challenge` 是实际启动记录，`evidence` 包含部署方已批准的 `policy`、本次运行的 `runtime` 和当前 `health` 原件。环境误差界、健康观察和各自截止由部署批准及实际监测提供。Seamer 可在自身宿主用同一工具签发自身证据，Controller 的挑战另含监督域及描述符摘要。
+
+Linux 签发配置使用 `leafseamer.authentication-clock-signing-profile/2`，在上述字段上增加 `chrony`。其 `format` 为 `leafseamer.linux-chrony-health/1`，并固定 `chronyc_file`、`chronyc_sha256`、`chronyd_sha256`、`configuration_file`、`configuration_sha256`、`pid_file`、`socket_file`、`source_addresses` 和 `max_source_age_s`。批准策略的 `health_profile_ref.digest` 取该完整 `chrony` 对象规范 JSON 的 SHA-256。使用根用户保护的二进制和配置路径，以及受保护的守护进程 PID 文件和 Unix 命令套接字。`chronyd` 以 `-f` 显式使用固定配置，内含匹配的 `pidfile`、Unix `bindcmdaddress` 和 1 到 16 个静态数字 IP `server` 项。已联调 Chrony 4.8。签发前后均核对同一进程、同一授时源及其新鲜可达性，授时诊断的误差估计须落在批准范围内。`-x` 追踪模式和保持状态会拒绝签发。每个新健康原件的截止受批准采样策略约束，环境误差界沿用部署批准。首期 Linux 生产资格还需核验实际宿主授时、连续性及受监督服务准入。[Chrony 配置手册](https://chrony-project.org/doc/4.8/chrony.conf.html) · [Chrony 状态手册](https://chrony-project.org/doc/4.8/chronyc.html)
 
 签发工具重核实例、启动、制品、连续性、证据引用和原截止，再用固定 Ed25519 私钥签名并原子替换配置的目标文件。仅完整成功时返回 `published`。刷新健康状态时继续提供本次运行的原 `policy` 和 `runtime`，并提交当前健康监测原件。证据失效后按既定维护流程恢复宿主授时、关闭旧域并启动新认证域。
 
