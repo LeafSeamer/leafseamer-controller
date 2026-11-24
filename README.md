@@ -613,7 +613,9 @@ CLI 在写入 boot 记录前校验数据库身份及最低 Schema 5。此入口�
 
 schema 3 服务每500毫秒调用原生采集器。Windows 顺序为 `QueryInterruptTimePrecise → GetSystemTimePreciseAsFileTime → QueryInterruptTimePrecise`，FILETIME 用整数减纪元再转纳秒；Linux 实现使用 `CLOCK_BOOTTIME → CLOCK_REALTIME → CLOCK_BOOTTIME` 并检查时间命名空间。没有 `Date.now()` 或浮点秒替代路径。原生接口依据：[Microsoft 单调时间](https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-queryinterrupttimeprecise)、[精确系统时间](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemtimepreciseasfiletime)、[Linux clock_gettime](https://www.man7.org/linux/man-pages/man2/clock_gettime.2.html)。
 
-采集括号超过20毫秒、两秒有效期到达等号、时间倒退、连续性变化或采集／存储失败均锁存故障，本 boot 新采样不能解除。Windows 注册电源通知以记录连续性变化；Linux 连续性监测仍未完成。每 boot 保存最新诊断与首故障，记录原生制品摘要；每32次诊断写入执行并核验 PASSIVE checkpoint。它只是当前保护态诊断的有限写入处理，不是完整业务 WAL 容量调度或不可变 AuthenticationClockAcquisition 日志。
+采集括号超过20毫秒、两秒有效期到达等号、时间倒退、连续性变化或采集／存储失败均锁存故障，本 boot 新采样不能解除。Windows 注册电源通知以记录连续性变化。Linux 在每次采集前后读取不阻塞的绝对 `CLOCK_REALTIME` timerfd，内核报告时钟跳变时锁存 `clock_wall_discontinuity`，观察不可用时锁存 `clock_wall_monitor_unavailable`。故障后 `CLOCK_BOOTTIME` 读数仍供单调时限使用。Linux 返回的样本仍保持连续性未获资格，挂起恢复和宿主批准仍需独立运行证据。[Linux timerfd 手册](https://man7.org/linux/man-pages/man2/timerfd_create.2.html)
+
+每 boot 保存最新诊断、首故障及原生制品摘要。每32次诊断写入执行并核验 PASSIVE checkpoint。当前保护态诊断采用有限写入处理，完整业务 WAL 容量调度和不可变认证采集另由相关存储路径负责。
 
 当前服务采样仍不具备认证资格：尚未装载获批准的环境误差、量化与速率界、宿主授时健康来源及 DF02 运行域。schema 4 已实现下述可信区间和原件 writer，但服务未装配可信提供者，继续 `protected`，没有登录、会话或设备写入授权。重启只建立新 boot 的诊断，不能恢复或获得认证资格。
 

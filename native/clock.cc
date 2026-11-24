@@ -6,8 +6,11 @@
 #include <windows.h>
 #include <powrprof.h>
 #else
+#include <cerrno>
 #include <time.h>
 #include <sys/stat.h>
+#include <sys/timerfd.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -16,6 +19,9 @@ struct State {
   std::atomic<uint64_t> power_generation{0};
   HPOWERNOTIFY notification = nullptr;
   bool notifications_available = false;
+#else
+  int realtime_timer = -1;
+  const char* realtime_fault = "clock_wall_monitor_unavailable";
 #endif
 };
 bool ok(napi_env env, napi_status status) {
@@ -41,6 +47,30 @@ ULONG CALLBACK power_event(PVOID context, ULONG type, PVOID) {
   return ERROR_SUCCESS;
 }
 #else
+void arm_realtime_monitor(State& state) {
+  state.realtime_timer = timerfd_create(CLOCK_REALTIME, TFD_CLOEXEC | TFD_NONBLOCK);
+  if (state.realtime_timer < 0) return;
+  // The timer observes cancellations. Its absolute deadline is the Linux ktime limit, not a sampling interval.
+  constexpr int64_t ns_per_second = 1000000000;
+  itimerspec alarm{};
+  alarm.it_value.tv_sec = INT64_MAX / ns_per_second;
+  alarm.it_value.tv_nsec = INT64_MAX % ns_per_second;
+  if (timerfd_settime(state.realtime_timer, TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET, &alarm, nullptr) == 0) {
+    state.realtime_fault = nullptr;
+  } else {
+    close(state.realtime_timer);
+    state.realtime_timer = -1;
+  }
+}
+const char* check_realtime_monitor(State& state) {
+  if (state.realtime_fault) return state.realtime_fault;
+  uint64_t expirations = 0;
+  const auto bytes = read(state.realtime_timer, &expirations, sizeof(expirations));
+  if (bytes < 0 && errno == EAGAIN) return nullptr;
+  // Never rearm this native clock instance after cancellation, expiry, or lost observation.
+  state.realtime_fault = bytes < 0 && errno == ECANCELED ? "clock_wall_discontinuity" : "clock_wall_monitor_unavailable";
+  return state.realtime_fault;
+}
 bool ns(std::string& value) {
   struct stat info{};
   if (stat("/proc/self/ns/time", &info) != 0) return false;
@@ -53,6 +83,8 @@ void finalize(napi_env, void* data, void*) {
   auto* state = static_cast<State*>(data);
 #ifdef _WIN32
   if (state->notification) PowerUnregisterSuspendResumeNotification(state->notification);
+#else
+  if (state->realtime_timer >= 0) close(state->realtime_timer);
 #endif
   delete state;
 }
@@ -60,10 +92,10 @@ napi_value capture(napi_env env, napi_callback_info) {
   napi_value result;
   if (!ok(env, napi_create_object(env, &result))) return nullptr;
   if (!text(env, result, "format", "leafseamer-native-clock/1")) return nullptr;
-#ifdef _WIN32
   void* data = nullptr;
   if (!ok(env, napi_get_instance_data(env, &data))) return nullptr;
   auto* state = static_cast<State*>(data);
+#ifdef _WIN32
   const auto before_generation = state->power_generation.load(std::memory_order_relaxed);
   ULONGLONG before = 0, after = 0;
   FILETIME wall{};
@@ -77,12 +109,14 @@ napi_value capture(napi_env env, napi_callback_info) {
       !number(env, result, "continuity_before", before_generation) || !number(env, result, "continuity_after", after_generation) ||
       !text(env, result, "continuity_monitor", state->notifications_available ? "power_notifications" : "unavailable")) return nullptr;
 #else
+  if (const char* fault = check_realtime_monitor(*state)) return fail(env, fault);
   std::string namespace_before, namespace_after;
   if (!ns(namespace_before)) return fail(env, "native_clock_namespace");
   timespec before{}, wall{}, after{};
   if (clock_gettime(CLOCK_BOOTTIME, &before) != 0 || clock_gettime(CLOCK_REALTIME, &wall) != 0 ||
       clock_gettime(CLOCK_BOOTTIME, &after) != 0 || !valid(before) || !valid(wall) || !valid(after)) return fail(env, "native_clock_read");
   if (!ns(namespace_after)) return fail(env, "native_clock_namespace");
+  if (const char* fault = check_realtime_monitor(*state)) return fail(env, fault);
   if (!text(env, result, "platform", "linux") || !number(env, result, "before_sec", static_cast<uint64_t>(before.tv_sec)) ||
       !number(env, result, "before_nsec", static_cast<uint64_t>(before.tv_nsec)) ||
       !number(env, result, "wall_sec", static_cast<uint64_t>(wall.tv_sec)) || !number(env, result, "wall_nsec", static_cast<uint64_t>(wall.tv_nsec)) ||
@@ -115,6 +149,8 @@ napi_value initialize(napi_env env, napi_value exports) {
   DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS subscriber{};
   subscriber.Callback = power_event; subscriber.Context = state;
   state->notifications_available = PowerRegisterSuspendResumeNotification(DEVICE_NOTIFY_CALLBACK, &subscriber, &state->notification) == ERROR_SUCCESS;
+#else
+  arm_realtime_monitor(*state);
 #endif
   if (!ok(env, napi_set_instance_data(env, state, finalize, nullptr))) { finalize(env, state, nullptr); return nullptr; }
   napi_property_descriptor properties[] = {

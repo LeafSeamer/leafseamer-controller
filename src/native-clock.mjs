@@ -44,7 +44,14 @@ export function openNativeClock() {
     const digest = crypto.createHash('sha256').update(fs.readFileSync(filename)).digest('hex');
     check(digest === manifest.binary_sha256, 'native_clock_artifact');
     const native = createRequire(import.meta.url)(filename);
-    return Object.freeze({artifactDigest: 'sha256:' + digest, capture: () => normalizeCapture(native.capture()), tick: () => clockInteger(native.tick())});
+    function capture() {
+      try { return normalizeCapture(native.capture()); }
+      catch (error) {
+        if (error?.code === 'clock_wall_discontinuity' || error?.code === 'clock_wall_monitor_unavailable') throw new ClockError(error.code);
+        throw error;
+      }
+    }
+    return Object.freeze({artifactDigest: 'sha256:' + digest, capture, tick: () => clockInteger(native.tick())});
   } catch (error) {
     if (error instanceof ClockError) throw error;
     throw new ClockError('native_clock_unavailable');
