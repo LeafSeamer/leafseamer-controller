@@ -295,9 +295,15 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
         need(!db.prepare(`SELECT 1 FROM worker_launch_preparation WHERE supervisor_instance_id=? AND
           (member_id=? OR (group_id=? AND group_generation=?))`).pluck().get(intent.supervisor_instance_id,intent.member_id,intent.containment_ref.group_id,intent.containment_ref.generation),'worker_launch_identity_conflict');
         const preparation=crypto.randomUUID(),transaction=crypto.randomUUID();
+        if(activation?.replacement){
+          const r=activation.replacement;
+          need(db.prepare('INSERT INTO obs_worker_launch_replacement VALUES(?,?,?,?,?,?)')
+            .run(r.launch_id,r.activation_operation_id,r.previous_launch_id,r.control_operation_id,canonicalize(r),hash(r)).changes===1,
+            'worker_launch_replacement_storage');
+        }
         db.prepare('INSERT INTO worker_launch_preparation VALUES('+Array(activation?14:dependencies?13:12).fill('?').join(',')+')').run(intent.launch_id,preparation,transaction,bootId,
           intent.supervisor_instance_id,intent.runtime_generation,intent.member_id,intent.containment_ref.group_id,intent.containment_ref.generation,
-          digest,body,'prepared',...(dependencies?[intent.launch_id]:[]),...(activation?[activation]:[]));
+          digest,body,'prepared',...(dependencies?[intent.launch_id]:[]),...(activation?[activation.id]:[]));
         if(dependencies)db.prepare('INSERT INTO worker_launch_dependencies VALUES(?,?,?)').run(intent.launch_id,canonicalize(dependencies),hash(dependencies));
         for(const device of intent.object_scope.device_ids)db.prepare('INSERT INTO worker_launch_device VALUES(?,?)').run(intent.launch_id,device);
         const audit=canonicalize({kind:'worker_launch_prepared',transaction_id:transaction,preparation_id:preparation,

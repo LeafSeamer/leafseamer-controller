@@ -1,12 +1,14 @@
 import {readRunFence} from './execution-run-fence.mjs';
 import {controlNeed as need,controlHash as hash,controlSame as same,controlRead as document} from './device-control-value.mjs';
 
-function confirmedRetirement(db,target,intent,runtimeId){
+export function confirmedRetirement(db,target,intent,runtimeId,operationId=null){
  const rows=db.prepare(`SELECT e.operation_id,e.body_jcs,e.body_digest,o.body_jcs,o.body_digest FROM control_barrier_target t
   JOIN control_barrier_evidence e USING(operation_id) JOIN control_change_commit c USING(commit_id)
   JOIN control_operation_revision o ON o.operation_id=e.operation_id AND o.commit_id=e.commit_id
-  WHERE t.launch_id=? AND t.launch_intent_digest=? AND t.service_boot_id=? AND c.kind='effective' ORDER BY e.operation_id`)
-  .raw().all(target.launch_id,target.launch_intent_digest,target.service_boot_id);
+  JOIN control_record_revision r ON r.commit_id=c.commit_id AND r.device_id=json_extract(o.body_jcs,'$.device_id')
+  WHERE t.launch_id=? AND t.launch_intent_digest=? AND t.service_boot_id=? AND c.kind='effective'
+  AND (? IS NULL OR e.operation_id=?) ORDER BY r.revision,e.operation_id`)
+  .raw().all(target.launch_id,target.launch_intent_digest,target.service_boot_id,operationId,operationId);
  const {service_boot_id,...key}=target;
  for(const [operationId,text,digest,operationText,operationDigest] of rows){
   const evidence=document(text,digest),operation=document(operationText,operationDigest);

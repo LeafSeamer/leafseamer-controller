@@ -7,6 +7,7 @@ import {deviceRegistryReader} from './device-registry-store.mjs';
 import {currentControlSource,readControlSource} from './device-control-source.mjs';
 import {deviceExecutionVersion,assertDeviceExecutionFeatures} from './sdk/device-execution.mjs';
 import {memoExecutionRead} from './execution-read-view.mjs';
+import {captureObsPriorExecution,verifyObsPriorExecution} from './obs-prior-execution.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError(code);};
 const hash=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
 const digest=value=>hash(canonicalize(value));
@@ -22,11 +23,16 @@ function source(db,binding,runtime,device){
  need((control.mode==='manual'&&control.holder||schema>=96&&control.mode==='automatic'&&control.holder===null)&&
   control.pending_change===null&&control.gate_state==='protected'&&
   control.in_flight_command_ids.length===0&&control.unresolved_command_ids.length===0,'execution_control_source');
- need(!db.prepare("SELECT 1 FROM ca_adjudication a JOIN ca_request_key k USING(key_id) WHERE k.device_id=? AND a.decision!='rejected'").pluck().get(device),'execution_control_command_cut');
+ const profile=bound.value.transport_profile;
+ const prior=schema>=106&&profile.format==='leafseamer-obs-cut-transport/1'?
+  captureObsPriorExecution(db,device,binding.ipc_session_id,profile.resource_ref):[];
+ const endedCommands=new Set(prior.flatMap(value=>value.commands.map(command=>command.command_id)));
+ const admissions=db.prepare("SELECT a.command_id FROM ca_adjudication a JOIN ca_request_key k USING(key_id) WHERE k.device_id=? AND a.decision!='rejected'").pluck().all(device);
+ need(admissions.every(id=>endedCommands.has(id)),'execution_control_command_cut');
  const source=schema>=32?currentControlSource(db,device):null;
  if(source)need(source.current.value.clock_domain_id===binding.clock_domain_id&&source.current.value.descriptor_digest===binding.descriptor_digest&&
   source.current.value.revision===control.revision&&same(source.current.ref,source.authority.ref),'execution_control_source');
- return {bound,control,source};
+ return {bound,control,source,prior};
 }
 function frame(db,id,phase,sourceId,sourceDigest){
  const stored=row(db,`SELECT f.*,e.effect_jcs,e.effect_digest,e.audit_jcs,e.audit_digest,e.committed_tick,
@@ -72,6 +78,11 @@ function readFence(db,id){
   same(value.request_record_ref,ref(request.record.record_id,request.record.record_digest))&&value.fence_id===id&&request.frame.body.barrier_id===id&&
   request.transaction===stored.request_transaction_id&&request.frame.reply_to===null&&request.replyRecord===null&&value.gate_state==='closed','execution_control_integrity');
  if(value.control_source_ref)need(same(value.control_source_ref,readControlSource(db,stored.control_device_id,stored.control_revision).ref),'execution_control_integrity');
+ if(value.prior_execution!==undefined){
+  const deviceBinding=read(bound.body_jcs,bound.body_digest),profile=deviceBinding.transport_profile;
+  need(profile.format==='leafseamer-obs-cut-transport/1','execution_control_prior');
+  verifyObsPriorExecution(db,stored.control_device_id,request.frame.ipc_session_id,profile.resource_ref,value.prior_execution);
+ }
  const ackRow=row(db,'SELECT * FROM execution_initial_fence_ack WHERE fence_id=?',id);let confirmation=null,ack=null;
  if(ackRow){confirmation=read(ackRow.body_jcs,ackRow.body_digest);ack=frame(db,ackRow.record_id,'ack',id+'.ack',ackRow.body_digest);
   need(same(confirmation.fence_ref,ref(id,stored.body_digest))&&same(confirmation.record_ref,ref(ack.record.record_id,ack.record.record_digest))&&
@@ -81,9 +92,9 @@ function readFence(db,id){
  return {value,ref:ref(id,stored.body_digest),request,confirmation,confirmation_ref:ackRow?ref(id+'.ack',ackRow.body_digest):null,ack};
 }
 export function prepareInitialFence(db,{binding,runtime,device,features,tick}){
- const {bound,control,source:controlSource}=source(db,binding,runtime,device);
+ const {bound,control,source:controlSource,prior}=source(db,binding,runtime,device);
  const old=db.prepare('SELECT fence_id FROM execution_initial_fence WHERE binding_id=?').pluck().get(bound.ref.id);
- if(old){const result=readInitialFence(db,old);need(same(result.value.control_record,control),'execution_control_changed');return result;}
+ if(old){const result=readInitialFence(db,old);need(same(result.value.control_record,control)&&same(result.value.prior_execution??[],prior),'execution_control_changed');return result;}
  const id=crypto.randomUUID(),body={barrier_id:id,operation_id:id+'.operation',control_epoch:control.control_epoch,target_version:control.effective_version,target_gate_revision:'1',issued_cut_revision:'0',
   ledger_digest:digest([]),open_intents:[],transmission_ledger_digest:digest([]),open_transmission_intents:[],cancel_transmissions:[],cancel_ledger_digest:digest([])};
  const {barrier_id,...cut}=body;
@@ -95,7 +106,8 @@ export function prepareInitialFence(db,{binding,runtime,device,features,tick}){
  assertDeviceExecutionFeatures(outgoing,features);
  const item=preparedFrame(binding,outgoing,Buffer.from(JSON.stringify(outgoing)),'c2w',tick());
  const value={format:'leafseamer-initial-control-fence/1',fence_id:id,binding_ref:bound.ref,control_record:control,
-  request_record_ref:ref(item.record.record_id,item.record.record_digest),gate_state:'closed',...(controlSource?{control_source_ref:controlSource.current.ref}:{})};
+  request_record_ref:ref(item.record.record_id,item.record.record_digest),gate_state:'closed',...(controlSource?{control_source_ref:controlSource.current.ref}:{}),
+  ...(prior.length?{prior_execution:prior}:{})};
  insertFrame(db,item,'initial_control');
  need(db.prepare('INSERT INTO execution_initial_fence VALUES(?,?,?,?,?,?,?,?)').run(id,bound.ref.id,device,Number(control.revision),item.record.record_id,item.transaction,canonicalize(value),digest(value)).changes===1,'execution_control_storage');
  effect(db,item,id,'request',value,tick());return readInitialFence(db,id);
@@ -103,7 +115,8 @@ export function prepareInitialFence(db,{binding,runtime,device,features,tick}){
 export function currentInitialFence(db,{binding,runtime,id}){
  const stored=readInitialFence(db,id);need(stored&&stored.request.frame.ipc_session_id===binding.ipc_session_id,'execution_control_missing');
  const current=source(db,binding,runtime,stored.request.frame.device_id);
- need(same(stored.value.binding_ref,current.bound.ref)&&same(stored.value.control_record,current.control),'execution_control_changed');return stored;
+ need(same(stored.value.binding_ref,current.bound.ref)&&same(stored.value.control_record,current.control)&&
+  same(stored.value.prior_execution??[],current.prior),'execution_control_changed');return stored;
 }
 export function acceptInitialFenceAck(db,{binding,runtime,decoded,features,tick}){
  const {frame:incoming,payload}=decoded;

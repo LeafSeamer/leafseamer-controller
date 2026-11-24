@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import canonicalize from 'canonicalize';
 import {IdentityError} from './identity-crypto.mjs';
+import {selectObsLaunchReplacement} from './obs-prior-execution.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('extension_activation_'+code);};
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 const same=(a,b)=>canonicalize(a)===canonicalize(b);
@@ -37,8 +38,12 @@ export function extensionActivationStore({db,service,bootId,available,reference,
   need(slot,'slot_changed');const current=read(slot[0],slot[1]);need(current.desired_state==='enabled'&&same(current.pending_operation_ref,body.operation_ref),'slot_changed');
   const held=db.prepare('SELECT o.resource_ref_jcs FROM extension_resource_owner o JOIN extension_resource_owner_head h USING(owner_id,resource_id) WHERE o.operation_id=? ORDER BY o.resource_id COLLATE BINARY').pluck().all(row[0]);
   const expected=[...graph.resources].sort((a,b)=>a.object_id<b.object_id?-1:1);need(same(held.map(value=>JSON.parse(value)),expected),'owner_changed');
-  const used=db.prepare('SELECT launch_id,intent_digest FROM worker_launch_preparation WHERE activation_operation_id=?').raw().get(row[0]);
-  need(!used||(used[0]===intent.launch_id&&used[1]===hash(intent)),'launch_used');return row[0];
+  const existing=db.prepare('SELECT intent_digest FROM worker_launch_preparation WHERE activation_operation_id=? AND launch_id=?').pluck().get(row[0],intent.launch_id);
+  if(existing){need(existing===hash(intent),'launch_used');return {id:row[0],replacement:null};}
+  const used=db.prepare('SELECT 1 FROM worker_launch_preparation WHERE activation_operation_id=? LIMIT 1').pluck().get(row[0]);
+  if(!used)return {id:row[0],replacement:null};
+  need(Number(service.schema_revision)>=106,'launch_used');
+  return {id:row[0],replacement:selectObsLaunchReplacement(db,row[0],intent)};
  }
  return Object.freeze({forLaunch,management(authorize){return Object.freeze({
   async accept(token,kind,input){

@@ -17,6 +17,7 @@ import {memoExecutionRead,withExecutionReadView} from './execution-read-view.mjs
 import {pendingInitialCommands,readCommandRecord} from './command-record-store.mjs';
 import {obsCutExecutionProfile,obsCutModuleDefinition,projectObsSceneCatalog,validateObsSceneSample} from './obs-module-profile.mjs';
 import {readConfirmedObsSceneCatalog} from './obs-scene-confirmation.mjs';
+import {captureObsPriorExecution,verifyObsPriorExecution} from './obs-prior-execution.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('initial_resource_'+code);};
 export const obsCutInitialResourceFormat='leafseamer-obs-cut-initial-resource-source/1';
 const obsCutInitialProvider='fixed_obs_cut_initial/1';
@@ -73,6 +74,7 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
    p.policy_digest===q.protocol_io_policy_digest,'qualification');
   const history=Number(service.schema_revision)>=(obs?103:57)?retiredCommandHistory(db,b):null,last=history?.latest;
   const observed=obs?obsInventory(execution.value,execution.catalog,sample):{observed_write_sequence:sample.value.write_sequence,external_resources:[]};
+  const prior=obs&&deviceScoped&&Number(service.schema_revision)>=106?captureObsPriorExecution(db,device,b.ipc_session_id,observed.external_resources[0]):[];
   need(sample.device_id===device&&sample.device_session_id===b.device_session_id&&
    (last?followsRelease(sample,observed,last):obs||sample.value.write_sequence==='0'&&sample.value.value===0),'observed_write');
   const control=currentControlSource(db,device);
@@ -81,14 +83,15 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
    (ready?control.current.value.gate_state==='ready'&&same(control.current.ref,ready.value.control_after_ref):control.current.value.gate_state==='protected')&&
    same(controlRef,authorization.value.requirement.control_state_ref)&&same(control.authority.ref,authorization.value.requirement.control_authority_ref),'control');
   const fenceId=db.prepare('SELECT fence_id FROM execution_initial_fence WHERE binding_id=?').pluck().get(execution.ref.id);
-  const fence=fenceId&&readInitialFence(db,fenceId);need(fence?.confirmation&&same(fence.value.binding_ref,execution.ref)&&
+  const fence=fenceId&&readInitialFence(db,fenceId);need(fence?.confirmation&&same(fence.value.binding_ref,execution.ref)&&same(fence.value.prior_execution??[],prior)&&
    (last?same(last.source.closure.value.control_ref,controlRef):same(fence.value.control_source_ref,controlRef))&&fence.ack.frame.body.issued_cut_revision==='0'&&
    fence.ack.frame.body.coverage.length===0&&fence.ack.frame.body.transmission_coverage.length===0&&
    fence.ack.frame.body.cancel_coverage.length===0,'fence');
   // 同Ready下的排队claim不产生attempt或hold；schema51编码帧另须精确持久准备账本。
   // 编码只占独立缓存预留，派发或其他历史仍拒绝；此路径不证明非空hold释放。
   const supportsPendingCommands=supportsStorageRevision(Number(service.schema_revision),49);
-  const admissions=supportsPendingCommands?pendingInitialCommands(db,ready,preparedRef,history?.commandIds,deviceScoped?device:null):[];
+  const retiredIds=[...history?.commandIds??[],...prior.flatMap(value=>value.commands.map(command=>command.command_id))];
+  const admissions=supportsPendingCommands?pendingInitialCommands(db,ready,preparedRef,retiredIds,deviceScoped?device:null):[];
   if(!supportsPendingCommands)need(!db.prepare('SELECT 1 FROM ca_command_initial c JOIN ca_request_key k USING(key_id) WHERE k.device_id=? LIMIT 1').pluck().get(device),'command_history');
   let sent=db.prepare(`SELECT record_id,record_digest,message_type,sequence FROM execution_frame_record
    WHERE ipc_session_id=? AND direction='c2w' AND (device_id=? OR device_id IS NULL) ORDER BY sequence`).raw().all(b.ipc_session_id,device).filter(v=>v[0]!==ownOpen?.id);
@@ -101,13 +104,13 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
   const now=domain();need(now.ref.clock_domain_id===b.clock_domain_id&&now.ref.descriptor_digest===b.descriptor_digest&&
    same(sample.clock_domain_descriptor.clock_domain_id,b.clock_domain_id)&&sample.clock_domain_descriptor.descriptor_digest===b.descriptor_digest&&
    BigInt(sample.captured_tick_ns)<=BigInt(now.tick),'clock');
-  return {authorization,execution,control,fence,now,admissions,encoding,guards,dispatches,history,obs,denials:captureInitialDenials(db,service,device,ownOpen,ready,preparedRef,history,deviceScoped),inventory:{binding_ref:execution.ref,authorization_evidence_ref:authorization.ref,
+  return {authorization,execution,control,fence,now,admissions,encoding,guards,dispatches,history,obs,denials:captureInitialDenials(db,service,device,ownOpen,ready,preparedRef,history,deviceScoped,prior),inventory:{binding_ref:execution.ref,authorization_evidence_ref:authorization.ref,
    authorization_state_ref:authorization.value.state_ref,control_state_ref:controlRef,control_authority_ref:control.authority.ref,
    catalog_ref:execution.value.catalog_approval_ref,baseline_ref:objectRef(sample.sample_id,sample),
    initial_fence_ref:fence.ref,initial_confirmation_ref:fence.confirmation_ref,
    command_ids:admissions.map(v=>v.id),outgoing_records:sent.map(v=>({record_ref:{id:v[0],revision:'1',digest:v[1]},type:v[2],sequence:String(BigInt(v[3]))})),
    module_digest:q.module_digest,protocol_io_policy_digest:q.protocol_io_policy_digest,transport_profile_ref:execution.value.transport_profile_ref,
-   ...observed,
+   ...observed,...(prior.length?{prior_execution:prior}:{}),
    ...(last?{retired_preparation_refs:history.refs,closing_ref:last.source.closure.ref,closing_ack_ref:last.source.closure.ack.ref}: {})}};
  }
  function read(reference){return withExecutionReadView(db,()=>memoExecutionRead(db,'initial-resource',reference,()=>readOriginal(reference)));}
@@ -135,8 +138,9 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
    const catalog=original('device_catalog_approval','approval_id',i.catalog_ref),observed=obsInventory(binding,catalog,sample);
    need(same(i.obs_cut_observation,observed.obs_cut_observation)&&same(i.external_resources,observed.external_resources)&&
     !Object.hasOwn(i,'observed_write_sequence'),'obs_binding');
+   if(i.prior_execution!==undefined)verifyObsPriorExecution(db,value.binding.device_id,value.binding.ipc_session_id,observed.external_resources[0],i.prior_execution);
   }else{
-   need(same(i.external_resources,[])&&i.observed_write_sequence===sample.value.write_sequence,'source_binding');
+   need(same(i.external_resources,[])&&i.observed_write_sequence===sample.value.write_sequence&&i.prior_execution===undefined,'source_binding');
   }
   const authorizationRow=db.prepare('SELECT body_jcs,body_digest FROM device_authorization_evidence WHERE evidence_id=?').raw().get(i.authorization_evidence_ref.id);
   need(authorizationRow,'source_missing');const authorization=decodeEvidence(...authorizationRow);
@@ -161,13 +165,14 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
    sample.device_id===value.binding.device_id&&sample.device_session_id===value.binding.device_session_id&&
    (obs||successor||sample.value.write_sequence==='0'&&sample.value.value===0)&&
    same(fence?.ref,i.initial_fence_ref)&&same(fence.confirmation_ref,i.initial_confirmation_ref)&&same(fence.value.binding_ref,i.binding_ref)&&
+   same(fence.value.prior_execution??[],i.prior_execution??[])&&
    same(i.command_ids,[]),'source_binding');
   for(const sent of i.outgoing_records){
    const row=db.prepare('SELECT record_digest,message_type,sequence,ipc_session_id,direction FROM execution_frame_record WHERE record_id=?').raw().get(sent.record_ref.id);
    need(row&&row[0]===sent.record_ref.digest&&sent.record_ref.revision==='1'&&row[1]===sent.type&&String(BigInt(row[2]))===sent.sequence&&
     row[3]===value.binding.ipc_session_id&&row[4]==='c2w'&&['HELLO_ACK','FENCE'].includes(sent.type),'source_binding');
   }
-  if(obs||successor||value.format==='leafseamer-initial-resource-source/2')readInitialDenials(db,service,value.binding.device_id,value.deny_snapshots);
+  if(obs||successor||value.format==='leafseamer-initial-resource-source/2')readInitialDenials(db,service,value.binding.device_id,value.deny_snapshots,i.prior_execution);
   return {ref:reference,value,commit};
  }
  function currentInside(reference,dispatchRef=null,readyRef=null,preparedRef=null){
@@ -204,7 +209,7 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
   }
   const actual=sources(saved.value.binding.device_id,ownOpen,ready,preparedRef,saved.value.deny_snapshots?.history_scope==='device'),now=BigInt(actual.now.tick);
   // 不改写旧空库存原件。当前资格明确附带所有排队受理Ref，且逐项核验其同Ready来源。
-  const inventory={...actual.inventory,command_ids:[]},denials=['initial-manual-deny-snapshots/2','initial-manual-deny-snapshots/3'].includes(actual.denials.format)?
+  const inventory={...actual.inventory,command_ids:[]},denials=['initial-manual-deny-snapshots/2','initial-manual-deny-snapshots/3','initial-manual-deny-snapshots/4'].includes(actual.denials.format)?
    {...actual.denials,accepted_command_count:0,pending_admission_refs:[]}:actual.denials;
   need(same(saved.value.binding,actual.execution.value.binding)&&same(saved.value.inventory,inventory),'changed');
   need([obsCutInitialResourceFormat,'leafseamer-initial-resource-source/2','leafseamer-device-resource-successor/1'].includes(saved.value.format)&&same(saved.value.deny_snapshots,denials),'deny_snapshots_changed');

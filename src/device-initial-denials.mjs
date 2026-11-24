@@ -50,12 +50,16 @@ function frame(db,id,automation=false){
   value.body.open_transmission_intents.length===0&&value.body.cancel_transmissions.length===0,'fence_history');
  return {reference:{id,revision:'1',digest:hash},binding,device:value.device_id??null};
 }
-export function readInitialDenials(db,service,device,value){
+export function readInitialDenials(db,service,device,value,prior=[]){
  const expectedScope=scope(db,service);
- const successor=['initial-manual-deny-snapshots/2','initial-manual-deny-snapshots/3'].includes(value?.format);
+ const replaced=value?.format==='initial-manual-deny-snapshots/4';
+ const successor=replaced||['initial-manual-deny-snapshots/2','initial-manual-deny-snapshots/3'].includes(value?.format);
  const scoped=value?.history_scope==='device';
  need(!Object.hasOwn(value??{},'history_scope')||scoped&&successor&&Number(value.schema_revision)>=97,'history_scope');
- if(value?.format==='initial-manual-deny-snapshots/3'){
+ if(replaced)need(scoped&&Number(value.schema_revision)>=106&&prior.length>0&&
+  same(value.prior_execution_refs,prior.map(item=>item.binding_ref)),'prior_execution');
+ else need(prior.length===0&&!Object.hasOwn(value??{},'prior_execution_refs'),'prior_execution');
+ if(value?.format==='initial-manual-deny-snapshots/3'||replaced&&value.retired_preparation_refs!==undefined){
   need(supportsSnapshotRevision(value.schema_revision,57)&&
    Array.isArray(value.retired_preparation_refs)&&value.retired_preparation_refs.length>0,'retired');
   for(const reference of value.retired_preparation_refs){const retired=readRetiredPreparation(db,reference);need(retired.value.binding.device_id===device,'retired');}
@@ -77,16 +81,18 @@ export function readInitialDenials(db,service,device,value){
   same(value.command_deny_snapshot,sealed({scope:expectedScope,device_id:device,snapshot_revision:'0',entries:[]})),'snapshot');
  return value;
 }
-export function captureInitialDenials(db,service,device,ownOpen=null,ready=null,preparedRef=null,history=null,deviceScoped=Number(service.schema_revision)>=97){
+export function captureInitialDenials(db,service,device,ownOpen=null,ready=null,preparedRef=null,history=null,deviceScoped=Number(service.schema_revision)>=97,prior=[]){
  const selectedScope=scope(db,service,true);
  const automation=Number(service.schema_revision)>=79;
  const supportsPendingCommands=supportsStorageRevision(Number(service.schema_revision),49);
- const pending=supportsPendingCommands?pendingInitialCommands(db,ready,preparedRef,history?.commandIds,deviceScoped?device:null):[];
+ const retiredIds=[...history?.commandIds??[],...prior.flatMap(value=>value.commands.map(command=>command.command_id))];
+ const pending=supportsPendingCommands?pendingInitialCommands(db,ready,preparedRef,retiredIds,deviceScoped?device:null):[];
  if(!supportsPendingCommands)need(!db.prepare('SELECT 1 FROM ca_command_initial LIMIT 1').pluck().get(),'command_history');
- const rows=deviceScoped?db.prepare(`SELECT record_id,message_type FROM execution_frame_record WHERE direction='c2w'
+ const allRows=deviceScoped?db.prepare(`SELECT record_id,message_type,ipc_session_id FROM execution_frame_record WHERE direction='c2w'
   AND (device_id IS NULL OR device_id=?) ORDER BY record_id COLLATE BINARY LIMIT 4097`).raw().all(device):
   db.prepare("SELECT record_id,message_type FROM execution_frame_record WHERE direction='c2w' ORDER BY record_id COLLATE BINARY LIMIT 4097").raw().all();
- need(rows.length>0&&rows.length<=4096,'capacity');
+ need(allRows.length>0&&allRows.length<=4096,'capacity');
+ const ended=new Set(prior.map(value=>value.ipc_session_id)),rows=allRows.filter(([, ,session])=>!ended.has(session));
  // 本设备的 OPEN 必须绑定资源当前性检查已核对的原出站记录。
  if(ownOpen){const actual=db.prepare("SELECT record_digest,device_id FROM execution_frame_record WHERE record_id=? AND domain_kind='initial_open' AND direction='c2w' AND message_type='OPEN_GATE'").raw().get(ownOpen.id);
   need(actual&&ownOpen.revision==='1'&&actual[0]===ownOpen.digest&&actual[1]===device,'open_frame');}
@@ -109,5 +115,6 @@ export function captureInitialDenials(db,service,device,ownOpen=null,ready=null,
   command_deny_snapshot:sealed({scope:selectedScope,device_id:device,snapshot_revision:'0',entries:[]})};
  if(deviceScoped)value.history_scope='device';
  if(history?.records.length){value.format='initial-manual-deny-snapshots/3';value.retired_preparation_refs=history.refs;}
- return readInitialDenials(db,service,device,value);
+ if(prior.length){value.format='initial-manual-deny-snapshots/4';value.prior_execution_refs=prior.map(item=>item.binding_ref);}
+ return readInitialDenials(db,service,device,value,prior);
 }

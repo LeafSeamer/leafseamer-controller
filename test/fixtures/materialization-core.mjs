@@ -27,6 +27,7 @@ const report=value=>{const entry={...value,reported_ms:performance.now()};perfor
 let firstManualChallenge=null,initialResource=null,initialResourceRequest=null,initialOpening=null,initialOpeningRequest=null;const manualCoreObservations=new Map();
 let commandServer=null,commandHttp=null,commandAgent=null,guiTimer=null,automationRegistration=null,bindingPeer=null;
 let commandGui=null,configurePublicationGui=null;
+let changeFixtureControl=null;
 async function startCommandHttp(material){
  let handler;commandServer=https.createServer(material,(req,res)=>{
   if(commandGui&&['GET','HEAD'].includes(req.method)&&commandGui.handle(req,res))return;
@@ -191,6 +192,58 @@ async function observeInterruptedObsCut(request){
  const evidenceItem=evidence?.body?.items?.[0];
  const evidenceRevision=evidenceItem?await commandHttp('GET',route+'/'+id+'/evidence/'+evidenceItem.source_ref.id+'/revisions/1'):null;
  report({event:'obs-cut-interrupted',admitted,finished,replayed,blocked,control,evidence,evidenceRevision});
+ return {id,record};
+}
+async function resumeObsOnNewWorker(device,request,previous){
+ const released=await changeFixtureControl(device,'releaseControl','resume.obs.release');
+ const acquired=await changeFixtureControl(device,'acquireControl','resume.obs.acquire');
+ const nextIntent={...intent,launch_id:'worker.recovery',member_id:'worker.recovery.member',
+  containment_ref:{...intent.containment_ref,group_id:'worker.recovery.group'}};
+ const nextKey={launch_id:nextIntent.launch_id,launch_intent_digest:hash(nextIntent)};
+ await business.workerLaunches.prepare(Buffer.from(canonicalize(nextIntent)));
+ await business.workerLaunches.authorization.register(nextKey);
+ const held=await source.loadWorkerContent(nextKey,input.materials);
+ const {lifetime,...proof}=(await source.prepareWorkerMaterialization(nextKey)).observation;
+ let runtime=await business.workerLaunches.authorization.create(nextKey,{load_id:held.load_id,...proof});
+ const until=performance.now()+10000;
+ while(runtime.state==='creating'||runtime.state==='awaiting_bootstrap'){
+  if(performance.now()>=until)throw new Error('fixture_obs_resume_bootstrap_timeout');
+  await delay(25);runtime=await source.queryLaunch(nextKey);
+ }
+ activeObsIntent=nextIntent;
+ await business.workerLaunches.runtime.adopt(nextKey);
+ moduleClient=await business.workerLaunches.openModule(nextKey);
+ const connected=await moduleClient.connectReadOnly(device),sample=await moduleClient.captureBaseline(device);
+ const accepted=moduleClient.currentBaseline(device);
+ manager.real.refresh();
+ const token=manager.token(['device.read','extension.manage']);
+ const catalog=manager.sessions.confirmSceneCatalog(token,manager.auth.csrf,device,
+  {request_id:'obs.confirm.recovery',expected_catalog_digest:hash(accepted.scene_catalog)});
+ executionClient=await business.workerLaunches.openExecution(nextKey);
+ await moduleClient.configureExecution(device);
+ await business.workerLaunches.runtime.refreshCurrent(nextKey);
+ await source.refreshCoreObservation();
+ manager.real.refresh();
+ if(input.obs_interruption==='report'){
+  try{await openOrdinaryGate(device,false,commandToken,nextKey);throw new Error('fixture_obs_resume_unknown_effect');}
+  catch(error){
+   if(error.code!=='obs_prior_execution_holds')throw error;
+   const control=manager.sessions.getControl(commandToken,device);
+   report({event:'obs-recovery-protected',code:error.code,control,connected});
+  }
+  return;
+ }
+ const opened=await openOrdinaryGate(device,false,commandToken,nextKey);
+ const context=manager.sessions.createRequestContext(commandToken,{audience:business.identity.service_id,
+  operations:['submitCommand'],selection:contractSelection,ttl_ms:60000,max_unique_requests:2});
+ const openedRequest={...request,context_id:context.context_id,expected_control:{epoch:opened.control.control_epoch,version:opened.control.effective_version}};
+ const stale=await commandHttp('POST','/api/v1/commands',{...openedRequest,idempotency_key:crypto.randomUUID()});
+ const {collection_ref,collection_generation,catalog_revision,binding_revision}=catalog;
+ const target=catalog.entries.find(entry=>entry.obs_scene_uuid!==sample.body.value.program_scene_uuid);
+ const scene_ref={collection_ref,collection_generation,catalog_revision,binding_revision,scene_id:target.scene_id};
+ await completeObsCut({...openedRequest,idempotency_key:crypto.randomUUID(),parameters:{scene_ref}},2);
+ const retained=await commandHttp('GET','/api/v1/commands/'+previous.id);
+ report({event:'obs-recovery-cut',opened,released,acquired,sample:sample.body.value,stale,retained,target:target.obs_scene_uuid});
 }
 async function obsBrowserMarker(file){
  const until=performance.now()+15000;
@@ -200,7 +253,7 @@ async function obsBrowserMarker(file){
  }
  return fs.readFileSync(file,'utf8');
 }
-async function openOrdinaryGate(device,automatic,token=commandToken){
+async function openOrdinaryGate(device,automatic,token=commandToken,launchKey=key){
  await executionClient.initialFence(device);
  const evaluate=()=>{
   const challenge=manager.sessions.beginDeviceEvaluatorChallenge({request_id:crypto.randomUUID(),policy_ref:evaluator.policy_ref,device_id:device});
@@ -214,7 +267,7 @@ async function openOrdinaryGate(device,automatic,token=commandToken){
   expected_state_ref:context.state_ref,expected_context_digest:context.context_digest});
  const selected=manager.sessions.consumeDeviceAuthorizationRecovery(token,recovery.receipt.id);
  const evidence=manager.sessions.selectDeviceAuthorizationEvidence({...inputs,request_id:crypto.randomUUID(),expected_state_ref:selected.ref,expected_evidence_ref:null});
- await business.workerLaunches.runtime.refreshCurrent(key);
+ await business.workerLaunches.runtime.refreshCurrent(launchKey);
  await source.refreshCoreObservation();
  manager.real.refresh();
  const freshManual=automatic?null:await manualSourceFor(commandToken,device,false);
@@ -403,6 +456,7 @@ const intent={launch_id:'worker.launch',service_id:policy.service_id,supervisor_
   extension_binding:{installation_ref:ref('installation'),approval_ref:ref('approval'),review_ref:ref('review'),role_resolution_ref:ref('role_resolution'),configuration_ref:ref('configuration'),
     ...input.binding,entry_id:input.mode==='supervisor_bad_entry'?'missing':input.materials?'worker':'simulator',permissions_digest:hash('permissions'),...(input.runtime?{installation_ref:input.runtime.approved.record.installation_ref,approval_ref:input.runtime.approved.approval_ref,review_ref:input.runtime.approved.record.review_ref,role_resolution_ref:input.runtime.approved.record.role_resolution_ref,configuration_ref:input.runtime.approved.record.configuration_ref,permissions_digest:input.runtime.approved.record.permissions_digest}:{})}};
 const key={launch_id:intent.launch_id,launch_intent_digest:hash(intent)};
+let activeObsIntent=intent;
 const seal=grant=>{const {authorization_ref,...body}=grant;return {...body,authorization_ref:{...authorization_ref,digest:hash(body)}};};
 const authorization=()=>{const now=clock.tick();return seal({authorization_ref:ref('launch_authorization'),...key,installation_ref:intent.extension_binding.installation_ref,approval_ref:intent.extension_binding.approval_ref,
   role_resolution_ref:intent.extension_binding.role_resolution_ref,permissions_digest:intent.extension_binding.permissions_digest,supervisor_instance_id:source.scope.supervisor_instance_id,fence_revision:'1',
@@ -464,12 +518,12 @@ if(input.runtime){
  }
  if(controlFlow){
   const armTarget=input.automation_peer?.arm_target;
-  const permissions=['control.read','control.acquire','device.command','device.recover','command.read','command.evidence.read','command.cancel','request.create',...(automaticReady||armTarget||input.mode.endsWith('_successor_control')||input.mode.includes('_control_queued')||input.mode.endsWith('_control_unresolved')?['control.release']:[])];
+  const permissions=['control.read','control.acquire','device.command','device.recover','command.read','command.evidence.read','command.cancel','request.create',...(automaticReady||armTarget||input.obs_resume||input.mode.endsWith('_successor_control')||input.mode.includes('_control_queued')||input.mode.endsWith('_control_unresolved')?['control.release']:[])];
   if(obsOpen)permissions.push('device.read');
   const before=manager.sessions.localPermissions(manager.auth);manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id:manager.logged.session.principal_id,expected_revision:before.revision,permissions:[...new Set([...before.permissions,...permissions,...(input.gui?['device.read']:[])])]});
   commandToken=manager.token(permissions);const device=intent.object_scope.device_ids[0],{contractSelection:selection}=await import('../../dist/sdk/index.mjs');
   const context=manager.sessions.createRequestContext(commandToken,{audience:business.identity.service_id,
-   operations:automaticReady||armTarget?['acquireControl','releaseControl','submitCommand']:['acquireControl','submitCommand'],selection,ttl_ms:60000,max_unique_requests:8});
+   operations:automaticReady||armTarget||input.obs_resume?['acquireControl','releaseControl','submitCommand']:['acquireControl','submitCommand'],selection,ttl_ms:60000,max_unique_requests:8});
   async function change(selected,method,key){
    const original=manager.sessions.getControl(commandToken,selected);
    const accepted=await manager.sessions.changeControl(commandToken,method,{device_id:selected},{context_id:context.context_id,idempotency_key:key,
@@ -478,6 +532,7 @@ if(input.runtime){
    do{operation=manager.sessions.getControlOperation(commandToken,accepted.receipt.initial_result_ref.id);if(operation.state!=='pending')break;if(performance.now()>=until)throw new Error('command_control_wait');await delay(20);}while(true);
    if(operation.state!=='effective')throw new Error('command_control_not_effective');return operation;
   }
+  changeFixtureControl=change;
   const operation=await change(device,'acquireControl','manual.command.owner');
   const control=manager.sessions.getControl(commandToken,device);report({event:'command-control',control,operation});
   if(automaticReady){
@@ -590,7 +645,10 @@ try{
                 }else await completeObsCut(body,1,response);
                 fs.writeFileSync(input.gui.obs.settled,'settled');
                 await obsBrowserMarker(input.gui.obs.checked);
-              }else if(input.obs_interruption)await observeInterruptedObsCut(request);
+              }else if(input.obs_interruption){
+                const original=await observeInterruptedObsCut(request);
+                if(input.obs_resume)await resumeObsOnNewWorker(device,request,original);
+              }
               else await completeObsCut(request,1);
               if(!input.obs_interruption&&!input.gui?.obs?.recovery){
                 const original=ready.entries.find(entry=>entry.obs_scene_uuid===second.body.value.program_scene_uuid);
@@ -1094,7 +1152,7 @@ try{
  ...(input.mode.includes('_dispatch_ready')?{execution_state:executionClient?.state}:{})});
  if(input.mode.startsWith('supervisor_create_module')){
   const until=performance.now()+5000;
-  for(;;){try{report({event:'module-failed-retired',result:await source.retireWorker(intent,'revoked')});break;}
+  for(;;){try{report({event:'module-failed-retired',result:await source.retireWorker(activeObsIntent,'revoked')});break;}
    catch(error){if(error.code!=='supervisor_indeterminate'||performance.now()>=until)throw error;await delay(25);}}
  }
 }
