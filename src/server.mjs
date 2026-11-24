@@ -34,14 +34,14 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   if ((!protectedIngress && !['127.0.0.1', '::1'].includes(host)) ||
       !Number.isInteger(port) || port < (protectedIngress ? 1 : 0) || port > 65535) throw new Error('listen_options');
   if (authenticationProvider !== null && typeof authenticationProvider !== 'function') throw new Error('authentication_provider');
-  if (linuxClockEvidenceProfile !== null && (process.platform !== 'linux' || !coreBootstrap || authenticationProvider)) {
+  if (linuxClockEvidenceProfile !== null && (process.platform !== 'linux' || !coreBootstrap || authenticationProvider || tls || pairing)) {
     throw new Error('linux_clock_evidence_binding');
   }
   if (tls !== null && (!tls || Object.keys(tls).sort().join(',') !== 'cert,key,origin' || typeof tls.origin !== 'string')) throw new Error('tls_options');
   if (guiDirectory !== null && tls === null) throw new Error('gui_requires_https');
   if (pairing !== null) pairingUuid(pairing.credential_id);
   const storage = openStorage(dataDir, protectedIngressIdentity);
-  let supervision = null, timeProviderLink = null, timeProviderBinding = null, clockEvidenceStatus = null;
+  let supervision = null, timeProviderLink = null, timeProviderBinding = null, clockEvidence = null, linuxSource = null;
   const assertRuntimeCurrent = () => { supervision?.assertCurrent(); timeProviderLink?.assertCurrent(); };
   try {
     if (coreBootstrap !== null) {
@@ -51,8 +51,8 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       result.assertCurrent?.();
       timeProviderBinding = storage.bindCoreRuntime(binding, policy, supervision);
       if (linuxClockEvidenceProfile !== null) {
-        clockEvidenceStatus = inspectLinuxClockEvidence(linuxClockEvidenceProfile, storage.authenticationClock.scope,
-          result, openNativeClock());
+        linuxSource = openNativeClock({linuxWithoutSystemSleep: linuxClockEvidenceProfile.authentication});
+        clockEvidence = inspectLinuxClockEvidence(linuxClockEvidenceProfile, storage.authenticationClock.scope, result, linuxSource);
       }
       result.assertCurrent?.();
       if(supervision)storage.workerLaunches?.runtime?.bindSource(supervision);
@@ -69,12 +69,16 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   let clock = null, authentication = null, sessions = null;
   if (storage.clockJournal) {
     try {
-      const source = openNativeClock();
+      const source = linuxSource ?? openNativeClock();
       clock = startClockMonitor(source, storage.clockJournal);
       // 受信装配读取批准原件，所有入口使用同一原生时钟。
-      if (storage.authenticationClock) authentication = startAuthenticationClock(source, storage.authenticationClock,
-        (await authenticationProvider?.(Object.freeze({scope: storage.authenticationClock.scope, source}))) ?? null);
-      if (Number(storage.identity.schema_revision) >= 5 && authentication) sessions = storage.sessions(authentication);
+      if (storage.authenticationClock) {
+        const linuxAuthentication = linuxClockEvidenceProfile?.authentication === true;
+        const provider = linuxAuthentication ? clockEvidence : await authenticationProvider?.(Object.freeze({scope: storage.authenticationClock.scope, source}));
+        authentication = startAuthenticationClock(source, storage.authenticationClock, provider ?? null,
+          {waitForInitialEvidence: linuxAuthentication});
+        if (Number(storage.identity.schema_revision) >= 5 && !linuxAuthentication) sessions = storage.sessions(authentication);
+      }
     }
     catch (error) {
       clock?.stop(); authentication?.stop(); sessions = null;
@@ -237,8 +241,12 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     let status, body;
     if (req.url === '/health/live') { status = 200; body = {status: 'alive'}; }
     else if (req.url === '/health/ready') {
-      status = 503; body = {ready: false, reason: authentication?.status().qualified ? 'business_incomplete' : clock ? (clock.status().state === 'faulted' ? 'authentication_clock_unavailable' : 'authentication_clock_unqualified') : 'bootstrap_incomplete'};
-      if (clockEvidenceStatus) body.authentication_clock_evidence = body.reason === 'authentication_clock_unqualified' ? clockEvidenceStatus() : 'unavailable';
+      const authStatus = authentication?.status();
+      status = 503; body = {ready: false, reason: authStatus?.qualified ? 'business_incomplete' : clock ? (clock.status().state === 'faulted' ? 'authentication_clock_unavailable' : 'authentication_clock_unqualified') : 'bootstrap_incomplete'};
+      if (clockEvidence) {
+        body.authentication_clock_evidence = body.reason === 'authentication_clock_unavailable' ? 'unavailable' : clockEvidence.status();
+        if (linuxClockEvidenceProfile.authentication) body.authentication_clock = authStatus?.state ?? 'faulted';
+      }
     }
     else if (req.url === '/.well-known/leafseamer-contracts') { res.writeHead(503); res.end(); return; }
     else { res.writeHead(404); res.end(); return; }

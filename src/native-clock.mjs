@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
+import {verifyLinuxKernelSleepDisabled} from './linux-kernel-sleep.mjs';
 const max = (1n << 64n) - 1n, billion = 1000000000n, filetimeEpoch = 116444736000000000n;
 export class ClockError extends Error { constructor(code) { super(code); this.name = 'ClockError'; this.code = code; } }
 const check = (ok, code) => { if (!ok) throw new ClockError(code); };
@@ -29,15 +30,16 @@ export function normalizeCapture(raw) {
     };
     a = ns('before'); b = ns('after'); w = ns('wall');
     check(typeof raw.namespace_before === 'string' && /^[0-9]{1,20}:[0-9]{1,20}$/.test(raw.namespace_before) && raw.namespace_before.trim() === raw.namespace_before && raw.namespace_before === raw.namespace_after, 'clock_namespace');
-    check(raw.continuity_monitor === 'unavailable', 'clock_frame');
+    check(['unavailable','kernel_sleep_disabled'].includes(raw.continuity_monitor), 'clock_frame');
     continuity = 'linux:' + raw.namespace_after;
   } else throw new ClockError('clock_platform');
   check(b >= a, 'clock_backwards'); check(b - a <= 20000000n, 'clock_capture_budget');
   return Object.freeze({a: a.toString(), b: b.toString(), w: w.toString(), valid_before: bounded(b + 2000000000n).toString(),
     continuity, continuity_available: raw.continuity_monitor !== 'unavailable', raw: Object.freeze({...raw})});
 }
-export function openNativeClock() {
+export function openNativeClock({linuxWithoutSystemSleep = false} = {}) {
   try {
+    check(!linuxWithoutSystemSleep || process.platform === 'linux', 'clock_kernel_sleep_unverified');
     const filename = fileURLToPath(new URL('./native/leafseamer_clock.node', import.meta.url));
     const manifest = JSON.parse(fs.readFileSync(new URL('./native/manifest.json', import.meta.url), 'utf8'));
     check(manifest.format === 'leafseamer-native-artifact/1' && manifest.platform === process.platform && manifest.arch === process.arch && manifest.napi_version === 8, 'native_clock_artifact');
@@ -45,9 +47,18 @@ export function openNativeClock() {
     check(digest === manifest.binary_sha256, 'native_clock_artifact');
     const native = createRequire(import.meta.url)(filename);
     function capture() {
-      try { return normalizeCapture(native.capture()); }
+      try {
+        const mount = linuxWithoutSystemSleep ? verifyLinuxKernelSleepDisabled() : null;
+        const raw = native.capture();
+        if (mount !== null) {
+          check(raw.platform === 'linux' && raw.continuity_monitor === 'unavailable' &&
+            verifyLinuxKernelSleepDisabled() === mount, 'clock_kernel_sleep_unverified');
+          raw.continuity_monitor = 'kernel_sleep_disabled';
+        }
+        return normalizeCapture(raw);
+      }
       catch (error) {
-        if (/^clock_(?:wall|suspend)_(?:discontinuity|monitor_unavailable)$/.test(error?.code??'')) throw new ClockError(error.code);
+        if (/^clock_(?:(?:wall|suspend)_(?:discontinuity|monitor_unavailable)|kernel_sleep_(?:available|unverified))$/.test(error?.code??'')) throw new ClockError(error.code);
         throw error;
       }
     }

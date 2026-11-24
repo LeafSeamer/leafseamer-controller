@@ -9,7 +9,7 @@ if (buildOptions.length && (buildOptions.length !== 2 || !referenceTimeProvider 
     process.platform !== 'win32' || process.arch !== 'x64')) throw new Error('controller_build_arguments');
 const names = ['authority-source-window.mjs', 'supervisor-control.mjs', 'core-bootstrap.mjs', 'core-runtime.sql', 'cli.mjs', 'server.mjs', 'storage.mjs', 'storage.sql', 'identity.sql', 'identity-crypto.mjs', 'identity-store.mjs', 'local-admin.mjs', 'native-clock.mjs', 'clock-monitor.mjs', 'clock.sql', 'auth-clock.sql', 'auth-clock.mjs', 'auth-clock-value.mjs', 'auth-clock-store.mjs', 'session-store.mjs', 'session.sql', 'access-token-store.mjs', 'access-token.sql'];
 names.push('trusted-pairing-profile.mjs', 'local-pairing-admin.mjs', 'clock-evidence.mjs', 'protected-ingress-profile.mjs', 'linux-chrony-health.mjs');
-names.push('linux-core-bootstrap.mjs', 'linux-clock-evidence.mjs', 'clock-evidence-envelope.mjs');
+names.push('linux-core-bootstrap.mjs', 'linux-clock-evidence.mjs', 'clock-evidence-envelope.mjs', 'linux-kernel-sleep.mjs');
 names.push('storage-revision.mjs');
 names.push('command-dispatch-interruption.sql', 'command-dispatch-interruption.mjs');
 names.push('command-unsent-recovery.sql', 'command-unsent-recovery.mjs');

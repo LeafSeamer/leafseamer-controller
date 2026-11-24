@@ -3,15 +3,17 @@ import {need, canonical, same, context, captureInterval, extrapolate, ref} from 
 
 // provider只能由受监督本地启动装配，不能从HTTP、环境开关或采样正文取得。
 // 缺少实现时保留诊断服务，不生成环境批准或运行域身份。
-export function startAuthenticationClock(source, ledger, provider = null, {schedule = true} = {}) {
+export function startAuthenticationClock(source, ledger, provider = null, {schedule = true, waitForInitialEvidence = false} = {}) {
   let stopped = false, failure = null, durable = true, binding = null;
   function tick() {
     const value = source.tick(); need(typeof value === 'bigint' && value >= 0n && value <= (1n << 64n) - 1n, 'auth_clock_tick'); return value;
   }
-  function evidence() {
+  function evidence(allowMissing = false) {
     need(provider !== null, 'auth_clock_provider_missing');
+    const input = provider.read();
+    if (allowMissing && input === null) return null;
     // 独立副本避免调用方在事务期间修改已校验对象。
-    const snapshot = JSON.parse(canonical(provider.read()));
+    const snapshot = JSON.parse(canonical(input));
     context(snapshot, ledger.scope, source.artifactDigest, tick());
     if (binding) need(same(binding.policy, snapshot.policy) && same(binding.runtime, snapshot.runtime), 'auth_clock_context_changed');
     return snapshot;
@@ -28,7 +30,8 @@ export function startAuthenticationClock(source, ledger, provider = null, {sched
   function refresh() {
     if (stopped || failure || provider === null) return;
     try {
-      const before = evidence();
+      const before = evidence(waitForInitialEvidence && binding === null);
+      if (before === null) return;
       binding ??= before;
       const old = ledger.current(binding.runtime.clock_domain_id);
       if (old) extrapolate(old, tick());

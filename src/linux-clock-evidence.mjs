@@ -47,13 +47,14 @@ export function readLinuxClockEvidenceProfile(file, policy, role) {
     fields(profile, ['format', 'service_id', 'database_instance_id', 'policy_digest', 'public_key_file', 'exchange_directory']);
     const {format, service_id, database_instance_id, policy_digest, public_key_file, exchange_directory} = profile;
     pairingUuid(service_id); pairingUuid(database_instance_id);
-    need((role === 'controller' || role === 'seamer') && format === 'leafseamer.'+role+'-linux-clock-evidence-profile/1' && service_id === policy.service_id &&
+    const authentication = role === 'controller' && format === 'leafseamer.controller-linux-clock-evidence-profile/2';
+    need((authentication || (role === 'controller' || role === 'seamer') && format === 'leafseamer.'+role+'-linux-clock-evidence-profile/1') && service_id === policy.service_id &&
       database_instance_id === policy.database_instance_id && typeof policy_digest === 'string' &&
       policy_digest.length === 71 && /^sha256:[0-9a-f]{64}$/.test(policy_digest), 'linux_clock_evidence_profile');
     protectedDirectory(exchange_directory);
     const key = crypto.createPublicKey(read(public_key_file, 16384));
     need(key.asymmetricKeyType === 'ed25519', 'linux_clock_evidence_profile');
-    return Object.freeze({policy_digest, exchange_directory, key});
+    return Object.freeze({policy_digest, exchange_directory, key, authentication});
   } catch { throw Object.assign(new Error('linux_clock_evidence_profile'), {code: 'linux_clock_evidence_profile'}); }
 }
 
@@ -79,22 +80,30 @@ export function inspectLinuxClockEvidence(profile, scope, {policy, binding}, sou
   const directory = profile.exchange_directory;
   publishChallenge(directory, challenge);
   const evidenceFile = path.join(directory, 'evidence-'+scope.service_boot_id+'.json');
-  return () => {
+  function current() {
+    let bytes;
     try {
-      const evidence = verifyClockEvidence(read(evidenceFile, 65536), profile.key);
-      const capture = source.capture(), now = source.tick();
-      need(evidence?.policy?.digest === profile.policy_digest && capture.continuity === challenge.continuity &&
-        evidence.runtime?.continuity === challenge.continuity && evidence.runtime.clock_domain_id === challenge.clock_domain_id &&
-        evidence.runtime.descriptor_digest === challenge.descriptor_digest && evidence.health?.state === 'synchronized',
-        'linux_clock_evidence_binding');
-      context(evidence, scope, source.artifactDigest, now);
-      need(clockInteger(evidence.health.valid_before_tick_ns) <= now + clockInteger(evidence.policy.sample_ttl_ns),
-        'linux_clock_evidence_binding');
-      return 'verified';
+      bytes = read(evidenceFile, 65536);
     } catch (error) {
-      if (error.code === 'ENOENT') return 'missing';
-      if (error.code === 'auth_clock_evidence_expired') return 'expired';
-      return 'rejected';
+      if (error.code === 'ENOENT') return null;
+      throw error;
     }
-  };
+    const evidence = verifyClockEvidence(bytes, profile.key);
+    const capture = source.capture(), now = source.tick();
+    need(evidence?.policy?.digest === profile.policy_digest && capture.continuity === challenge.continuity &&
+      evidence.runtime?.continuity === challenge.continuity && evidence.runtime.clock_domain_id === challenge.clock_domain_id &&
+      evidence.runtime.descriptor_digest === challenge.descriptor_digest && evidence.health?.state === 'synchronized',
+      'linux_clock_evidence_binding');
+    context(evidence, scope, source.artifactDigest, now);
+    need(clockInteger(evidence.health.valid_before_tick_ns) <= now + clockInteger(evidence.policy.sample_ttl_ns),
+      'linux_clock_evidence_binding');
+    return evidence;
+  }
+  return Object.freeze({
+    read: current,
+    status() {
+      try { return current() === null ? 'missing' : 'verified'; }
+      catch (error) { return error.code === 'auth_clock_evidence_expired' ? 'expired' : 'rejected'; }
+    }
+  });
 }

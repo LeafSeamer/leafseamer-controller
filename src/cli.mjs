@@ -246,7 +246,8 @@ try {
     error instanceof BootstrapError || error instanceof SupervisorError || error instanceof LocalPairingError ||
     error instanceof ObsDiscoveryError || trustedStartupError(code) ||
     ['protected_ingress_profile','protected_ingress_platform','protected_ingress_address',
-      'linux_clock_evidence_profile','linux_clock_evidence_binding','linux_clock_evidence_directory'].includes(code);
+      'linux_clock_evidence_profile','linux_clock_evidence_binding','linux_clock_evidence_directory',
+      'clock_kernel_sleep_available','clock_kernel_sleep_unverified'].includes(code);
   process.stderr.write(JSON.stringify({error: known ? code : 'startup_failed'}) + '\n');
   process.exitCode = 1;
 }

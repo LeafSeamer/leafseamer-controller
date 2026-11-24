@@ -619,6 +619,10 @@ CLI 在写入 boot 记录前校验数据库身份及最低 Schema 5。此入口�
 
 核心保存闭锁回执后，在交换目录发布 `challenge-<service_boot_id>.json`。授时签发方使用该原件生成 `clock-evidence.mjs` 的输入，并将签名证据写入相同目录的 `evidence-<service_boot_id>.json`。签发器按 `0600` 发布。若由独立的 root 签发，安装方须在受保护目录中给服务账户授予证据读取权限，例如使用只含授权服务账户的组及 `0640` 模式。回环 `GET /health/ready` 仍返回 503，新增 `authentication_clock_evidence` 表示当前为 `missing`、`verified`、`expired`、`rejected` 或原生诊断故障时的 `unavailable`。`verified` 仅表示本次核心启动的签名、策略、时钟域及证据原期限通过核验。授时证据诊断不会授予认证时钟或业务操作资格。关停后可清理交换目录中的本次启动文件。
 
+使用 `leafseamer.controller-linux-clock-evidence-profile/2` 时，字段和签名格式与 `/1` 相同。该配置要求运行内核未提供 `/sys/power/state`。Controller 核验当前挂载视图中的 sysfs 根及 `/sys/power`，存在睡眠接口或无法核实视图时在监听前拒绝启动。它在每次认证采集前后复核内核条件，并继续使用原生单调时钟、挂起差值和墙钟保护。该核验只覆盖 Linux 内核提供的系统睡眠；外部虚拟机恢复仍依赖部署环境的独立隔离条件。 [Linux 内核睡眠状态](https://kernel.org/doc/html/latest/admin-guide/pm/sleep-states.html)
+
+`/2` 在回环诊断启动后等待首次签名，确认其作用范围和原期限后才保存认证采集。签发器若在另一个账户下运行，应先在同一文件系统的受保护目录准备证据和读取权限，再原子替换交换目录中的目标文件。`authentication_clock` 显示 `unqualified`、`available` 或 `faulted`。首个采集建立后，证据失效会为本次运行域保存故障并停止认证采集，后来的有效签名也不能恢复该域。该入口只提供回环诊断，就绪继续返回 503。
+
 ## 原生时钟诊断
 
 schema 3 服务每500毫秒调用原生采集器。Windows 顺序为 `QueryInterruptTimePrecise → GetSystemTimePreciseAsFileTime → QueryInterruptTimePrecise`，FILETIME 用整数减纪元再转纳秒；Linux 实现使用 `CLOCK_BOOTTIME → CLOCK_REALTIME → CLOCK_BOOTTIME` 并检查时间命名空间。没有 `Date.now()` 或浮点秒替代路径。原生接口依据：[Microsoft 单调时间](https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-queryinterrupttimeprecise)、[精确系统时间](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemtimepreciseasfiletime)、[Linux clock_gettime](https://www.man7.org/linux/man-pages/man2/clock_gettime.2.html)。
