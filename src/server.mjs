@@ -164,6 +164,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       };
       const polls = storage.openTimeProviderPolls({
         limits: timeAuthorization.limits,
+        allowSourceReplacement:!!installedCapture&&typeof linuxProvider.observeRetirement==='function',
         readSource: slot=>timeAuthorization.readSource(slot,authentication),
         readAuthentication: () => authentication.referenceTimeSample(),
         assertCurrent: assertPollCurrent,

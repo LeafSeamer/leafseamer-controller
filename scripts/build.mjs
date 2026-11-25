@@ -14,7 +14,8 @@ names.push('storage-revision.mjs');
 names.push('command-dispatch-interruption.sql', 'command-dispatch-interruption.mjs');
 names.push('command-unsent-recovery.sql', 'command-unsent-recovery.mjs');
 names.push('obs-prior-execution.sql', 'obs-prior-execution.mjs');
-names.push('obs-restart-launch.sql', 'obs-cut-reconciliation.sql', 'linux-worker-launch.sql', 'linux-reference-runtime.sql', 'obs-cut-reconciliation.mjs');
+names.push('obs-restart-launch.sql', 'obs-cut-reconciliation.sql', 'linux-worker-launch.sql', 'linux-reference-runtime.sql',
+  'linux-reference-source-switch.sql', 'obs-cut-reconciliation.mjs');
 names.push('historical-control-retirement.mjs');
 const files = await Promise.all(names.map(async name => [name, await fs.readFile(path.join(root, 'src', name))]));
 for(const name of ['device-event-source.sql','device-event-source.mjs','device-source-time.sql','device-event-qualification.mjs','simulator-event-review.json'])files.push([name,await fs.readFile(path.join(root,'src',name))]);

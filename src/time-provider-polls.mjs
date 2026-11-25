@@ -29,7 +29,7 @@ function decode(text, expected) {
 // This writer reserves the durable source slot and records the single possible
 // send. Releasing a slot requires the separate capture or retirement writer.
 export function timeProviderPollStore(db, bootId, binding,
-  {limits, readSource, readAuthentication, assertCurrent, observeRetirement, assertRetirement, assertCollectionAllowed},
+  {limits, readSource, readAuthentication, assertCurrent, observeRetirement, assertRetirement, assertCollectionAllowed, allowSourceReplacement=false},
   canRelease, canRecover = false, canControl = false) {
   need(typeof readSource === 'function' && typeof readAuthentication === 'function' && typeof assertCurrent === 'function', 'authority');
   if (canRecover) need(typeof observeRetirement === 'function' && typeof assertRetirement === 'function', 'retirement_authority');
@@ -79,13 +79,17 @@ export function timeProviderPollStore(db, bootId, binding,
   }
 
   function predecessor(sourceSlot, source) {
-    const row = db.prepare(`SELECT p.poll_id,p.source_digest,p.service_boot_id,p.body_digest,x.next_allowed_tick,c.body_jcs,c.body_digest
+    const row = db.prepare(`SELECT p.poll_id,p.source_slot,p.source_digest,p.service_boot_id,p.body_digest,x.next_allowed_tick,c.body_jcs,c.body_digest
       FROM time_provider_poll_reservation p LEFT JOIN time_provider_poll_release x USING(poll_id)
       LEFT JOIN time_provider_capture c USING(poll_id)
       WHERE p.source_slot=? OR p.source_digest=? ORDER BY p.rowid DESC LIMIT 1`).raw().get(sourceSlot,source);
     if (!row) return null;
-    const [poll_id,source_digest,service_boot_id,body_digest,next_allowed_tick,capture_jcs,capture_digest] = row;
-    return {poll_id,source_digest,service_boot_id,body_digest,next_allowed_tick,capture_jcs,capture_digest};
+    const [poll_id,source_slot,source_digest,service_boot_id,body_digest,next_allowed_tick,capture_jcs,capture_digest] = row;
+    return {poll_id,source_slot,source_digest,service_boot_id,body_digest,next_allowed_tick,capture_jcs,capture_digest};
+  }
+
+  function distinctSource(prior,facts){
+    return prior.source_digest!==facts.source_digest&&allowSourceReplacement&&prior.source_slot===facts.source_slot;
   }
 
   function storedRecovery(source) {
@@ -126,7 +130,7 @@ export function timeProviderPollStore(db, bootId, binding,
   async function recover(sourceSlot) {
     need(matches(id,sourceSlot) && !db.inTransaction, 'input');
     const before = current(sourceSlot), source = before.facts.source_digest, previous = predecessor(sourceSlot,source);
-    need(previous && previous.source_digest===source && previous.service_boot_id!==bootId, 'retirement_required');
+    need(previous && (previous.source_digest===source||distinctSource(previous,before.facts)) && previous.service_boot_id!==bootId, 'retirement_required');
     const existing = storedRecovery(source);
     if (existing) return existing;
     const oldRuntime = db.prepare('SELECT body_jcs,body_digest FROM time_provider_runtime_binding WHERE service_boot_id=?')
@@ -147,14 +151,16 @@ export function timeProviderPollStore(db, bootId, binding,
       const oldInterval = reservation.authorization.minimum_poll_interval_ns;
       if (prior.capture_jcs!==null) decode(prior.capture_jcs,prior.capture_digest);
       const knownControl = canControl && readControl('poll',prior.poll_id);
-      const effective = effectiveInterval(now.facts);
-      const interval = oldInterval===undefined || (attempt && prior.capture_jcs===null && !knownControl) || effective===null ? null :
-        maximum(clockInteger(reservation.effective_poll_interval_ns??oldInterval),effective);
+      const effective = effectiveInterval(now.facts),replacement=distinctSource(prior,now.facts);
+      const previousEffective=oldInterval===undefined?null:effectiveInterval(reservation.authorization);
+      const interval = (attempt && prior.capture_jcs===null && !knownControl) || effective===null || previousEffective===null ? null :
+        maximum(maximum(clockInteger(reservation.effective_poll_interval_ns??oldInterval),previousEffective),effective);
       const wait = interval===null ? null : waitUntil(observed.received_tick_ns,interval,policy);
       const body = {format:'leafseamer-time-provider-source-recovery/1',receiver_boot_id:bootId,source_digest:source,
         predecessor_poll_id:prior.poll_id,predecessor_digest:prior.body_digest,old_runtime_digest:oldRuntime[1],
         observation:observed,clock_policy:policy,minimum_interval_ns:interval===null?null:String(interval),
-        wait_until_tick_ns:wait===null?null:String(wait)};
+        wait_until_tick_ns:wait===null?null:String(wait),
+        ...(replacement&&{transition:{prior_source_digest:prior.source_digest,source_slot:sourceSlot,authorization:now.facts}})};
       const text = canonicalize(body);
       need(db.prepare('INSERT INTO time_provider_source_recovery VALUES (?,?,?,?,?,?,?)').run(bootId,source,prior.poll_id,
         tickText(received),wait===null?null:tickText(wait),text,digest(text)).changes===1, 'recovery_storage');
@@ -172,12 +178,15 @@ export function timeProviderPollStore(db, bootId, binding,
     }
     const prior = predecessor(sourceSlot,source);
     if (!prior) return now.tick;
-    if (canRecover) need(!db.prepare('SELECT 1 FROM time_provider_poll_reservation WHERE source_slot=? AND source_digest<>? LIMIT 1')
+    if (canRecover&&!allowSourceReplacement) need(!db.prepare('SELECT 1 FROM time_provider_poll_reservation WHERE source_slot=? AND source_digest<>? LIMIT 1')
       .pluck().get(sourceSlot,source), 'source_changed');
     const {source_digest:oldSource, service_boot_id:boot, next_allowed_tick:earliest, capture_jcs:capture} = prior;
     if (canRecover && boot!==bootId) {
       const proof = storedRecovery(source);
-      need(oldSource===source && proof?.predecessor_poll_id===prior.poll_id && proof.predecessor_digest===prior.body_digest, 'retirement_required');
+      need((oldSource===source&&!proof?.transition || distinctSource(prior,now.facts)&&
+        proof?.transition?.prior_source_digest===oldSource && proof.transition.source_slot===sourceSlot &&
+        canonicalize(proof.transition.authorization)===canonicalize(now.facts)) &&
+        proof?.predecessor_poll_id===prior.poll_id && proof.predecessor_digest===prior.body_digest, 'retirement_required');
       need(proof.wait_until_tick_ns!==null, 'backoff_unknown');
       const policy = durationPolicy(now.sample);
       need(canonicalize(proof.clock_policy)===canonicalize(policy), 'recovery_clock');
@@ -201,7 +210,7 @@ export function timeProviderPollStore(db, bootId, binding,
     need(canControl && canRecover && matches(id,sourceSlot) && !db.inTransaction, 'schedule');
     const now=current(sourceSlot), source=now.facts.source_digest, prior=predecessor(sourceSlot,source);
     need(!expected || canonicalize(now.facts)===canonicalize(expected),'source_changed');
-    if (prior && prior.service_boot_id!==bootId && prior.source_digest===source && !storedRecovery(source)) {
+    if (prior && prior.service_boot_id!==bootId && (prior.source_digest===source||distinctSource(prior,now.facts)) && !storedRecovery(source)) {
       return {state:'retirement_required',authorization:now.facts};
     }
     const interval=effectiveInterval(now.facts);
