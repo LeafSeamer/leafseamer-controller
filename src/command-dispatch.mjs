@@ -98,16 +98,23 @@ function readDispatchRequest(db,id,prepared=null){
 function readDispatch(db,id){
  const saved=readDispatchRequest(db,id);
  saved.write=readDispatchWrite(db,saved);if(!saved.write)return saved;
- const t=row(db,'SELECT * FROM command_dispatch_report WHERE permit_id=?',id);if(!t)return saved;
+ saved.report=readDispatchReport(db,saved);if(!saved.report)return saved;
+ saved.evidence=readDispatchEvidence(db,saved);return saved;
+}
+function readDispatchReport(db,saved){
+ const id=saved.value.permit_id;
+ const t=row(db,'SELECT * FROM command_dispatch_report WHERE permit_id=?',id);if(!t)return null;
  const reportValue=parse(t.body_jcs,t.body_digest),reply=applied(db,t.record_id,id,'report',reportValue);validateReport(saved,reply.frame,reply.observedTick);
  need(t.write_attempt_id===saved.write.value.write_attempt_id&&same(reportValue,{format:'command-dispatch-report/1',permit_id:id,request_ref:saved.ref,write_ref:saved.write.ref,
   record_ref:{id:t.record_id,revision:'1',digest:reply.record.record_digest},commit_id:t.commit_id}),'report');
- saved.report={value:reportValue,ref:ref(id+'.report',reportValue),reply};
- const e=row(db,'SELECT * FROM command_dispatch_evidence WHERE permit_id=?',id);if(!e)return saved;
+ return {value:reportValue,ref:ref(id+'.report',reportValue),reply};
+}
+function readDispatchEvidence(db,saved){
+ const id=saved.value.permit_id,e=row(db,'SELECT * FROM command_dispatch_evidence WHERE permit_id=?',id);if(!e)return null;
  const evidenceValue=parse(e.body_jcs,e.body_digest),evidenceReply=applied(db,e.record_id,id,'evidence',evidenceValue);validateEvidence(saved,evidenceReply.frame,evidenceReply.observedTick);
  need(same(evidenceValue,{format:'command-dispatch-evidence/1',permit_id:id,send_report_ref:saved.report.ref,
   record_ref:{id:e.record_id,revision:'1',digest:evidenceReply.record.record_digest}}),'evidence');
- saved.evidence={value:evidenceValue,ref:ref(id+'.evidence',evidenceValue),reply:evidenceReply};return saved;
+ return {value:evidenceValue,ref:ref(id+'.evidence',evidenceValue),reply:evidenceReply};
 }
 export function selectCommandDispatch(db,options){return withExecutionReadView(db,()=>selectDispatchFrame(db,options));}
 function selectDispatchFrame(db,{id,binding,features}){
@@ -180,14 +187,21 @@ export function startCommandDispatchWrite(db,{id,binding,provider,tick}){
  return {attempt_id:attempt,payload:saved.request.wire.subarray(4),before_tick};
 }
 export function acceptCommandDispatchReport(db,{binding,decoded,features,tick,receivedTick}){
- const {frame,payload}=decoded;assertDeviceExecutionFeatures(frame,features);const id=frame.body.permit_id,saved=readCommandDispatch(db,id);
- need(saved.request.frame.ipc_session_id===binding.ipc_session_id&&saved.write,'report_source');
+ const {frame,payload}=decoded;assertDeviceExecutionFeatures(frame,features);const id=frame.body.permit_id;
+ const {saved,initial}=withExecutionReadView(db,()=>{
+  const saved=readCommandDispatch(db,id);
+  need(saved.request.frame.ipc_session_id===binding.ipc_session_id&&saved.write,'report_source');
+  return {saved,initial:saved.report?null:readCommandRecord(db,saved.final.value.command_id)};
+ });
  if(saved.report){need(saved.report.reply.wire.equals(executionWire(payload)),'replay_conflict');return saved;}
  validateReport(saved,frame,receivedTick);const item=preparedFrame(binding,frame,payload,'w2c',receivedTick),commit=crypto.randomUUID(),value={format:'command-dispatch-report/1',
   permit_id:id,request_ref:saved.ref,write_ref:saved.write.ref,record_ref:{id:item.record.record_id,revision:'1',digest:item.record.record_digest},commit_id:commit};
  insertFrame(db,item,'command_dispatch');written(db.prepare('INSERT INTO command_dispatch_report VALUES(?,?,?,?,?,?,?)')
   .run(id,item.record.record_id,item.transaction,saved.write.value.write_attempt_id,commit,canonical(value),digest(value)));
- effect(db,item,id,'report',value,tick());const result=readCommandDispatch(db,id);saveState(db,result,commit,'4',result.report.ref);return result;
+ effect(db,item,id,'report',value,tick());
+ const report=readDispatchReport(db,saved);
+ need(report&&same(report.value,value),'report');
+ const result={...saved,report};saveState(db,result,commit,'4',report.ref,initial);return result;
 }
 export function acceptCommandDispatchEvidence(db,{binding,decoded,features,tick,receivedTick}){
  const {frame,payload}=decoded;assertDeviceExecutionFeatures(frame,features);
@@ -197,7 +211,9 @@ export function acceptCommandDispatchEvidence(db,{binding,decoded,features,tick,
  validateEvidence(saved,frame,receivedTick);const item=preparedFrame(binding,frame,payload,'w2c',receivedTick),value={format:'command-dispatch-evidence/1',permit_id:id,
   send_report_ref:saved.report.ref,record_ref:{id:item.record.record_id,revision:'1',digest:item.record.record_digest}};
  insertFrame(db,item,'command_dispatch');written(db.prepare('INSERT INTO command_dispatch_evidence VALUES(?,?,?,?,?)').run(id,item.record.record_id,item.transaction,canonical(value),digest(value)));
- effect(db,item,id,'evidence',value,tick());return readCommandDispatch(db,id);
+ effect(db,item,id,'evidence',value,tick());
+ const evidence=readDispatchEvidence(db,saved);
+ need(evidence&&same(evidence.value,value),'evidence');return {...saved,evidence};
 }
 export function dispatchRiskFrame(db,recordId,binding,preparedRef){
  need(preparedRef,'prepared_source');const id=db.prepare('SELECT permit_id FROM command_dispatch_request WHERE record_id=?').pluck().get(recordId);need(id,'ledger');

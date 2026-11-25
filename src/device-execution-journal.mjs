@@ -26,6 +26,12 @@ function guardHistory(saved,binding){
  need(saved.request.frame.ipc_session_id===binding.ipc_session_id&&saved.ack,'execution_guard_history');
  return freeze({value:saved.value,ref:saved.ref,qualification:null,ack:{value:saved.ack.value,ref:saved.ack.ref,reply:{frame:saved.ack.reply.frame}}});
 }
+function dispatchHistory(saved,binding){
+ need(saved.request.frame.ipc_session_id===binding.ipc_session_id,'execution_dispatch_history');
+ return freeze({value:saved.value,ref:saved.ref,write:saved.write,qualification:null,
+  report:saved.report?{value:saved.report.value,ref:saved.report.ref,frame:saved.report.reply.frame}:null,
+  evidence:saved.evidence?{value:saved.evidence.value,ref:saved.evidence.ref,frame:saved.evidence.reply.frame}:null});
+}
 
 export function executionJournalHistory(db,sessionId){
  need(typeof sessionId==='string'&&/^[0-9a-f-]{36}$/.test(sessionId),'execution_session_id');
@@ -372,14 +378,11 @@ export function deviceExecutionJournal({db,current,currentInTransaction,core,isO
     const features=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features;
     need(['SEND_REPORT','EVIDENCE_CANDIDATE'].includes(decoded.frame.type),'execution_dispatch_report');
     const accept=decoded.frame.type==='SEND_REPORT'?acceptCommandDispatchReport:acceptCommandDispatchEvidence;
-    const saved=db.transaction(()=>accept(db,{binding,decoded,features,tick,receivedTick})).immediate();return api.commandDispatchHistory(saved.value.permit_id);
+    const saved=db.transaction(()=>accept(db,{binding,decoded,features,tick,receivedTick})).immediate();return dispatchHistory(saved,binding);
    }catch(error){fail(error);throw error;}finally{busy=false;}
   },
   commandDispatchHistory(id){
-   available();const saved=db.transaction(()=>readCommandDispatch(db,id)).immediate();need(saved.request.frame.ipc_session_id===binding.ipc_session_id,'execution_dispatch_history');
-   return freeze({value:saved.value,ref:saved.ref,write:saved.write,qualification:null,
-    report:saved.report?{value:saved.report.value,ref:saved.report.ref,frame:saved.report.reply.frame}:null,
-    evidence:saved.evidence?{value:saved.evidence.value,ref:saved.evidence.ref,frame:saved.evidence.reply.frame}:null});
+   available();const saved=db.transaction(()=>readCommandDispatch(db,id)).immediate();return dispatchHistory(saved,binding);
   },
   protectCommandForSettlement(id){
    try{live();return db.transaction(()=>{const permit=db.prepare('SELECT permit_id FROM command_final_admission WHERE command_id=?').pluck().get(id);
