@@ -18,6 +18,25 @@ function unpack(value, min, max) {
   return bytes;
 }
 
+function ntsIdentifier(packet) {
+  let uid=null,offset=48;
+  while(offset<packet.length){
+    need(packet.length-offset>=4,'nts_extension');
+    const type=packet.readUInt16BE(offset),size=packet.readUInt16BE(offset+2),end=offset+size;
+    need(size>=4&&size%4===0&&end<=packet.length,'nts_extension');
+    if(type===0x0104){
+      need(uid===null&&size===36,'nts_identifier');
+      uid=packet.subarray(offset+4,end);
+    }
+    if(type===0x0404){
+      need(uid!==null&&end===packet.length&&size>=8,'nts_authenticator');
+      return uid;
+    }
+    offset=end;
+  }
+  throw new Error('time_provider_capture_nts_authenticator');
+}
+
 function validateDatagrams(candidate) {
   const nts = candidate.key_reply !== null;
   const max = nts ? 1232 : 48;
@@ -28,6 +47,7 @@ function validateDatagrams(candidate) {
     need(req[0] === 35 && res[0] === 36 && res[1] >= 1 && res[1] <= 15 && match && nonzero(req,40) &&
       [16,32,40].every(offset => nonzero(res,offset)), 'datagram_binding');
     if (nts) {
+      need(ntsIdentifier(req).equals(ntsIdentifier(res)),'nts_identifier');
       const keyReply = unpack(candidate.key_reply, 1, 65536);
       try { need(digest(keyReply) === candidate.key_reply_digest, 'key_reply_digest'); }
       finally { keyReply.fill(0); }

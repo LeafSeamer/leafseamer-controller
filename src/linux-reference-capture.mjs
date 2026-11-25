@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import {createHash,createSecretKey} from 'node:crypto';
+import {createHash,createSecretKey,X509Certificate} from 'node:crypto';
 import {isIP} from 'node:net';
 import canonicalize from './runtime/canonicalize.mjs';
 import {clockInteger} from './native-clock.mjs';
@@ -8,6 +8,7 @@ import {referenceBundleIssuer,resolveReferenceNtpTimestamp,utcCeil} from './refe
 const directory='/etc/leafseamer/reference-source';
 const sourceSlot='reference.primary';
 const pollLease='2000000000',pollInterval='16000000000',reservedBytes=16384;
+const ntsPollLease='5000000000',ntsReservedBytes=114688;
 const hash=bytes=>'sha256:'+createHash('sha256').update(bytes).digest('hex');
 const identifier=value=>typeof value==='string'&&/^[A-Za-z0-9_.:-]{1,128}$(?![\s\S])/.test(value);
 const exact=(value,keys)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join(',')===keys;
@@ -22,6 +23,58 @@ const bounded=(value,limit)=>{const n=clockInteger(value);need(n>0n&&n<=limit,'r
 function requireRef(value){
   need(exact(value,'digest,id,revision')&&identifier(value.id)&&/^sha256:[a-f0-9]{64}$/.test(value.digest)&&
     clockInteger(value.revision)>0n,'reference_reference');
+}
+
+function numericEndpoint(value){
+  const address=typeof value==='string'&&/^(?:\[([0-9a-f:]+)\]|([0-9.]+)):([1-9][0-9]{0,4})$(?![\s\S])/.exec(value);
+  return address&&isIP(address[1]??address[2])===(address[1]?6:4)&&Number(address[3])<=65535&&
+    (!address[1]||new URL('http://'+value).hostname==='['+address[1]+']'&&!address[1].startsWith('::ffff:'));
+}
+
+function dnsName(value){
+  return typeof value==='string'&&value.length<=253&&isIP(value)===0&&
+    value.split('.').every(label=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$(?![\s\S])/.test(label));
+}
+
+function targetName({name,port},endpoint){
+  need(typeof name==='string'&&Number.isInteger(port)&&port>=1&&port<=65535,'installed_source_endpoint');
+  const ip=isIP(name);
+  if(ip){
+    const address=(ip===6?'['+name+']':name)+':'+port;
+    need(numericEndpoint(address)&&(endpoint===undefined||address===endpoint),'installed_source_endpoint');
+  }else need(dnsName(name),'installed_source_endpoint');
+  return name+':'+port;
+}
+
+function validateNetwork(network,providesReference){
+  if(network?.authentication==='trusted_network'){
+    need(exact(network,'authentication,endpoint')&&numericEndpoint(network.endpoint),'installed_source_endpoint');
+    return;
+  }
+  need(!providesReference&&exact(network,'authentication,default_target,key_endpoint,root_der,server_name,targets')&&
+    network.authentication==='nts'&&numericEndpoint(network.key_endpoint)&&dnsName(network.server_name)&&
+    exact(network.default_target,'name,port')&&Array.isArray(network.targets)&&network.targets.length>=1&&network.targets.length<=16&&
+    Array.isArray(network.root_der)&&network.root_der.length>=1&&network.root_der.length<=8&&
+    Buffer.byteLength(canonicalize(network))<=12000,'installed_source_endpoint');
+  const targets=new Set();
+  for(const target of network.targets){
+    need(exact(target,'endpoint,name,port')&&numericEndpoint(target.endpoint)&&
+      Number(target.endpoint.slice(target.endpoint.lastIndexOf(':')+1))===target.port,'installed_source_endpoint');
+    const key=targetName(target,target.endpoint);
+    need(!targets.has(key),'installed_source_endpoint');
+    targets.add(key);
+  }
+  need(targets.has(targetName(network.default_target)),'installed_source_endpoint');
+  const roots=new Set();
+  for(const value of network.root_der){
+    need(typeof value==='string'&&value.length>0&&value.length<=12000,'installed_source_root');
+    const raw=Buffer.from(value,'base64url');
+    need(raw.toString('base64url')===value&&!roots.has(value),'installed_source_root');
+    let certificate;
+    try{certificate=new X509Certificate(raw);}catch{need(false,'installed_source_root');}
+    need(certificate.raw.equals(raw)&&certificate.ca,'installed_source_root');
+    roots.add(value);
+  }
 }
 
 function referenceInstallation(approval,configuration,endpointRef,current){
@@ -164,12 +217,11 @@ export function readInstalledLinuxReferenceCapture({identity,providerDigest,appr
     (providesReference||approval.format==='leafseamer-linux-reference-capture-approval/1')&&
     same(approval.scope,{service_id,database_instance_id})&&approval.provider_digest===providerDigest&&
     identifier(approval.approval_id)&&clockInteger(approval.approval_revision)>0n&&identifier(approval.capture_key_id)&&
-    Number.isSafeInteger(approval.archive_budget_bytes)&&approval.archive_budget_bytes>=reservedBytes&&
-    approval.archive_budget_bytes<=1073741824,'installed_source');
+    Number.isSafeInteger(approval.archive_budget_bytes)&&approval.archive_budget_bytes<=1073741824,'installed_source');
   const {network}=approval;
-  need(exact(network,'authentication,endpoint')&&network.authentication==='trusted_network'&&typeof network.endpoint==='string','installed_source_endpoint');
-  const address=/^(?:\[([0-9a-f:]+)\]|([0-9.]+)):([1-9][0-9]{0,4})$(?![\s\S])/.exec(network.endpoint);
-  need(address&&isIP(address[1]??address[2])===(address[1]?6:4)&&Number(address[3])<=65535,'installed_source_endpoint');
+  validateNetwork(network,providesReference);
+  const nts=network.authentication==='nts',reservationBytes=nts?ntsReservedBytes:reservedBytes;
+  need(approval.archive_budget_bytes>=reservationBytes,'installed_source');
   const start=clockInteger(approval.not_before_ns),expires=clockInteger(approval.expires_ns);
   need(expires>start,'installed_source');
   const endpointDigest=hash(canonicalize(network));
@@ -204,12 +256,13 @@ export function readInstalledLinuxReferenceCapture({identity,providerDigest,appr
       need(lower>=start&&upper>=lower&&expires>upper+2n*q&&Number.isInteger(drift_ppb)&&drift_ppb>=0&&drift_ppb<=1000000,'installed_source_window');
       const policyDeadline=tick+(expires-upper-2n*q)*1000000000n/(1000000000n+BigInt(drift_ppb));
       const authenticationDeadline=clockInteger(valid_before_tick_ns);
-      return {source_slot:slot,source_digest:reference?.sourceDigest??endpointDigest,reserved_bytes:reservedBytes,poll_lease_ns:pollLease,minimum_poll_interval_ns:pollInterval,
+      return {source_slot:slot,source_digest:reference?.sourceDigest??endpointDigest,reserved_bytes:reservationBytes,
+        poll_lease_ns:nts?ntsPollLease:pollLease,minimum_poll_interval_ns:pollInterval,
         approval_ref:reference?.approvalRef??ref(approval.approval_id,approvalDigest,approval.approval_revision),
         configuration_ref:configuration,endpoint_ref:{...endpointRef},
         valid_before_tick_ns:String(policyDeadline<authenticationDeadline?policyDeadline:authenticationDeadline)};
     },
-    readEndpoint(reference){current();need(same(reference,endpointRef),'installed_source_endpoint');return {...network};},
+    readEndpoint(reference){current();need(same(reference,endpointRef),'installed_source_endpoint');return structuredClone(network);},
     captureProtection,...(reference&&{referenceAuthority:reference.authority,sourceSlot})
   });
 }
