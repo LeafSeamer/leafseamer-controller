@@ -10,7 +10,7 @@ const reference=(id,value)=>({id,revision:'1',digest:digest(value)});
 
 export function automationCommandExecutionSource({db,service,devices,executionCurrent,deviceAutomationCurrent,coreSource,time,queueCommand,clockReference=null,referenceAcceptance=null}){
  const active=new Map();
- function scheduleTarget(execution,now){
+ function scheduleTarget(execution,now,requireCurrentReference=true){
   const {ready,ref,value,negotiation}=execution;
   const selected=negotiation?.selected_features??[];
   const capabilities=deviceExecutionCapabilities;
@@ -18,10 +18,13 @@ export function automationCommandExecutionSource({db,service,devices,executionCu
    [...capabilities.automation,...capabilities.reference].every(feature=>selected.includes(feature))&&
    BigInt(now.tick)>=BigInt(ready.value.selected_tick_ns)&&BigInt(now.tick)<BigInt(ready.value.expires_tick_ns),'automation_reference');
   const snapshot=readInitialReady(db,ready.ref.id).dispatch.plan.resource.reference_time_snapshot;
-  const original=clockReference?.readFirst({tick_ns:String(now.tick),runtime_domain_ref:now.ref});
-  need(snapshot&&original&&BigInt(now.tick)<BigInt(original.valid_before_tick_ns)&&original.bundle.policy.revision==='1','automation_reference');
-  const current=referenceGateSnapshot(original,value.binding);
-  need(same(current.domain,snapshot.domain)&&current.minimum_time_generation===snapshot.minimum_time_generation,'automation_reference');
+  need(snapshot,'automation_reference');
+  if(requireCurrentReference){
+   const original=clockReference?.readFirst({tick_ns:String(now.tick),runtime_domain_ref:now.ref});
+   need(original&&BigInt(now.tick)<BigInt(original.valid_before_tick_ns)&&original.bundle.policy.revision==='1','automation_reference');
+   const current=referenceGateSnapshot(original,value.binding);
+   need(same(current.domain,snapshot.domain)&&current.minimum_time_generation===snapshot.minimum_time_generation,'automation_reference');
+  }
   return {binding_ref:ref,ready_ref:ready.ref,snapshot};
  }
  function automaticControl(deviceId){
@@ -55,7 +58,8 @@ export function automationCommandExecutionSource({db,service,devices,executionCu
   const now=coreSource.domain();
   need(same(now.ref,{clock_domain_id:value.binding.clock_domain_id,descriptor_digest:value.binding.descriptor_digest})&&
    BigInt(now.tick)>=BigInt(ready.value.selected_tick_ns)&&BigInt(now.tick)<BigInt(ready.value.expires_tick_ns),'automation_clock');
-  if(schedule)scheduleTarget(execution,now);
+  // 封存后统一在currentPreparedCommand中重核当前授时和开闸快照。
+  if(schedule)scheduleTarget(execution,now,preparedRef===null);
   const basis={binding_ref:ref,binding:value.binding,ready_ref:ready.ref,
    control_binding:{epoch:control.control_epoch,version:control.effective_version},
    control_authority_ref:ready.value.eligibility_refs.control_authority,authorization_ref:ready.value.eligibility_refs.authorization,

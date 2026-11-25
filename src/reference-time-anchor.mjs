@@ -258,7 +258,7 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
         return {service_boot_id:bootId,valid_before_tick_ns:String(receiverDeadline(record,now)),...original};
       } catch { return null; }
     },
-    isCurrent({first_tick_ns,tick_ns,reference}) {
+    isCurrent({first_tick_ns,tick_ns,reference,opening=null}) {
       try {
         const first=clockInteger(first_tick_ns),tick=clockInteger(tick_ns),deadline=clockInteger(reference.valid_before_tick_ns);
         if(reference.service_boot_id!==bootId || first>tick || tick>=deadline || !matches(id,reference.bundle?.bundle_id))return false;
@@ -271,6 +271,17 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
         assessCurrent(body,{tick:first});
         assessCurrent(body,now);
         const original=storedBundle(record,runtime);
+        if(opening){
+          // 用同一份实时资格核对开闸代次和已封存的授时原件。
+          const at=clockInteger(opening.tick_ns);
+          requireQualified(at<=tick && at>=clockInteger(live.record.body.published_tick_ns) &&
+            at<receiverDeadline(live.record,now) && same(opening.runtime_domain_ref,now.sample.runtime_domain_ref));
+          const current=record.digest===live.record.digest?original:storedBundle(live.record,runtime);
+          assessCurrent(live.record.body,{tick:at});
+          const snapshot=referenceGateSnapshot(current,opening.binding);
+          requireQualified(current.bundle.policy.revision==='1' && same(snapshot.domain,opening.snapshot.domain) &&
+            snapshot.minimum_time_generation===opening.snapshot.minimum_time_generation);
+        }
         return same(reference.bundle,original.bundle)&&same(reference.state,original.state)&&
           (record.digest===live.record.digest || same(body.evidence,acquireEvidence(body,{now,p:live.record.body.approval})));
       } catch { return false; }

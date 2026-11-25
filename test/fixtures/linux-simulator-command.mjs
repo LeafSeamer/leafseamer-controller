@@ -32,8 +32,8 @@ export async function prepareAutomaticSimulator({store,operator,device}){
   assert.equal(control.gate_state,'protected');
 }
 
-export async function prepareManualSimulator({store,operator,device}){
-  const {sessions,auth,real}=operator,service=store.identity.service_id,device_ids=[device];
+export async function prepareManualSimulator({store,operator,device,device_ids=[device]}){
+  const {sessions,auth,real}=operator,service=store.identity.service_id;
   real.refresh();
   const token=operator.token(commandPermissions);
   const context=sessions.createRequestContext(token,{audience:service,operations:['acquireControl','submitCommand'],
@@ -56,33 +56,47 @@ export async function prepareManualSimulator({store,operator,device}){
   return {token,context,policy,credential_id:active.id,secret:staged.secret};
 }
 
-export async function writeManualSimulator({store,operator,supervision,key,device,manual,value,successor=false}){
-  const {sessions,real}=operator,{token,context,policy,credential_id,secret}=manual;
+async function openSimulatorGate({store,operator,supervision,key,device,manual,successor=false,automatic=false,waitForClockRenewal}){
+  const {sessions,real}=operator,{policy,credential_id,secret}=manual;
+  const token=automatic?operator.token(['device.recover','device.command']):manual.token;
   const input=()=> {
-    const human=sessions.beginManualExecutionChallenge(token,device,id());
-    const manualSource=sessions.completeManualExecutionChallenge(token,{request_id:id(),challenge_ref:ref(human),nonce:human.nonce});
+    let manualSource=null;
+    if(!automatic){
+      const human=sessions.beginManualExecutionChallenge(token,device,id());
+      manualSource=sessions.completeManualExecutionChallenge(token,{request_id:id(),challenge_ref:ref(human),nonce:human.nonce});
+    }
     const evaluator=sessions.beginDeviceEvaluatorChallenge({request_id:id(),policy_ref:ref(policy),device_id:device});
     const evaluatorSource=sessions.completeDeviceEvaluatorChallenge({request_id:id(),challenge_ref:ref(evaluator),nonce:evaluator.nonce,credential_id,secret});
-    return {device_id:device,manual_source_ref:manualSource.ref,evaluator_source_ref:evaluatorSource.ref};
+    return {device_id:device,manual_source_ref:manualSource?.ref??null,evaluator_source_ref:evaluatorSource.ref};
   };
-  const refresh=async()=>{
+  const refresh=async(renewClock=false)=>{
     await store.workerLaunches.runtime.refreshCurrent(key);
+    if(renewClock)await waitForClockRenewal();
     await supervision.refreshCoreObservation();
     real.refresh();
   };
   await refresh();
   if(successor)await store.workerLaunches.captureDeviceBaseline(key,device);
   else await store.workerLaunches.initialDeviceFence(key,device);
-  const original=input(),current=sessions.currentManualAuthorizationContext(original);
+  const original=input(),current=automatic?sessions.currentAutomaticAuthorizationContext(original):sessions.currentManualAuthorizationContext(original);
   const recovery=sessions.requestDeviceAuthorizationRecovery(token,{...original,request_id:id(),
     expected_state_ref:current.state_ref,expected_context_digest:current.context_digest});
   const state=sessions.consumeDeviceAuthorizationRecovery(token,recovery.receipt.id);
   const evidence=sessions.selectDeviceAuthorizationEvidence({...original,request_id:id(),expected_state_ref:state.ref,expected_evidence_ref:null});
-  await refresh();
+  await refresh(automatic);
   const renewed=sessions.selectDeviceAuthorizationEvidence({...input(),request_id:id(),expected_state_ref:state.ref,expected_evidence_ref:evidence.ref});
   const resources=sessions.selectInitialDeviceResources({request_id:id(),device_id:device,expected_evidence_ref:renewed.ref});
   const opening=sessions.prepareInitialDeviceOpen({request_id:id(),device_id:device,expected_resource_ref:resources.ref});
   await store.workerLaunches.openInitialDevice(key,opening.ref);
+}
+
+export function openAutomaticSimulator(input){
+  return openSimulatorGate({...input,automatic:true});
+}
+
+export async function writeManualSimulator({store,operator,supervision,key,device,manual,value,successor=false}){
+  await openSimulatorGate({store,operator,supervision,key,device,manual,successor});
+  const {sessions,real}=operator,{token,context}=manual;
   const control=sessions.getControl(token,device);
   const {adjudication}=await sessions.submitCommand(token,{device_id:device,action_id:'leafseamer.simulator.value.set',capability_version:'1.0.0',
     parameters:{value},context_id:context.context_id,idempotency_key:id(),expected_control:{epoch:control.control_epoch,version:control.effective_version},

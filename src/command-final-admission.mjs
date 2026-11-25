@@ -33,11 +33,12 @@ function referenceFor(db,source,ready,encoding,id,selected,clock){
   authorizedBefore:encoding.value.authorization.expires_tick_ns,id});
  return {...reference,original,snapshot,first_tick_ns:selected};
 }
-function recheckReference(reference,source,provider,now){
+function recheckReference(reference,source,provider,now,openingObservation=null){
  if(!reference)return;
  const {original,snapshot,valid_before_tick_ns,first_tick_ns}=reference;
+ const opening=openingObservation&&{snapshot,binding:source.binding,tick_ns:String(openingObservation.tick),runtime_domain_ref:openingObservation.ref};
  need(provider.isCommandReferenceCurrent?.({first_tick_ns,tick_ns:String(now),reference:{service_boot_id:original.service_boot_id,
-  bundle:original.bundle,state:original.state,valid_before_tick_ns}})===true,'reference_unavailable');
+  bundle:original.bundle,state:original.state,valid_before_tick_ns},...(opening&&{opening})})===true,'reference_unavailable');
  assertScheduledGuardCurrent(reference,source,snapshot,now);
 }
 function referenceAt(db,source,ready,encoding,id,selected,provider){
@@ -278,7 +279,7 @@ export function currentPreparedCommand(db,{id,binding,provider,tick}){
    encoding.response?.value.disposition==='prepared'&&same(encoding.ref,v.encoding_ref)&&same(encoding.response.ref,v.encoding_response_ref),'prepared_changed');
   const now=tick();need(now>=BigInt(observation.observed_tick_ns)&&now>=BigInt(v.seal.sealed_tick_ns)&&
    now>=BigInt(actual.now.tick)&&now<BigInt(v.seal.send_window.before_tick_ns),'prepared_expired');
-  recheckReference(final.clock_reference,saved.source,provider,now);
+  recheckReference(final.clock_reference,saved.source,provider,now,actual.now);
   // 全部当前资格和原截止复核成功后，才合并该命令的周期监视；历史读取不经过这里。
   provider.notePreparedQualification?.(saved.source.ready_ref,id);
   return {saved,final,encoding,observation,selected_tick_ns:String(now)};

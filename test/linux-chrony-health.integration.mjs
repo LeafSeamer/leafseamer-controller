@@ -145,7 +145,9 @@ test(guestDiscipline?'隔离客体实际校时后签发，失联后保留最后�
     const suite=process.env.LEAFSEAMER_TEST_CHRONY_SUITE;
     if(suite){
       const chronyProfile=path.join(root,'chrony-profile.json');
-      fs.writeFileSync(chronyProfile,canonical(profile),{mode:0o600});
+      const scheduled=process.env.LEAFSEAMER_TEST_COMPOSE_SIMULATOR_SCHEDULED_DISPATCH==='1';
+      const suiteProfile=scheduled?{...profile,max_source_age_s:8}:profile;
+      fs.writeFileSync(chronyProfile,canonical(suiteProfile),{mode:0o600});
       const env={...process.env};
       delete env.NODE_TEST_CONTEXT;
       const integration=env.LEAFSEAMER_TEST_CHRONY_COMPOSE==='1'?'test/linux-compose.integration.mjs':'test/linux-core-bootstrap.integration.mjs';

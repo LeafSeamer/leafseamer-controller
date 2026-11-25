@@ -17,14 +17,19 @@ import {createAuthenticationHttp} from '../../dist/auth-http.mjs';
 import {createLocalExtensionManagement,localExtensionPath} from '../../dist/local-extension-management.mjs';
 import {localPairingPath,runLocalExtensionAdmin,runLocalPairingAdmin} from '../../dist/local-pairing-admin.mjs';
 import {manageLocalEvents} from '../../dist/local-event-management.mjs';
-import {commandPermissions,prepareAutomaticSimulator,prepareManualSimulator,writeManualSimulator} from './linux-simulator-command.mjs';
-import {simulatorPairingInputs,startSimulatorPairing} from './linux-simulator-pairing.mjs';
+import {commandPermissions,openAutomaticSimulator,prepareAutomaticSimulator,prepareManualSimulator,writeManualSimulator} from './linux-simulator-command.mjs';
+import {admitSimulatorReference,simulatorPairingInputs,startSimulatorPairing} from './linux-simulator-pairing.mjs';
 
 const compose=process.argv[2]==='contained-compose-linux';
 const inputFile=compose?path.join('/var/lib/leafseamer','worker-test.json'):process.argv[2];
 const input=JSON.parse(fs.readFileSync(inputFile,'utf8'));
-const cleanup=[];
+const cleanup=[],scheduled=input.paired?.scheduledDispatch===true;
 const fixture={after(fn){cleanup.unshift(fn);}};
+function publishFixtureFile(file,content){
+  const temporary=file+'.tmp';
+  fs.writeFileSync(temporary,content);
+  fs.renameSync(temporary,file);
+}
 async function localManagement(store,{sessions,auth},assertCurrent,pairing=null){
   const origin='https://127.0.0.1:8444',caFile=pairing?'/etc/leafseamer/pairing/ca.pem':'/etc/leafseamer/tls/certificate.pem';
   const ca=fs.readFileSync(caFile),cert=pairing?.tls.cert??ca,key=pairing?.tls.key??fs.readFileSync('/etc/leafseamer/tls/private-key.pem');
@@ -99,7 +104,7 @@ try{
   }
   const capabilityTemplate=input.channelDirectory?JSON.parse(fs.readFileSync(new URL('../../dist/simulator-control-capability.json',import.meta.url),'utf8')):undefined;
   let targetDevice=null;
-  const x=await setup(fixture,{revision:109,directory:input.data,installation,capabilityTemplate,withEnrolledIssuer:!!input.paired,
+  const x=await setup(fixture,{revision:scheduled?113:109,directory:input.data,installation,capabilityTemplate,withEnrolledIssuer:!!input.paired,
     reviewedActions:capabilityTemplate?.actions.map(action=>action.action_id),prepareBindings({f,api,request}){
     if(!input.paired?.armPreflight)return;
     targetDevice=f.store.registerDevice({request_id:'target-device',device_kind:'simulator',display_name:'模拟器动作目标'}).device_id;
@@ -116,7 +121,8 @@ try{
     }
   }});
   const store=x.f.store;
-  store.bindCoreRuntime(binding,policy,supervision);
+  const installedReference=scheduled?await admitSimulatorReference(fixture,{store,runtime,clock}):null;
+  const referenceBinding=store.bindCoreRuntime(binding,policy,supervision,installedReference?.provider);
   store.extensionInstallations.bindRuntimeSource(supervision);
   store.workerLaunches.runtime.bindSource(supervision);
   const start=store.workerLaunches.authorization;start.bindSource(supervision);
@@ -124,7 +130,10 @@ try{
   const a=await authenticated(fixture,x.f,{grant:!compose,...(compose&&{
     native:{source:clock,descriptor:binding.descriptor},sampleWindowPolicy:'authentication-clock-sample/2'}),
     ...(pairing&&{evidence:pairing.evidence,credentials:input.paired.login})});
-  if(pairing)pairing.manage=await startSimulatorPairing(fixture,{store,sessions:a.sessions,real:a.real,profile:pairing.profile,assertCurrent:runtime.assertLive});
+  const reference=await installedReference?.start(a.real,referenceBinding);
+  let openTarget;
+  if(pairing)pairing.manage=await startSimulatorPairing(fixture,{store,sessions:a.sessions,real:a.real,profile:pairing.profile,
+    assertCurrent:runtime.assertLive,reference,openTarget:scheduled?()=>openTarget():null});
   const management=compose?await localManagement(store,a,supervision.assertCurrent,pairing&&{tls:pairing.profile.tls,manage:pairing.manage}):null;
   async function manage(operation,request){
     const result=await management.request(operation,request);
@@ -147,7 +156,7 @@ try{
   store.configureVirtualDevice({request_id:'resource',device_id:x.registered.device_id});
   if(targetDevice)store.configureVirtualDevice({request_id:'target-resource',device_id:targetDevice});
   const device=x.registered.device_id;
-  const manual=compose?await prepareManualSimulator({store,operator:a,device}):null;
+  const manual=compose?await prepareManualSimulator({store,operator:a,device,...(scheduled&&{device_ids:[device,targetDevice].sort()})}):null;
   if(targetDevice)await prepareAutomaticSimulator({store,operator:a,device:targetDevice});
   const planRequest={request_id:'plan',slot_id:x.installed.slot.record.slot_id,
     expected_slot_revision:x.installed.slot.slot_ref.revision,selection:{kind:compose?'enable':'activate',source_installation_ref:null,
@@ -170,28 +179,40 @@ try{
     assert.equal(adopted.binding.gate_state,'closed');
     assert.equal(started.execution.worker_boot_id,adopted.binding.admission_receipt.member_boot_id);
     assert.deepEqual(await manage('start',request),started);
+    if(scheduled){
+      const waitForClockRenewal=async()=>{
+        const {provider}=pairing.evidence;
+        const previous=provider.read().health.id;
+        const deadline=performance.now()+2500;
+        while(provider.read().health.id===previous){
+          assert.ok(performance.now()<deadline,'No new signed clock evidence for scheduled target opening');
+          await delay(30);
+        }
+      };
+      openTarget=()=>openAutomaticSimulator({store,operator:a,supervision,key,device:targetDevice,manual,waitForClockRenewal});
+    }
     const command=await writeManualSimulator({store,operator:a,supervision,key,device,manual,value:7});
     simulatorEvent={command,device,event:await waitForEvent(store,device,1,7)};
-    const scopeRequest={request_id:crypto.randomUUID(),device_ids:[device]},pairing=(operation,request)=>
+    const scopeRequest={request_id:crypto.randomUUID(),device_ids:[device]},pairingAdmin=(operation,request)=>
       management.cli(runLocalPairingAdmin,operation,request);
     assert.equal((await management.request('register-event-scope',scopeRequest,{route:localPairingPath,csrf:crypto.randomBytes(32).toString('base64url')})).status,401);
     assert.equal((await management.request('register-event-scope',scopeRequest,{route:localPairingPath,headers:{'X-Forwarded-For':'127.0.0.1'}})).status,403);
-    const scope=await pairing('register-event-scope',scopeRequest);
-    assert.deepEqual(await pairing('register-event-scope',scopeRequest),scope);
+    const scope=await pairingAdmin('register-event-scope',scopeRequest);
+    assert.deepEqual(await pairingAdmin('register-event-scope',scopeRequest),scope);
     const current=store.workerLaunches.eventScopes.current(scope.scope_ref);
     assert.deepEqual(current.registration.scope,scope.scope);
     assert.deepEqual(current.current_frontiers.map(member=>member.source_key),[simulatorEvent.event.origin.source_key]);
     assert.equal(current.current_frontiers[0].registration_sequence,'1');
     if(input.paired){
       const {ready,proceed,finish}=input.paired;
-      fs.writeFileSync(ready,canonicalize({device,scope,baseline:simulatorEvent.event,source_ref:current.current_frontiers[0].source_registration_ref,
+      publishFixtureFile(ready,canonicalize({device,scope,baseline:simulatorEvent.event,source_ref:current.current_frontiers[0].source_registration_ref,
         ...(targetDevice&&{target_device:targetDevice})}));
       await waitForFile(proceed,runtime.assertLive,input.paired.runApproval?45000:30000);
       simulatorEvent.incremental={command:await writeManualSimulator({store,operator:a,supervision,key,device,manual,value:23,successor:true}),
         event:await waitForEvent(store,device,2,23)};
-      await waitForFile(finish,runtime.assertLive,input.paired.armCompletion?18000:12000);
+      await waitForFile(finish,runtime.assertLive,scheduled?45000:input.paired.armCompletion?18000:12000);
     }
-    assert.deepEqual(await pairing('revoke-event-scope',{scope_ref:scope.scope_ref}),{scope_ref:scope.scope_ref,state:'revoked'});
+    assert.deepEqual(await pairingAdmin('revoke-event-scope',{scope_ref:scope.scope_ref}),{scope_ref:scope.scope_ref,state:'revoked'});
     assert.throws(()=>store.workerLaunches.eventScopes.current(scope.scope_ref),{code:'event_scope_inactive'});
     simulatorEvent.scope_ref=scope.scope_ref;
   }else{
@@ -237,7 +258,7 @@ try{
       await assert.rejects(start.create(key,proof),{code:'worker_authorization_creation_attempted'});
     }
   }
-  a.sessions.revokeExtensionApproval(token,{request_id:'revoke',approval_ref:approved.approval_ref,reason:'测试撤销'});
+  a.sessions.revokeExtensionApproval(scheduled?a.token():token,{request_id:'revoke',approval_ref:approved.approval_ref,reason:'测试撤销'});
   const fence=await start.synchronize();
   assert.deepEqual(fence.items,[{...key,disposition:'deny'}]);
   const terminal=adopted?'retired':'rejected';
@@ -251,10 +272,10 @@ try{
   const next={scope:fence.scope,revision:String(Number(fence.revision)+1),items:[{...key,disposition:'allow'}]};
   await assert.rejects(supervision.putFence({...next,digest:hash(next)}),{code:'supervisor_unauthorized'});
   assert.equal((await supervision.queryLaunch(key)).state,terminal);
-  fs.writeFileSync(input.result,JSON.stringify({ok:true,key,deniedRevision:fence.revision,coreReceipt:binding.receipt.receipt_id,
+  publishFixtureFile(input.result,JSON.stringify({ok:true,key,deniedRevision:fence.revision,coreReceipt:binding.receipt.receipt_id,
     workerReceipt:adopted?.binding.admission_receipt??null,simulatorEvent}));
 }catch(error){
-  fs.writeFileSync(input.result,JSON.stringify({ok:false,error:error.stack}));process.exitCode=1;
+  publishFixtureFile(input.result,JSON.stringify({ok:false,error:error.stack}));process.exitCode=1;
 }finally{
   for(const close of cleanup)await close();
 }

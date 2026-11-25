@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import dgram from 'node:dgram';
 import {once} from 'node:events';
@@ -11,6 +12,7 @@ import {openNativeClock} from '../../dist/native-clock.mjs';
 import {createCoreBootstrapChannel,verifyCoreAdmission} from '../../dist/core-bootstrap.mjs';
 import {openStorage} from '../../dist/storage.mjs';
 import {openTimeProviderLink} from '../../dist/time-provider-link.mjs';
+import {referenceGateSnapshot} from '../../dist/reference-time-anchor.mjs';
 import {authenticated} from './extension-auth.mjs';
 import {createAuthenticationHttp} from '../../dist/auth-http.mjs';
 import {contractSelection} from '../../dist/sdk/index.mjs';
@@ -443,6 +445,15 @@ async function collectCommandReference(binding){
    const reference=provider.readFirst({tick_ns,runtime_domain_ref});
    if(!reference)throw new Error('fixture_receiver_reference_missing');
    const check={first_tick_ns:tick_ns,tick_ns,reference},altered=structuredClone(reference);
+   const {domain}=reference.state.binding;
+   const binding={scope:{authority_service_id:domain.authority_service_id,database_instance_id:domain.database_instance_id},
+    clock_domain_id:domain.clock_domain_id,descriptor_digest:domain.descriptor_digest};
+   const snapshot=referenceGateSnapshot(reference,binding),opening={snapshot,binding,tick_ns,runtime_domain_ref};
+   assert.equal(provider.isCurrent({...check,opening}),true);
+   const otherGeneration=String(BigInt(snapshot.minimum_time_generation)+1n);
+   assert.equal(provider.isCurrent({...check,opening:{...opening,snapshot:{...snapshot,minimum_time_generation:otherGeneration}}}),false);
+   assert.equal(provider.isCurrent({...check,opening:{...opening,tick_ns:before.tick_ns}}),false);
+   assert.equal(provider.isCurrent({...check,opening:{...opening,runtime_domain_ref:{...runtime_domain_ref,descriptor_digest:hash('other domain')}}}),false);
    altered.state.status='unqualified';
    report({event:'receiver-reference-native-receipt',boot:reference.service_boot_id,bundle_digest:reference.bundle.bundle_digest,
     current:provider.isCurrent(check),before_publication:provider.readFirst({tick_ns:before.tick_ns,runtime_domain_ref})===null,
