@@ -8,7 +8,7 @@ import {referenceGateSnapshot} from './reference-time-anchor.mjs';
 const need=(value,code)=>{if(!value)throw new IdentityError('command_encoding_'+code);};
 const reference=(id,value)=>({id,revision:'1',digest:digest(value)});
 
-export function automationCommandExecutionSource({db,service,devices,executionCurrent,deviceAutomationCurrent,coreSource,time,queueCommand,clockReference=null}){
+export function automationCommandExecutionSource({db,service,devices,executionCurrent,deviceAutomationCurrent,coreSource,time,queueCommand,clockReference=null,referenceAcceptance=null}){
  const active=new Map();
  function scheduleTarget(execution,now){
   const {ready,ref,value,negotiation}=execution;
@@ -86,8 +86,11 @@ export function automationCommandExecutionSource({db,service,devices,executionCu
   const value=current(verified),core=coreSource.selectCoreSource(),{acquisition}=time();
   const cap=BigInt(value.readyExpires)<BigInt(core.value.expires_tick_ns)?value.readyExpires:core.value.expires_tick_ns;
   const window=selectAuthenticationWindow(input(value,core,acquisition,value.now.tick,cap));
+  const accepted={domain:window.domain_ref,tick_ns:window.selected_tick_ns};
+  const reference=verified.schedule_binding?referenceAcceptance?.(accepted):null;
+  need(!verified.schedule_binding||reference,'automation_reference');
   const original={format:'automation-command-execution-basis/1',...value.basis,pairing_ref:pairingRef,
-   core_source_ref:core.ref,authentication_window:window};
+   core_source_ref:core.ref,authentication_window:window,...(reference&&{accepted_reference:reference})};
   function currentExecution(latest,preparedRef=null){
    const selected=current(latest,preparedRef);
    need(same(verified,latest),'automation_changed');
@@ -96,7 +99,11 @@ export function automationCommandExecutionSource({db,service,devices,executionCu
    currentAuthenticationWindow(input(selected,core,window.acquisition_ref,window.selected_tick_ns,window.cap_tick_ns),window,selected.now.tick);
    return selected.execution;
   }
-  return Object.freeze({original,execution:value.execution,currentExecution,assertCurrentInTransaction(latest){currentExecution(latest);return original;}});
+  return Object.freeze({original,execution:value.execution,currentExecution,assertCurrentInTransaction(latest){
+   currentExecution(latest);
+   if(reference)need(same(referenceAcceptance(accepted),reference),'automation_reference');
+   return original;
+  }});
  }});
 }
 

@@ -200,6 +200,8 @@ export function storeAutomationCommandRecord(db,{command:initial,adjudication,re
  const id=initial.command_id,{identity}=adjudication,scope=identity.key.target_scope,basis=initial.execution_basis,{authentication_window:window}=basis;
  const value=automationRequest(initial,request),{context_id,idempotency_key,...executionContent}=value;
  const scheduleBinding=basis.schedule_binding??null,policies=commandPolicyInput(value,execution,scheduleBinding);
+ const acceptedReference=basis.accepted_reference;
+ need(Boolean(acceptedReference)===Boolean(scheduleBinding),'reference_acceptance');
  need(same(basis.binding_ref,execution.ref)&&same(basis.ready_ref,execution.ready.ref)&&same(basis.binding,execution.value.binding)&&
   digest(policies.completion)===basis.action_policy.completion_policy_digest&&digest(policies.release)===basis.action_policy.release_policy_digest,'automation_source');
  commandCapacity(db,value.device_id);
@@ -207,13 +209,13 @@ export function storeAutomationCommandRecord(db,{command:initial,adjudication,re
  const source={format:'command-admission-source/2',command_id:id,initial_ref:initialRef,
   admission_ref:{id:adjudication.adjudication_id,revision:'1',digest:adjudication.adjudication_digest},binding_ref:basis.binding_ref,binding:basis.binding,ready_ref:basis.ready_ref,
   context_id:null,token_id:null,authorization_digest:digest(initial.authority),authentication_window:window,
-  ...(scheduleBinding&&{schedule_binding:scheduleBinding}),
+  ...(scheduleBinding&&{schedule_binding:scheduleBinding,accepted_reference:acceptedReference}),
   execution_request:value,execution_content_digest:digest(executionContent),policies,
   deadline:{format:'command-deadline/1',command_id:id,scope,accepted:{domain:window.domain_ref,tick_ns:window.selected_tick_ns},dispatch:value.dispatch,
    queue_deadline_tick_ns:window.before_tick_ns,evidence_timeout_ms:value.evidence_timeout_ms},
   metadata:{command_id:id,scope,initial_command_ref:initialRef,request_identity:identity,target:initial.target,
    actor:{issuer_id,issuer_epoch,principal_id,local_subject_id:principal_id,session_id:null,authorization_revision:initial.authority.grant_ref.revision},
-   origin:'automation',run_binding:value.run_binding,automation_binding:value.automation_binding,accepted_at:null,dispatch:value.dispatch,control_binding:value.expected_control}};
+   origin:'automation',run_binding:value.run_binding,automation_binding:value.automation_binding,accepted_at:acceptedReference?.accepted_at??null,dispatch:value.dispatch,control_binding:value.expected_control}};
  const prepared=queuedRecord(id,initial,adjudication,source,value.required_completion),keyId=crypto.randomUUID(),written=result=>need(result.changes===1,'storage');
  let namespace=db.prepare('SELECT namespace_id FROM ca_namespace WHERE issuer_id=? AND issuer_epoch=? AND principal_id=? AND request_epoch=?')
   .pluck().get(issuer_id,issuer_epoch,principal_id,request_epoch);
@@ -277,9 +279,13 @@ function readInitialRecord(db,id){
   need(row,'automation_source');const sealed=original(...row),basis=initial.execution_basis;
   value=automationRequest(initial,content);const {context_id,idempotency_key,...body}=value;
   accepted={domain:basis.authentication_window.domain_ref,tick_ns:basis.authentication_window.selected_tick_ns};
+  const reference=basis.accepted_reference;
+  need(Boolean(reference)===Boolean(basis.schedule_binding)&&same(reference,source.accepted_reference)&&
+   source.metadata.accepted_at===(reference?.accepted_at??null)&&
+   (!reference||verifyCommandReferenceAcceptance(db,reference,accepted,source.binding.ipc_session_id)),'reference_acceptance');
   need(source.format==='command-admission-source/2'&&initial.format==='leafseamer.automation-command/2'&&
    same(sealed,{command:initial,adjudication,commit:JSON.parse(ct.toString()),request:content})&&same(initial.identity,a.identity)&&
-   source.context_id===null&&source.token_id===null&&source.metadata.accepted_at===null&&
+   source.context_id===null&&source.token_id===null&&
    same(source.binding_ref,basis.binding_ref)&&same(source.binding,basis.binding)&&same(source.ready_ref,basis.ready_ref)&&
    same(source.authentication_window,basis.authentication_window)&&same(source.schedule_binding,basis.schedule_binding)&&
    same(source.execution_request,value)&&source.execution_content_digest===digest(body)&&source.authorization_digest===digest(initial.authority)&&
@@ -296,10 +302,12 @@ function readInitialRecord(db,id){
  }
  need(same(source.metadata.request_identity,a.identity)&&same(source.metadata.initial_command_ref,source.initial_ref)&&
   same(source.metadata.control_binding,value.expected_control)&&same(source.metadata.dispatch,value.dispatch),'record_binding');
- const observed=source.accepted_reference;
- if(automated||initial.accepted_at===null)need(observed===undefined && initial.accepted_reference_ref===undefined,'reference_acceptance');
- else need(observed?.accepted_at===initial.accepted_at && same(initial.accepted_reference_ref,reference(id+'_reference_acceptance',observed)) &&
-  verifyCommandReferenceAcceptance(db,observed,initial.accepted_monotonic,source.binding.ipc_session_id),'reference_acceptance');
+ if(!automated){
+  const observed=source.accepted_reference;
+  if(initial.accepted_at===null)need(observed===undefined&&initial.accepted_reference_ref===undefined,'reference_acceptance');
+  else need(observed?.accepted_at===initial.accepted_at&&same(initial.accepted_reference_ref,reference(id+'_reference_acceptance',observed))&&
+   verifyCommandReferenceAcceptance(db,observed,accepted,source.binding.ipc_session_id),'reference_acceptance');
+ }
  const bound=db.prepare('SELECT body_jcs,body_digest FROM device_execution_binding WHERE binding_id=?').raw().get(source.binding_ref.id);
  need(bound,'record_binding');const binding=original(...bound),obs=binding.transport_profile.format==='leafseamer-obs-cut-transport/1';
  const limits=obs?obsCapacity:capacity;

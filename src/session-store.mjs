@@ -154,7 +154,7 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
   const devices = deviceRegistryReader(db, contextBinding?.service);
   const automationExecution=Number(contextBinding?.service.schema_revision)>=96&&controlBarrier&&executionCurrent&&deviceAutomationCurrent&&
    (Number(contextBinding.service.schema_revision)<97||queueCommand)?
-   automationCommandExecutionSource({db,service:contextBinding.service,devices,executionCurrent,deviceAutomationCurrent,coreSource:controlBarrier,time,queueCommand,clockReference}):null;
+   automationCommandExecutionSource({db,service:contextBinding.service,devices,executionCurrent,deviceAutomationCurrent,coreSource:controlBarrier,time,queueCommand,clockReference,referenceAcceptance}):null;
   if(Number(contextBinding?.service.schema_revision)>=51&&attachEncodingSource&&controlBarrier&&executionCurrent)
     attachEncodingSource(commandEncodingSource({db,service:contextBinding.service,currentRecordedToken,devices,executionCurrent,coreSource:controlBarrier,automationExecution,clockReference}));
   let manualCurrent,evaluatorCurrent,evidenceCurrent;

@@ -19,6 +19,10 @@ export async function automationPeer({business,manager,config,device,refresh,rep
  const commands=preparations?.automationCommands;
  let armedEventRequested=false,triggerPlanGrant=null,targetOpening=null;
  async function prepareEligibility(binding,socket,request){
+  if(config.scheduled_admission&&request.schedule_device_ids){
+   targetOpening??=openArmTarget();
+   await targetOpening;
+  }
   if(!armedEventRequested)return preparations.prepareEligibility(binding,socket,request);
   const grant=canonicalize(request);
   // 首次查验用于封存触发计划，后一次才是同一计划首动作的资格查验。
@@ -39,12 +43,13 @@ export async function automationPeer({business,manager,config,device,refresh,rep
   runControlObservation:endorsements?trace('runControlObservation',endorsements.readControlsForPeer):null,
   runPreparations:preparations?{prepare:trace('prepareRun',preparations.prepare),lookup:trace('lookupRunPreparation',preparations.lookup),
    prepareEligibility:trace('prepareRunEligibility',prepareEligibility)}:null,
-  automationCommands:commands&&publishArmedEvent?{...commands,submit:trace('submitAutomationCommand',async(...args)=>{
+  automationCommands:commands&&(publishArmedEvent||config.scheduled_admission)?{...commands,submit:trace('submitAutomationCommand',async(...args)=>{
    if(!targetOpening)throw Error('automation_target_opening_missing');
    await targetOpening;
    const response=await commands.submit(...args),reference=response.adjudication.command_ref;
    if(response.created&&reference){
     report({event:'automation-target-accepted',reference});
+    if(config.scheduled_admission)return response;
     for(const [stage,method] of [['encoded','whenCommandEncoded'],['finalized','whenCommandFinalized'],['guarded','whenCommandGuarded'],['dispatched','whenCommandDispatched']]){
      business.workerLaunches[method](reference.object_id).then(result=>{
       report({event:'automation-target-stage',stage,disposition:result?.ack?.value?.disposition});
@@ -101,6 +106,7 @@ export async function automationPeer({business,manager,config,device,refresh,rep
    const record=api.get(manager.auth,value),now=manager.real.current(),permissions=['auth.manage','auth.read','request.create','request.read','definition.read','definition.edit'];
    if(config.incremental_source_event){
     permissions.push('definition.publish','run.approve','run.arm','run.manage','run.read');
+    if(config.scheduled_admission)permissions.push('schedule.read','schedule.publish','schedule.activate');
     const current=manager.sessions.localPermissions(manager.auth),principal_id=manager.logged.session.principal_id;
     if(!current.permissions.includes('grant.manage'))manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id,
      expected_revision:current.revision,permissions:[...current.permissions,'grant.manage','grant.read']});
