@@ -16,6 +16,9 @@ import {selectCommandDispatch,commitCommandDispatch,readCommandDispatch,startCom
 import {protectCommandForSettlement,selectCommandClosure,commitCommandClosure,readCommandClosure,currentCommandClosure,acceptCommandClosure,commitCommandSettlement} from './command-settlement.mjs';
 import {selectCommandPreparationCleanup,commitCommandPreparationCleanup,readCommandPreparationCleanup,currentCommandPreparationCleanup,acceptCommandPreparationCleanup} from './command-preparation-cleanup.mjs';
 import {selectRunFence,commitRunFence,readRunFence,currentRunFence,acceptRunFence} from './execution-run-fence.mjs';
+import {selectTimeFence,commitTimeFence,readTimeFence,currentTimeFence,acceptTimeFence} from './execution-time-fence.mjs';
+const runFence={select:selectRunFence,commit:commitRunFence,read:readRunFence,current:currentRunFence,accept:acceptRunFence,kind:'run'};
+const timeFence={select:selectTimeFence,commit:commitTimeFence,read:readTimeFence,current:currentTimeFence,accept:acceptTimeFence,kind:'time'};
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError(code);};
 const hash=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
 const freeze=value=>{if(value&&typeof value==='object'){for(const item of Object.values(value))freeze(item);Object.freeze(value);}return value;};
@@ -75,6 +78,43 @@ export function deviceExecutionJournal({db,current,currentInTransaction,core,isO
   const active=current();need(frame.body.clock_domain_id===binding.clock_domain_id&&frame.body.descriptor_digest===binding.descriptor_digest&&
    canonicalize(frame.body.clock_domain_descriptor)===canonicalize(active.binding.clock_domain_descriptor),'execution_hello_binding');return active;
  }
+  async function prepareFence(fence,input){
+   try{live();const features=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features;
+    const fixed=structuredClone(input),candidate=db.transaction(()=>fence.select(db,{binding,runtime:currentInTransaction(),input:fixed,features})).immediate();
+    if(candidate.saved)return fenceHistory(fence,candidate.saved.request.recordRef.id,true);
+    await decodeExecutionPayload(Buffer.from(JSON.stringify(candidate.frame)),'c2w');live();
+    const saved=db.transaction(()=>fence.commit(db,{binding,runtime:currentInTransaction(),candidate,tick})).immediate();
+    return fenceHistory(fence,saved.request.recordRef.id);
+   }catch(error){fail(error);throw error;}
+  }
+  async function sendFence(fence,transport,id){
+   let attempt=null,finished=false;
+   try{live();const saved=db.transaction(()=>fence.read(db,binding,id)).immediate(),payload=Buffer.from(saved.request.row.wire.subarray(4));
+    const sent=await transport.send(payload,{beforeWrite(){live();need(!attempt,'execution_'+fence.kind+'_fence_write_reuse');
+     attempt=db.transaction(()=>{
+      const actual=fence.current(db,{binding,runtime:currentInTransaction(),id}),attemptId=crypto.randomUUID();
+      need(actual.request.row.wire.equals(saved.request.row.wire),'execution_'+fence.kind+'_fence_changed');
+      need(db.prepare('INSERT INTO execution_write_attempt VALUES(?,?,?)').run(attemptId,id,executionTick(tick())).changes===1,'execution_'+fence.kind+'_fence_storage');
+      return attemptId;
+     }).immediate();
+    }});
+    need(attempt&&sent?.not_started!==true&&sent?.wire_length===payload.length+4,'execution_write_unknown');
+    const result=api.finishHandshakeWrite(attempt,'complete');finished=true;need(result.result==='complete','execution_write_unknown');return result;
+   }catch(error){if(attempt&&!finished)try{api.finishHandshakeWrite(attempt,'unknown');}catch{}fail(error);throw error;}
+  }
+  async function receiveFence(fence,bytes){
+   need(!busy,'execution_receive_busy');busy=true;
+   try{live();const receivedTick=tick(),decoded=await decodeExecutionPayload(bytes,'w2c');live();
+    const features=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features;
+    const saved=db.transaction(()=>fence.accept(db,{binding,decoded,features,tick,receivedTick})).immediate();
+    return fenceHistory(fence,saved.request.recordRef.id);
+   }catch(error){fail(error);throw error;}finally{busy=false;}
+  }
+  function fenceHistory(fence,id,replay=false){
+   available();
+   const {request,ack}=db.transaction(()=>fence.read(db,binding,id)).immediate();
+   return freeze({replay,request:{ref:request.recordRef,frame:request.frame},ack:ack?{ref:ack.recordRef,frame:ack.frame}:null});
+  }
  const api={
   open(){
    available();need(!binding&&!terminal,'execution_session_reuse');
@@ -384,43 +424,13 @@ export function deviceExecutionJournal({db,current,currentInTransaction,core,isO
     return freeze({record:saved.record,settlement_ref:saved.lifecycle.settlement.ref});
    }catch(error){fail(error);throw error;}
   },
-  async prepareRunFence(input){
-   try{live();const features=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features;
-    const fixed=structuredClone(input),candidate=db.transaction(()=>selectRunFence(db,{binding,runtime:currentInTransaction(),input:fixed,features})).immediate();
-    if(candidate.saved)return api.runFenceHistory(candidate.saved.request.recordRef.id,true);
-    await decodeExecutionPayload(Buffer.from(JSON.stringify(candidate.frame)),'c2w');live();
-    const saved=db.transaction(()=>commitRunFence(db,{binding,runtime:currentInTransaction(),candidate,tick})).immediate();
-    return api.runFenceHistory(saved.request.recordRef.id);
-   }catch(error){fail(error);throw error;}
-  },
-  async sendRunFence(transport,id){
-   let attempt=null,finished=false;
-   try{live();const saved=db.transaction(()=>readRunFence(db,binding,id)).immediate(),payload=Buffer.from(saved.request.row.wire.subarray(4));
-    const sent=await transport.send(payload,{beforeWrite(){live();need(!attempt,'execution_run_fence_write_reuse');
-     attempt=db.transaction(()=>{
-      const actual=currentRunFence(db,{binding,runtime:currentInTransaction(),id}),attemptId=crypto.randomUUID();
-      need(actual.request.row.wire.equals(saved.request.row.wire),'execution_run_fence_changed');
-      need(db.prepare('INSERT INTO execution_write_attempt VALUES(?,?,?)').run(attemptId,id,executionTick(tick())).changes===1,'execution_run_fence_storage');
-      return attemptId;
-     }).immediate();
-    }});
-    need(attempt&&sent?.not_started!==true&&sent?.wire_length===payload.length+4,'execution_write_unknown');
-    const result=api.finishHandshakeWrite(attempt,'complete');finished=true;need(result.result==='complete','execution_write_unknown');return result;
-   }catch(error){if(attempt&&!finished)try{api.finishHandshakeWrite(attempt,'unknown');}catch{}fail(error);throw error;}
-  },
-  async receiveRunFence(bytes){
-   need(!busy,'execution_receive_busy');busy=true;
-   try{live();const receivedTick=tick(),decoded=await decodeExecutionPayload(bytes,'w2c');live();
-    const features=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features;
-    const saved=db.transaction(()=>acceptRunFence(db,{binding,decoded,features,tick,receivedTick})).immediate();
-    return api.runFenceHistory(saved.request.recordRef.id);
-   }catch(error){fail(error);throw error;}finally{busy=false;}
-  },
-  runFenceHistory(id,replay=false){
-   available();
-   const {request,ack}=db.transaction(()=>readRunFence(db,binding,id)).immediate();
-   return freeze({replay,request:{ref:request.recordRef,frame:request.frame},ack:ack?{ref:ack.recordRef,frame:ack.frame}:null});
-  },
+  prepareRunFence(input){return prepareFence(runFence,input);},
+  sendRunFence(transport,id){return sendFence(runFence,transport,id);},
+  receiveRunFence(bytes){return receiveFence(runFence,bytes);},
+  runFenceHistory(id,replay=false){return fenceHistory(runFence,id,replay);},
+  prepareTimeFence(operation,exit){return prepareFence(timeFence,{operation,exit});},
+  sendTimeFence(transport,id){return sendFence(timeFence,transport,id);},
+  receiveTimeFence(bytes){return receiveFence(timeFence,bytes);},
   async prepareCommandCleanup(command,phase){
    try{live();const features=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features;
     const candidate=db.transaction(()=>{const id=db.prepare('SELECT permit_id FROM command_settlement WHERE command_id=?').pluck().get(command);

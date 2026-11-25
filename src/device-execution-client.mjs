@@ -21,6 +21,16 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
   q.watch=executionQualificationWatch({inspect(){if(q.command_id)journal.currentPreparedCommand(q.command_id);else journal.currentReady(q.ref.id);},failed:close});
   qualifications.set(selected.ref.id,q);
  }
+ async function applyFence(type,prepare,send,code){
+  check();if(pending||encoding)throw new DeviceExecutionError('execution_control_busy');encoding=true;let call;
+  try{const selected=await prepare();check();
+   if(selected.replay){if(!selected.ack)throw new DeviceExecutionError(code+'_result_unknown');return selected;}
+   let resolve,reject;const response=new Promise((yes,no)=>{resolve=yes;reject=no;});response.catch(()=>{});
+   call={type,message:selected.request.frame.message_id,resolve,reject,
+    timer:setTimeout(()=>close(new DeviceExecutionError(code+'_timeout')),5000)};pending=call;
+   const [,result]=await Promise.all([send(transport,selected.request.ref.id),response]);return result;
+  }catch(error){close(error);throw error;}finally{if(call){clearTimeout(call.timer);if(pending===call)pending=null;}encoding=false;}
+ }
  try{
   const active=current();
   if(active.binding.admission_receipt.member_boot_id!==journal.binding.worker_boot_id)throw new DeviceExecutionError('execution_client_runtime');
@@ -38,6 +48,9 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
     }
     if(frame.type==='RUN_FENCE_ACK'&&negotiation){const result=await journal.receiveRunFence(payload);check();
      if(pending){if(pending.type!==frame.type||pending.message!==frame.reply_to)throw new DeviceExecutionError('execution_run_fence_reply');pending.resolve(result);}return;
+    }
+    if(frame.type==='TIME_FENCE_ACK'&&negotiation){const result=await journal.receiveTimeFence(payload);check();
+     if(pending){if(pending.type!==frame.type||pending.message!==frame.reply_to)throw new DeviceExecutionError('execution_time_fence_reply');pending.resolve(result);}return;
     }
     if(['SEND_REPORT','EVIDENCE_CANDIDATE'].includes(frame.type)&&negotiation){const result=await journal.receiveCommandDispatch(payload);
      if(pending){if(pending.type!=='DISPATCH_RESULT'||pending.permit_id!==result.value.permit_id)throw new DeviceExecutionError('execution_dispatch_reply');
@@ -115,16 +128,8 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
      const [,result]=await Promise.all([journal.sendCommandClosure(transport,id),response]);return {...result,settlement:journal.settleCommand(id)};
     }catch(error){close(error);throw error;}finally{if(call){clearTimeout(call.timer);if(pending===call)pending=null;}encoding=false;}
    },
-   async applyRunFence(input){
-    check();if(pending||encoding)throw new DeviceExecutionError('execution_control_busy');encoding=true;let call;
-    try{const selected=await journal.prepareRunFence(input);check();
-     if(selected.replay){if(!selected.ack)throw new DeviceExecutionError('execution_run_fence_result_unknown');return selected;}
-     let resolve,reject;const response=new Promise((yes,no)=>{resolve=yes;reject=no;});response.catch(()=>{});
-     call={type:'RUN_FENCE_ACK',message:selected.request.frame.message_id,resolve,reject,
-      timer:setTimeout(()=>close(new DeviceExecutionError('execution_run_fence_timeout')),5000)};pending=call;
-     const [,result]=await Promise.all([journal.sendRunFence(transport,selected.request.ref.id),response]);return result;
-    }catch(error){close(error);throw error;}finally{if(call){clearTimeout(call.timer);if(pending===call)pending=null;}encoding=false;}
-   },
+   applyRunFence(input){return applyFence('RUN_FENCE_ACK',()=>journal.prepareRunFence(input),journal.sendRunFence,'execution_run_fence');},
+   applyTimeFence(operation,exit){return applyFence('TIME_FENCE_ACK',()=>journal.prepareTimeFence(operation,exit),journal.sendTimeFence,'execution_time_fence');},
    async cleanupCommand(id){
     check();if(pending||encoding)throw new DeviceExecutionError('execution_control_busy');encoding=true;let call,result;
     try{for(const [phase,ack,type] of [['deny_request','deny_ack','DENY_ENCODING_ACK'],['release_request','release_ack','RELEASE_ENCODING_ACK']]){

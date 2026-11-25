@@ -51,6 +51,10 @@ export function referenceTimeExitStore(db, bootId, domain, supervisor, receiverR
     const count=db.prepare('SELECT target_count FROM time_provider_reference_exit_cut WHERE operation_id=?').pluck().get(operationId);
     if(count===undefined) return null;
     const retired=db.prepare('SELECT count(*) FROM time_provider_reference_exit_retired WHERE operation_id=?').pluck().get(operationId);
+    if(Number(db.pragma('user_version',{simple:true}))>=112){
+      const acknowledged=db.prepare("SELECT count(*) FROM execution_time_fence_frame WHERE operation_id=? AND phase='ack'").pluck().get(operationId);
+      return {target_count:count,retired_count:retired,acknowledged_count:acknowledged};
+    }
     return {target_count:count,retired_count:retired};
   }
 

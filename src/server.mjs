@@ -423,11 +423,17 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   supervision?.onLost(() => closeFor('supervisor_lost'));
   timeProviderLink?.onLost(() => closeFor('provider_lost'));
   if(!closing && (referencePublication?.invalidate || (supervision && storage.reconcileReferenceProtection))){
+    let timeProtection=null;
     referenceWatcher=setInterval(()=>{
       try {
         referencePublication?.current();
         const pending=referencePublication?.reconcileProtection?.() ?? storage.reconcileReferenceProtection?.();
         void pending?.catch(()=>{});
+        const apply=storage.workerLaunches?.applyTimeProtection;
+        if(apply&&!timeProtection){
+          const operation=referencePublication?.protectionFenceSource?.()?.invalidation.cause_ref.id;
+          if(operation)timeProtection=apply(operation).catch(()=>{}).finally(()=>{timeProtection=null;});
+        }
       }
       catch { closeFor('authority_changed'); }
     },500);

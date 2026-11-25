@@ -20,6 +20,27 @@ function wireInvalidation(body,cause_ref,protection_operation_ref) {
   return {...value,invalidation_digest:digest(canonicalize(value))};
 }
 
+export function readReferenceTimeFenceSource(db,operationId) {
+  const row=db.prepare(`SELECT
+    i.body_jcs,i.body_digest,p.body_jcs,p.body_digest,c.body_jcs,c.body_digest,i.service_boot_id
+    FROM time_provider_reference_invalidation i
+    JOIN time_provider_reference_protection p USING(operation_id)
+    JOIN time_provider_reference_exit_cut c USING(operation_id) WHERE i.operation_id=?`).raw().get(operationId);
+  if(!row)return null;
+  const [invalidationText,invalidationDigest,workText,workDigest,cutText,cutDigest,bootId]=row;
+  const work=original(workText,workDigest);
+  if(!work.wire_invalidation_ref)return null;
+  const causeRef=ref(operationId,invalidationDigest),cutRef=referenceExitCutRef(operationId,cutDigest);
+  const body=original(invalidationText,invalidationDigest),cut=original(cutText,cutDigest);
+  const invalidation=wireInvalidation(body,causeRef,cutRef);
+  if(body.operation_id!==operationId||body.service_boot_id!==bootId||!body.old_binding||
+    !same(work.invalidation_ref,causeRef)||!same(cut.invalidation_ref,causeRef)||!same(work.exit_cut_ref,cutRef)||
+    !same(work.domain_ref,body.domain_ref)||!same(cut.domain_ref,body.domain_ref)||
+    work.minimum_time_generation!==body.minimum_time_generation||
+    !same(work.wire_invalidation_ref,ref(invalidation.invalidation_id,invalidation.invalidation_digest)))throw new Error('reference_time_fence_source');
+  return {invalidation,issued_cut_revision:work.issued_cut_revision,targets:cut.targets};
+}
+
 export function referenceTimeInvalidationStore(db, bootId, binding, supervisor = null, recoveryExits = null) {
   const runtime=JSON.parse(binding.text), {clock_domain_id,descriptor_digest}=runtime.clock_domain_descriptor;
   const domain_ref={clock_domain_id,descriptor_digest};
@@ -75,22 +96,9 @@ export function referenceTimeInvalidationStore(db, bootId, binding, supervisor =
 
   function fenceSource() {
     if(!committed||!db.open||schema<92)return null;
-    const [invalidationText,invalidationDigest,workText,workDigest,cutText,cutDigest]=db.prepare(`SELECT
-      i.body_jcs,i.body_digest,p.body_jcs,p.body_digest,c.body_jcs,c.body_digest
-      FROM time_provider_reference_invalidation i
-      JOIN time_provider_reference_protection p USING(operation_id)
-      JOIN time_provider_reference_exit_cut c USING(operation_id) WHERE i.operation_id=?`).raw().get(committed.id)??[];
-    if(!workText)throw new Error('reference_time_fence_source');
-    const work=original(workText,workDigest);
-    if(!work.wire_invalidation_ref)return null;
-    const body=original(invalidationText,invalidationDigest),cut=original(cutText,cutDigest),cutRef=referenceExitCutRef(committed.id,cutDigest);
-    const invalidation=wireInvalidation(body,committed,cutRef);
-    if(body.operation_id!==committed.id||invalidationDigest!==committed.digest||!body.old_binding||
-      !same(work.invalidation_ref,committed)||!same(cut.invalidation_ref,committed)||!same(work.exit_cut_ref,cutRef)||
-      !same(body.domain_ref,domain_ref)||!same(work.domain_ref,domain_ref)||!same(cut.domain_ref,domain_ref)||
-      work.minimum_time_generation!==body.minimum_time_generation||
-      !same(work.wire_invalidation_ref,ref(invalidation.invalidation_id,invalidation.invalidation_digest)))throw new Error('reference_time_fence_source');
-    return {invalidation,issued_cut_revision:work.issued_cut_revision,targets:cut.targets};
+    const source=readReferenceTimeFenceSource(db,committed.id);
+    if(source&&!same(source.invalidation.cause_ref,committed))throw new Error('reference_time_fence_source');
+    return source;
   }
 
   return Object.freeze({

@@ -60,7 +60,7 @@ async function raw(t, mode, setup, provider=false, previous=null, fixturePort=nu
       finally{db.close();}
     }
   }
-  if(mode==='time-provider-invalidation-source')await migrateStorage(dir,92);
+  if(mode==='time-provider-invalidation-source')await migrateStorage(dir,111);
   if(mode==='time-provider-authentication') await migrateStorage(dir,81);
   if(mode==='time-provider-anchor'||mode==='time-provider-anchor-write-fault') {
     await migrateStorage(dir,87);
@@ -678,7 +678,7 @@ test('参考授时保护待办漏写时回滚整笔，进程仍拒绝恢复采�
  }finally{db.close();}
 });
 
-test('参考授时撤销从真实锚点与同事务出口切点恢复 TIME_FENCE 原件',providerOptions,async t=>{
+test('参考授时撤销从真实锚点与同事务出口切点恢复 TIME_FENCE 原件并保留迁移前丢失资格的事实',providerOptions,async t=>{
  const run=await raw(t,'time-provider-invalidation-source',null,true);
  const frame=await until(()=>run.output.frames.find(f=>f.event==='reference-invalidation'));
  assert.equal(frame.beforeSource,null);
@@ -703,7 +703,15 @@ test('参考授时撤销从真实锚点与同事务出口切点恢复 TIME_FENCE
  })),'c2w');
  assert.deepEqual(decoded.frame.body.invalidation,invalidation);
  run.child.stdin.end('stop\n');assert.equal((await run.closed)[0],0);
+ const originals=database=>['service_state','schema_migration','time_provider_reference_anchor','time_provider_reference_invalidation',
+  'time_provider_reference_protection','time_provider_reference_exit_cut','execution_frame_record'].map(table=>{
+   if(table==='service_state')return database.prepare('SELECT service_id,database_instance_id FROM service_state').raw().get();
+   if(table==='schema_migration')return database.prepare("SELECT * FROM schema_migration WHERE to_revision<>'112' ORDER BY CAST(to_revision AS INTEGER)").raw().all();
+   if(table==='execution_frame_record')return database.prepare('SELECT record_id,frame_jcs,wire FROM execution_frame_record ORDER BY record_id').raw().all();
+   return database.prepare('SELECT * FROM '+table+' ORDER BY rowid').raw().all();
+  });
  const db=new Database(path.join(run.dir,'controller.sqlite'),{fileMustExist:true});
+ let before;
  try{
   const [text,cutDigest]=db.prepare('SELECT body_jcs,body_digest FROM time_provider_reference_exit_cut').raw().get();
   const cut=JSON.parse(text),work=JSON.parse(db.prepare('SELECT body_jcs FROM time_provider_reference_protection').pluck().get());
@@ -716,7 +724,15 @@ test('参考授时撤销从真实锚点与同事务出口切点恢复 TIME_FENCE
   const {invalidation_digest,...unsigned}=invalidation;
   assert.equal(hash(unsigned),invalidation_digest);
   assert.deepEqual(db.pragma('foreign_key_check'),[]);
+  before=originals(db);
  }finally{db.close();}
+ assert.equal((await migrateStorage(run.dir,112)).schema_revision,'112');
+ const upgraded=new Database(path.join(run.dir,'controller.sqlite'),{fileMustExist:true});
+ try{
+  assert.deepEqual(originals(upgraded),before);
+  assert.equal(upgraded.prepare('SELECT count(*) FROM execution_time_fence_frame').pluck().get(),0);
+  assert.deepEqual(upgraded.pragma('foreign_key_check'),[]);
+ }finally{upgraded.close();}
 });
 
 test('时间提供者在确认前断开时保留归档和未释放预约', {

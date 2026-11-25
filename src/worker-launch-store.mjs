@@ -157,6 +157,26 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     const targets=db.transaction(()=>device_ids.map(deviceId=>readRunProtectionExits(db,deviceId,fixed))).immediate();
     return {state:targets.every(target=>target.state==='acknowledged')?'acknowledged':'pending',targets};
   }
+  async function applyTimeProtection(operation){
+    available();need(uuid.test(operation),'time_protection_operation');
+    const targets=db.prepare(`SELECT t.exit_id,t.ipc_session_id,t.binding_id,r.launch_id FROM time_provider_reference_exit_target t
+      JOIN time_provider_reference_invalidation i USING(operation_id) JOIN execution_session s USING(ipc_session_id)
+      JOIN worker_runtime_binding r USING(runtime_id) WHERE t.operation_id=? AND i.service_boot_id=? AND s.service_boot_id=i.service_boot_id
+      AND NOT EXISTS(SELECT 1 FROM time_provider_reference_exit_retired a WHERE a.operation_id=t.operation_id AND a.exit_id=t.exit_id)
+      AND NOT EXISTS(SELECT 1 FROM execution_time_fence_frame f WHERE f.operation_id=t.operation_id AND f.exit_id=t.exit_id)
+      ORDER BY t.exit_id COLLATE BINARY`).raw().all(operation,bootId);
+    for(const [exit,session,binding,launch] of targets){
+      if(!isOpen()||!db.open)return;
+      const client=executionClients.get(launch),module=modules.get(launch);
+      if(client?.binding.ipc_session_id!==session||!module||client.state.phase!=='ready'||
+       !deviceExecutionCapabilities.reference.every(feature=>client.negotiation.selected_features.includes(feature)))continue;
+      const configured=db.prepare(`SELECT 1 FROM device_module_frame WHERE channel_id=? AND direction='w2c' AND message_type='EXECUTION_BOUND'
+        AND json_extract(frame_jcs,'$.body.execution_ref.id')=? LIMIT 1`).pluck().get(module.binding.ipc_session_id,binding);
+      if(!configured)continue;
+      try{await client.applyTimeFence(operation,exit);}
+      catch(error){if(error.code?.startsWith('SQLITE_'))throw error;}
+    }
+  }
   const starting=new Set();
   const managedEventLaunches=new Set();
   const api=Object.freeze({runtime,authorization,controlBarrier,eventScopes,
@@ -231,6 +251,7 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     initialDeviceFence(value,device){return currentExecution(value).initialFence(device);},
     openInitialDevice(value,reference){return currentExecution(value).initialOpen(reference,{ready:true});},
     ...(Number(service.schema_revision)>=79&&{applyRunProtection}),
+    ...(Number(service.schema_revision)>=112&&{applyTimeProtection}),
     queueCommandEncoding(id){
       if(commandTasks.has(id))return;
       // 受理响应先完成本轮微任务；后台执行从下一事件轮开始，避免占用响应校验预算。
