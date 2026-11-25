@@ -1,11 +1,13 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import crypto from 'node:crypto';
 import dgram from 'node:dgram';
 import {once} from 'node:events';
 import {monitorEventLoopDelay} from 'node:perf_hooks';
 import https from 'node:https';
 import canonicalize from 'canonicalize';
+import Database from 'better-sqlite3';
 import {setTimeout as delay} from 'node:timers/promises';
 import {connectCoreSupervisor} from '../../dist/supervisor-control.mjs';
 import {openNativeClock} from '../../dist/native-clock.mjs';
@@ -316,6 +318,7 @@ async function openAutomationTarget(device){
  manager.real.refresh();const token=manager.token(['control.read','device.recover','device.command']);
  const value=await openOrdinaryGate(device,true,token);
  const result={ready_ref:value.ready.ref,control:value.control};
+ observeScheduledDispatch=input.automation_peer.scheduled_reference_withdrawal===true;
  report({event:'automation-target-ready',...result,
   remaining_ms:Number((BigInt(value.opening.value.plan.expires_tick_ns)-clock.tick())/1000000n)});return result;
 }
@@ -395,6 +398,26 @@ source.subscribeLost(error=>report({event:'core-source-lost',code:error.code,sta
 async function waitPastSource(deadline){while(clock.tick()<=BigInt(deadline))await delay(Math.max(1,Number((BigInt(deadline)-clock.tick())/1000000n)+25));}
 const clock=openNativeClock(),hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 let referenceLink=null,referencePublication=null,referenceWithdrawn=false;
+let referenceWithdrawalReader=null,readScheduledDispatch=null,observeScheduledDispatch=false;
+function withdrawBeforeScheduledWrite(){
+ if(!observeScheduledDispatch)return false;
+ referenceWithdrawalReader??=new Database(path.join(options['--data-dir'],'controller.sqlite'),{readonly:true,fileMustExist:true});
+ readScheduledDispatch??=referenceWithdrawalReader.prepare(`SELECT f.command_id,f.permit_id,g.guard_id,
+  json_extract(f.body_jcs,'$.seal.send_window.before_tick_ns') AS before_tick
+  FROM command_dispatch_request d JOIN command_final_admission f ON f.transaction_id=d.final_transaction_id
+  JOIN command_guard_ack g ON g.guard_id=d.guard_id
+  WHERE g.disposition='installed' AND json_extract(f.body_jcs,'$.guard.time_required')=1
+  AND NOT EXISTS(SELECT 1 FROM command_dispatch_write w WHERE w.permit_id=d.permit_id)`).raw();
+ const selected=readScheduledDispatch.get();
+ if(!selected)return false;
+ const [command_id,permit_id,guard_id,before_tick]=selected;
+ const tick=clock.tick();
+ if(tick>=BigInt(before_tick))return false;
+ referenceWithdrawn=true;
+ report({event:'scheduled-reference-withdrawn',command_id,permit_id,guard_id,tick_ns:String(tick)});
+ referenceWithdrawalReader.close();referenceWithdrawalReader=null;readScheduledDispatch=null;
+ return true;
+}
 async function collectCommandReference(binding){
  const udp=dgram.createSocket('udp4');
  try{
@@ -421,7 +444,7 @@ async function collectCommandReference(binding){
   const polls=business.openTimeProviderPolls({limits:{max_outstanding:1,max_reserved_bytes:reserved_bytes},readSource:()=>({...facts,valid_before_tick_ns:valid}),
    readAuthentication,assertCurrent,observeRetirement:source.observeTimeProviderRetirement,assertRetirement:source.assertTimeProviderRetirement});
   const publication=business.openReferenceTimeAnchor({sourceSlot:slot,readContext:polls.referenceContext,
-   readApproval:()=>referenceWithdrawn?null:{format:'leafseamer-reference-approval/1',authentication:'trusted_network',source_digest:facts.source_digest,
+   readApproval:()=>referenceWithdrawn||withdrawBeforeScheduledWrite()?null:{format:'leafseamer-reference-approval/1',authentication:'trusted_network',source_digest:facts.source_digest,
     approval_ref:facts.approval_ref,configuration_ref:facts.configuration_ref,profile_ref:bundleAuthority?.references.profile_ref??fixed('profile.command-time'),
     policy_ref:bundleAuthority?.references.policy_ref??fixed('policy.command-time'),
     time_scale:'UTC',leap_mode:'normal_only',smear:false,elapsed_error_ppm:0,span_quantization_ns:'1000',max_span_ns:'2000000000',
@@ -1234,4 +1257,4 @@ await bindingPeer?.close();
 report({event:'done',record:await source.queryLaunch(key)});
 await performanceCapture.stop();
 scheduling?.disable();
-process.stdin.setEncoding('utf8').on('data',data=>{if(data==='stop\n'){clearInterval(guiTimer);commandAgent?.destroy();commandServer?.close();manager?.real.stop();intakeClient?.close();business?.close();referenceLink?.close();source.close();process.stdin.destroy();}});process.stdin.resume();
+process.stdin.setEncoding('utf8').on('data',data=>{if(data==='stop\n'){clearInterval(guiTimer);commandAgent?.destroy();commandServer?.close();manager?.real.stop();intakeClient?.close();business?.close();referenceLink?.close();referenceWithdrawalReader?.close();source.close();process.stdin.destroy();}});process.stdin.resume();
