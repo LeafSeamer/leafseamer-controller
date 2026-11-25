@@ -106,7 +106,8 @@ export function deviceExecutionGate({binding,transmissions,tick,signal,failed,li
    const guard=snapshot.guards.find(v=>v.permit_id===intent.permit_id||v.guard_id===intent.guard_id);
    if(guard)need(guard.permit_id===intent.permit_id&&guard.guard_id===intent.guard_id&&guard.guard_digest===intent.guard_digest&&guard.command_id===intent.command_id,'gate_guard_binding');
    if(guard)need(same(guard.automation_binding,intent.automation_binding),'gate_guard_binding');
-   if(guard||selector?.kind==='run_generation'||selector?.kind==='reference_time')need(matches(intent,guard),'gate_selector_binding');
+   // TIME切点可包含核心已签发但本出口尚未收到Guard的意图。迟到的原Guard仍须通过新代次下界。
+   if(guard||selector?.kind==='run_generation')need(matches(intent,guard),'gate_selector_binding');
    anchors.set(intent.permit_id,intent);
   }
   const transmission_coverage=b.open_transmission_intents.map(tx=>{
@@ -268,7 +269,7 @@ export function deviceExecutionGate({binding,transmissions,tick,signal,failed,li
   authorizationRevision=BigInt(b.authorization_revision);
   if(barrier.cut_id)cuts.get(barrier.cut_id).opened=true;
   active=freeze({access:structuredClone(a),gate_token:b.gate_token,gate_revision:b.gate_revision,authorization_revision:b.authorization_revision,lease_until_tick_ns:b.lease_until_tick_ns,
-   issued_cut_revision:String(issuedCut),fenced_permit_ids:[...fencedPermits]});
+   issued_cut_revision:String(issuedCut),fenced_permit_ids:[...fencedPermits],reference_time_snapshot:time});
   return remember(key,b,candidate(frame,'OPEN_GATE_ACK',{gate_token:b.gate_token,gate_revision:b.gate_revision,state:'open',run_deny_snapshot_revision:run.snapshot_revision,
    run_deny_snapshot_digest:run.snapshot_digest,command_deny_snapshot_revision:command.snapshot_revision,command_deny_snapshot_digest:command.snapshot_digest,
    reference_time_snapshot_ref:time===null?null:{id:time.snapshot_id,revision:time.snapshot_revision,digest:time.snapshot_digest},gate_access_ref:{id:a.access_id,revision:a.revision,digest:a.access_digest}}));

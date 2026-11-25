@@ -15,6 +15,28 @@ const maximumBundleBytes=32768;
 const eraSpan=word*word*1000000000n;
 export const utcFloor=(n,d)=>n<0n?(n-d+1n)/d:n/d;
 export const utcCeil=(n,d)=>-utcFloor(-n,d);
+const million=1000000n;
+
+export function referenceElapsed(delta,profile){
+  const rate=BigInt(profile.elapsed_error_ppm),quantization=tick(profile.span_quantization_ns)*million;
+  const lower=delta*(million-rate)-quantization;
+  return {lower:lower<0n?0n:lower,upper:delta*(million+rate)+quantization};
+}
+
+export function referenceBoundsAt({m1,m4,lowerAtAnchor,upperAtAnchor,upstreamAtM1,profile},now){
+  const sinceAnchor=referenceElapsed(now-m4,profile),sinceExchange=referenceElapsed(now-m1,profile);
+  const anchorAge=utcCeil(sinceAnchor.upper,million),exchangeAge=utcCeil(sinceExchange.upper,million);
+  return {lower:lowerAtAnchor+utcFloor(sinceAnchor.lower,million),upper:upperAtAnchor+anchorAge,
+    anchorAge,exchangeAge,upstreamAge:upstreamAtM1+exchangeAge};
+}
+
+export function referenceAnchorInterval(t2,t3,m1,m4,profile,error){
+  const first=stamp(t2),last=stamp(t3);
+  if(first>last)return null;
+  const lower=utcFloor(last-tick(error.t3_error_ns)*word,word);
+  const upper=utcCeil((first+tick(error.t2_error_ns)*word)*million+referenceElapsed(m4-m1,profile).upper*word,word*million);
+  return lower<=upper?{lower_ns:String(lower),upper_ns:String(upper)}:null;
+}
 
 export function resolveReferenceNtpTimestamp(bytes,offset,lower,upper,error){
   const seconds=String(bytes.readUInt32BE(offset)),fraction=String(bytes.readUInt32BE(offset+4));

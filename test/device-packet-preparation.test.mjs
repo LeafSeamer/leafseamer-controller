@@ -12,6 +12,7 @@ import {decodeExecutionPayload} from '../dist/device-execution-channel.mjs';
 import {openObsCutWriterSession,ObsCutEntryRejected} from '../dist/obs-discovery.mjs';
 import {encodeObsCutPacket,readObsCutPacket,obsCutPrimitive,obsCutPacketBytes} from '../dist/obs-cut-packet.mjs';
 import {deviceExecutionVersion} from '../dist/sdk/device-execution.mjs';
+import {referenceBundleAuthority} from './fixtures/reference-bundle-authority.mjs';
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(typeof value==='string'?value:canonicalize(value)).digest('hex');
 const raw=value=>Buffer.from(JSON.stringify(value));
 const ref=id=>({id,revision:'1',digest:hash(id)});
@@ -38,7 +39,8 @@ async function fixture(options={}){
  function encode(id='prepare',value=42,origin=null){
   const request={context_id:'context',idempotency_key:'key.'+id,device_id:deviceId,action_id:options.action?.action_id??'leafseamer.simulator.value.set',
    capability_version:options.action?.capability_version??'1.0.0',parameters:options.parameters??{value},
-   expected_control:{epoch:'epoch',version:'1'},origin:'manual',automation_binding:null,required_completion:'effect_verified',preconditions:[],dispatch:{mode:'immediate',max_queue_ms:1000},evidence_timeout_ms:1000};
+   expected_control:{epoch:'epoch',version:'1'},origin:'manual',automation_binding:null,required_completion:'effect_verified',preconditions:[],
+   dispatch:options.dispatch??{mode:'immediate',max_queue_ms:1000},evidence_timeout_ms:1000};
   if(origin){const {run_id,definition_version,arm_generation,step_id,logical_action_id}=origin;
    Object.assign(request,{origin:'automation',automation_binding:origin,run_binding:{run_id,definition_version,arm_generation,step_id,logical_action_id,grant_id:'grant',grant_revision:'1'}});
   }
@@ -79,6 +81,8 @@ async function sending(options={}){
  const run={controller_scope:f.binding.scope,snapshot_revision:'0',entries:[]},commands={scope:f.binding.scope,device_id:f.binding.device_id,snapshot_revision:'0',entries:[]};
  const time={snapshot_id:'time_snapshot',domain:{...f.binding.scope,provider_id:'provider',provider_boot_id:'provider_boot',runtime_binding_ref:ref('runtime'),
   clock_domain_id:f.binding.clock_domain_id,descriptor_digest:f.binding.descriptor_digest,clock_generation:'1'},snapshot_revision:'1',minimum_time_generation:'1',state_ref:ref('time_state')};
+ const reference=options.reference?.(time.domain,origin);
+ if(reference)time.state_ref=reference.reference_context.state_ref;
  const open=f.envelope('OPEN_GATE','open_message',{barrier_id:'barrier',gate_token:'token',device_session_id:f.binding.device_session_id,control_epoch:'epoch',control_version:'1',gate_revision:'1',
   authorization_revision:'1',clock_domain_id:f.binding.clock_domain_id,lease_until_tick_ns:'100',descriptor_digest:f.binding.descriptor_digest,
   run_deny_snapshot:{...run,snapshot_digest:hash(run)},command_deny_snapshot:{...commands,snapshot_digest:hash(commands)},reference_time_snapshot:{...time,snapshot_digest:hash(time)},
@@ -93,10 +97,10 @@ async function sending(options={}){
   grant_id:'grant',grant_revision:'1',arm_generation:origin.arm_generation});
  const guardBody={guard_id:'guard',permit_id:'permit',command_id:encoded.body.command_id,device_id:f.binding.device_id,controller_boot_id:f.binding.controller_boot_id,
   worker_boot_id:f.binding.worker_boot_id,ipc_session_id:f.binding.ipc_session_id,binding:authorization,authorization_revision:'1',authorization_deadline_tick_ns:'90',
-  clock_domain_id:f.binding.clock_domain_id,time_required:false,capacity_reservation_id:'reservation',descriptor_digest:f.binding.descriptor_digest,
-  admission_origin:'non_panel',panel_binding:null,automation_binding:origin,reference_time:null,gate_access_ref:accessRef,ownership_ref:ownership};
+  clock_domain_id:f.binding.clock_domain_id,time_required:Boolean(reference),capacity_reservation_id:'reservation',descriptor_digest:f.binding.descriptor_digest,
+  admission_origin:'non_panel',panel_binding:null,automation_binding:origin,reference_time:reference?.reference_time??null,gate_access_ref:accessRef,ownership_ref:ownership};
  const guard={...guardBody,guard_digest:hash(guardBody)},contentDigest=encoded.body.encoding_authorization.content_digest;
- const install=f.envelope('GUARD_INSTALL','guard_message',{guard,content_digest:contentDigest,schedule_guard:null,reference_context:null});
+ const install=f.envelope('GUARD_INSTALL','guard_message',{guard,content_digest:contentDigest,schedule_guard:reference?.schedule_guard??null,reference_context:reference?.reference_context??null});
  const packet=f.cache.describe('prepare').packet,packetRef={packet_id:packet.packet_id,packet_digest:packet.packet_digest};
  const window={clock_domain_id:f.binding.clock_domain_id,descriptor_digest:f.binding.descriptor_digest,earliest_tick_ns:'1',latest_tick_ns:'80'};
  const intent={permit_id:'permit',command_id:packet.command_id,attempt_id:packet.attempt_id,dispatch_intent_id:'dispatch_intent',worker_boot_id:f.binding.worker_boot_id,
@@ -184,6 +188,93 @@ function timeFence(f,items=[]){
   cancel_transmissions:[],cancel_ledger_digest:hash([]),invalidation:{...invalidation,invalidation_digest:hash(invalidation)},
   attempt_binding:{cut_id:'time_cut',cut_digest:hash('cut'),target_exit_id:f.binding.writer_exit_id,attempt_ordinal:'1',previous_barrier_id:null}}));
 }
+const scheduled={mode:'scheduled',occurrence_id:'occurrence',not_before:'1970-01-01T00:00:00.000Z',
+ not_after:'1970-01-01T00:00:00.001Z',clock_policy_revision:'1',max_queue_ms:1000};
+function scheduledReference(domain,origin,window={not_before_utc_ns:'0',not_after_utc_ns:'1000000'}){
+ const authority=referenceBundleAuthority({serviceId:domain.authority_service_id,configuration:ref('config'),
+  timeBounds:{lower_ns:'0',upper_ns:'1000000'}});
+ const stamp={era:'0',seconds:'2208988800',fraction:String((996970n*(1n<<32n)+999999999n)/1000000000n)};
+ const {bundle}=authority.readBundleOriginals({
+  runtime:{service_id:domain.authority_service_id,database_instance_id:domain.database_instance_id,launch_intent:{member_id:domain.provider_id},
+   admission_receipt:{member_boot_id:domain.provider_boot_id},clock_domain_descriptor:domain,runtime_binding_id:domain.runtime_binding_ref.id},
+  packet:{response_deadline_tick_ns:'3',request_size:48,response_size:48,ntp_version:4,ntp_mode:4,leap:0,stratum:1,precision:-20,
+   root_delay_word:'0',root_dispersion_word:'0',request_digest:hash('request'),response_digest:hash('response'),t2:stamp,t3:stamp},
+  anchor:{anchor_id:'anchor',m1_tick_ns:'1',m4_tick_ns:'2',runtime_digest:domain.runtime_binding_ref.digest,authorization:{endpoint_ref:ref('endpoint')},
+   poll_ref:ref('poll'),capture_ref:ref('capture'),lower_utc_ns:'995970',upper_utc_ns:'998972'},
+  assessment:{tick_ns:'2',lower_utc_ns:'995970',upper_utc_ns:'999972',exchange_age_ns:'1001',anchor_age_ns:'1000',upstream_age_ns:'2001'}
+ });
+ const utc={guard_id:'utc',revision:'1',model_id:'reference-bound/1',model_revision:'1',binding:bundle.anchor.binding,
+  anchor_ref:{...ref(bundle.anchor.anchor_id),digest:bundle.anchor.anchor_digest},
+  assessment_ref:{...ref(bundle.assessment.assessment_id),digest:bundle.assessment.assessment_digest},window,expires_tick_ns:'90'};
+ const schedule={guard_id:'schedule',revision:'1',origin_service_id:origin.origin_scope.authority_service_id,origin_database_instance_id:origin.origin_scope.database_instance_id,
+  occurrence_ref:ref('occurrence'),definition_artifact_ref:ref('definition'),schedule_version:'1',activation_ref:ref('activation'),admission_ref:ref('admission'),
+  execution_id:origin.execution_id,step_id:origin.step_id,step_window_ref:ref('step_window'),window,queue_deadline_tick_ns:'80',local_clock_domain:domain};
+ const schedule_guard={...schedule,guard_digest:hash(schedule)};
+ return {reference_context:bundle,schedule_guard,reference_time:{context_ref:{...ref(bundle.bundle_id),digest:bundle.bundle_digest},
+  utc_guard:{...utc,guard_digest:hash(utc)},schedule_ref:{...ref(schedule.guard_id),digest:schedule_guard.guard_digest}}};
+}
+
+test('定时发送在设备出口重算 UTC，拒绝提前发送和截止等号',async()=>{
+ for(const [dispatch,reference,tick,write] of [
+  [scheduled,scheduledReference,29n,true],
+  [scheduled,scheduledReference,30n,false],
+  [{...scheduled,not_before:scheduled.not_after,not_after:'1970-01-01T00:00:00.002Z'},
+   (domain,origin)=>scheduledReference(domain,origin,{not_before_utc_ns:'1000000',not_after_utc_ns:'2000000'}),29n,false],
+ ]){
+  const f=await sending({origin:automationOrigin(),dispatch,reference});
+  const ack=await f.response(await f.writer.installGuard(raw(f.install)));
+  assert.equal(ack.body.reference_time_digest,hash(f.install.body.guard.reference_time));
+  assert.equal(ack.body.schedule_guard_digest,f.install.body.schedule_guard.guard_digest);
+  f.tick(tick);
+  const report=await f.response(await f.writer.dispatch(raw(f.dispatch)));
+  assert.equal(report.body.disposition,write?'in_flight':'not_sent');assert.equal(f.writes(),Number(write));
+ }
+});
+
+test('定时守卫核对步骤身份，发送许可不得延长原队列截止',async()=>{
+ function changed(fields){
+  return (domain,origin)=>{
+   const value=scheduledReference(domain,origin),{guard_digest,...unsigned}=value.schedule_guard;
+   const schedule={...unsigned,...fields};
+   value.schedule_guard={...schedule,guard_digest:hash(schedule)};
+   value.reference_time.schedule_ref.digest=value.schedule_guard.guard_digest;
+   return value;
+  };
+ }
+ const wrong=await sending({origin:automationOrigin(),dispatch:scheduled,reference:changed({step_id:'other_step'})});
+ await assert.rejects(wrong.writer.installGuard(raw(wrong.install)),/transmission_reference_schedule/);
+ const expired=await sending({origin:automationOrigin(),dispatch:scheduled,reference:changed({queue_deadline_tick_ns:'79'})});
+ await expired.writer.installGuard(raw(expired.install));
+ await assert.rejects(expired.writer.dispatch(raw(expired.dispatch)),/transmission_reference_dispatch/);
+ assert.equal(expired.writes(),0);
+});
+
+test('异步预检后在真实模块写入前复核定时窗口或失效代次',async()=>{
+ for(const cause of ['window','time_fence']){
+  const selected=deferred(),release=deferred(),f=await sending({origin:automationOrigin(),dispatch:scheduled,reference:scheduledReference,entryAtTransport:true,
+   async write(input,module){selected.resolve();await release.promise;input.enterTransmission();return module.execution.writePrimitive(input);}});
+  await f.writer.installGuard(raw(f.install));
+  const pending=f.writer.dispatch(raw(f.dispatch));await selected.promise;
+  if(cause==='window')f.tick(30n);
+  else{
+   const ack=await f.response(await f.gateOwner.receive(raw(timeFence(f,[f.dispatch.body.permit.transmission]))));
+   assert.equal(ack.body.transmission_coverage[0].proof,'discarded_unconsumed');
+  }
+  release.resolve();
+  assert.equal((await pending).body.disposition,'not_sent');
+  assert.equal((await f.module.captureBaseline(f.device)).write_sequence,'0');
+  assert.equal(f.gateOwner.state.open,true);
+ }
+});
+
+test('TIME_FENCE覆盖已签发但未收到的定时守卫，迟到守卫无法恢复资格',async()=>{
+ const f=await sending({origin:automationOrigin(),dispatch:scheduled,reference:scheduledReference});
+ const ack=await f.response(await f.gateOwner.receive(raw(timeFence(f,[f.dispatch.body.permit.transmission]))));
+ assert.equal(ack.body.transmission_coverage[0].proof,'never_received');
+ await assert.rejects(f.writer.installGuard(raw(f.install)),/transmission_reference_assessment/);
+ assert.equal(f.writes(),0);
+});
+
 test('TIME_FENCE提高OPEN的时间下界，已登记的即时发送仍能进入出口',async()=>{
  const selected=deferred(),release=deferred(),f=await sending({preparation:cache=>({describe:cache.describe,
   async withPacket(...args){selected.resolve();await release.promise;return cache.withPacket(...args);}})});

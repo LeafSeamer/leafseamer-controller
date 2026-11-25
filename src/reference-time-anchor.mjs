@@ -2,9 +2,8 @@ import {createHash, randomUUID} from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {clockInteger} from './native-clock.mjs';
 import {decodeReferenceBundle,encodeReferenceBundle,referencePacketSummary,validateReferenceBundle,
-  resolveReferenceNtpTimestamp,utcFloor as floor,utcCeil as ceil} from './reference-time-bundle.mjs';
+  referenceAnchorInterval,referenceBoundsAt,resolveReferenceNtpTimestamp,utcFloor as floor} from './reference-time-bundle.mjs';
 
-const fraction = 1n << 32n;
 const million = 1000000n;
 const signed = /^(0|-?[1-9][0-9]{0,29})$/;
 const hash = /^sha256:[0-9a-f]{64}$/;
@@ -58,12 +57,6 @@ function evidence(value, expected, p, context) {
   return e;
 }
 
-function elapsed(delta, p) {
-  const error = BigInt(p.elapsed_error_ppm), quantization = clockInteger(p.span_quantization_ns)*million;
-  const lower = delta*(million-error)-quantization;
-  return {lower:lower<0n?0n:lower,upper:delta*(million+error)+quantization};
-}
-
 function derive(candidate, p, e) {
   const m1=clockInteger(candidate.m1_tick_ns), m4=clockInteger(candidate.m4_tick_ns);
   requireQualified(m4>=m1 && m4-m1<=clockInteger(p.max_span_ns));
@@ -72,12 +65,9 @@ function derive(candidate, p, e) {
   const bytes = Buffer.from(candidate.response,'base64url');
   try {
     const t2=resolveReferenceNtpTimestamp(bytes,32,lower,upper,e2), t3=resolveReferenceNtpTimestamp(bytes,40,lower,upper,e3);
-    requireQualified(t2.value<=t3.value);
-    const L=floor(t3.value-e3*fraction,fraction);
-    const U=ceil((t2.value+e2*fraction)*million+elapsed(m4-m1,p).upper*fraction,fraction*million);
-    requireQualified(L<=U);
     const word = ({era,seconds,fraction})=>({era,seconds,fraction});
-    return {lower_utc_ns:String(L),upper_utc_ns:String(U),t2:word(t2),t3:word(t3)};
+    const interval=referenceAnchorInterval(t2,t3,m1,m4,p,e);requireQualified(interval);
+    return {lower_utc_ns:interval.lower_ns,upper_utc_ns:interval.upper_ns,t2:word(t2),t3:word(t3)};
   } finally { bytes.fill(0); }
 }
 
@@ -85,9 +75,8 @@ function assess(anchor, context) {
   const {tick} = context, p=anchor.approval, e=anchor.evidence;
   const m1=clockInteger(anchor.m1_tick_ns), m4=clockInteger(anchor.m4_tick_ns);
   requireQualified(tick>=m4 && tick<clockInteger(p.valid_before_tick_ns) && tick<clockInteger(e.valid_before_tick_ns));
-  const sinceAnchor=elapsed(tick-m4,p), sinceExchange=elapsed(tick-m1,p);
-  const a=ceil(sinceAnchor.upper,million), x=ceil(sinceExchange.upper,million), u=clockInteger(e.upstream_age_at_m1_ns)+x;
-  const lower=utc(anchor.lower_utc_ns)+floor(sinceAnchor.lower,million), upper=utc(anchor.upper_utc_ns)+a;
+  const {lower,upper,anchorAge:a,exchangeAge:x,upstreamAge:u}=referenceBoundsAt({m1,m4,lowerAtAnchor:utc(anchor.lower_utc_ns),
+    upperAtAnchor:utc(anchor.upper_utc_ns),upstreamAtM1:clockInteger(e.upstream_age_at_m1_ns),profile:p},tick);
   requireQualified(a<clockInteger(p.max_anchor_age_ns) && x<clockInteger(p.max_exchange_age_ns) &&
     u<clockInteger(p.max_upstream_age_ns) && upper-lower<=2n*clockInteger(p.max_half_width_ns));
   return {status:'conditional',tick_ns:String(tick),lower_utc_ns:String(lower),upper_utc_ns:String(upper),
