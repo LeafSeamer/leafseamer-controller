@@ -112,7 +112,7 @@ export function timeProviderCaptureStore(db, identity, protection, publication =
 
   return Object.freeze({
     assertWritable() { writableKey(); },
-    store({attempt,reservation,candidate,authorize,network}) {
+    store({attempt,reservation,candidate,authorize,network,ntsBootstrap=null}) {
       need(!db.inTransaction, 'outer_transaction');
       authorize();
       validateDatagrams(candidate);
@@ -130,7 +130,7 @@ export function timeProviderCaptureStore(db, identity, protection, publication =
         const remainingBytes=reservation.reserved_bytes-(associated.length + plain.length + 12 + tagLength);
         need(plain.length <= maximum && associated.length <= 8192 && remainingBytes>=0,'capacity');
         const receipt=reference(body,bodyDigest);
-        const proposed=publication?.prepare({reservation,candidate,receipt,network,attempt});
+        const proposed=publication?.prepare({reservation,candidate,receipt,network,attempt,ntsBootstrap});
         const nonce = reserveNonce(key);
         const cipher = crypto.createCipheriv(algorithm,key.key,nonce,{authTagLength:tagLength});
         cipher.setAAD(associated);

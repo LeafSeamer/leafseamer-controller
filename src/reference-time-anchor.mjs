@@ -261,14 +261,14 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
     receiverReference,
     ...(invalidation && {protectionStatus:invalidation.status,reconcileProtection:invalidation.reconcile,
       invalidate(cause) { withdraw(head(),cause); }}),
-    prepare({reservation,candidate,receipt,network,attempt}) {
+    prepare({reservation,candidate,receipt,network,attempt,ntsBootstrap}) {
       if(withdrawn || reservation.source_slot!==sourceSlot) return null;
       const prior=head();
       try {
         const current=authority(prior), {now,p}=current;
         requireQualified(same(now.facts,reservation.authorization) && network.authentication===p.authentication);
         const packet_summary=readBundleOriginals?referencePacketSummary(candidate,attempt.valid_before_tick_ns):null;
-        const qualification_original=prepareEvidence&&normalize(prepareEvidence(candidate,receipt,current));
+        const qualification_original=prepareEvidence&&normalize(prepareEvidence(candidate,{...receipt,runtime_digest:binding.digest},current,ntsBootstrap));
         const e=acquireEvidence({...receipt,packet_summary,qualification_original},current);
         const result=derive(candidate,p,e);
         const body={format:'leafseamer-reference-anchor/1',model:'reference-bound/1',anchor_id:randomUUID(),service_boot_id:bootId,

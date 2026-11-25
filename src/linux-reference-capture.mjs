@@ -46,12 +46,12 @@ function targetName({name,port},endpoint){
   return name+':'+port;
 }
 
-function validateNetwork(network,providesReference){
+function validateNetwork(network){
   if(network?.authentication==='trusted_network'){
     need(exact(network,'authentication,endpoint')&&numericEndpoint(network.endpoint),'installed_source_endpoint');
     return;
   }
-  need(!providesReference&&exact(network,'authentication,default_target,key_endpoint,root_der,server_name,targets')&&
+  need(exact(network,'authentication,default_target,key_endpoint,root_der,server_name,targets')&&
     network.authentication==='nts'&&numericEndpoint(network.key_endpoint)&&dnsName(network.server_name)&&
     exact(network.default_target,'name,port')&&Array.isArray(network.targets)&&network.targets.length>=1&&network.targets.length<=16&&
     Array.isArray(network.root_der)&&network.root_der.length>=1&&network.root_der.length<=8&&
@@ -79,6 +79,7 @@ function validateNetwork(network,providesReference){
 
 function referenceInstallation(approval,configuration,endpointRef,current){
   const qualified=approval.reference;
+  const {authentication}=approval.network,nts=authentication==='nts';
   need(exact(qualified,'elapsed_error_ppm,independent_source_ref,leap_schedule,max_half_width_ns,max_upstream_age_ns,monitoring_ref,platform_qualification_ref,source_provenance_ref,span_quantization_ns,t2_error_ns,t3_error_ns,tref_error_ns,utc_mode')&&
     qualified.utc_mode==='normal_utc_no_smear'&&Number.isInteger(qualified.elapsed_error_ppm)&&
     qualified.elapsed_error_ppm>0&&qualified.elapsed_error_ppm<=1000,'reference_qualification');
@@ -106,20 +107,20 @@ function referenceInstallation(approval,configuration,endpointRef,current){
   const {approval_revision:revision}=approval,qualificationRef=ref('reference.qualification',hash(canonicalize(qualified)),revision);
   const method=id=>ref(id.replace('/','.'),hash(canonicalize({id,version:1})));
   const source=seal({source_id:'reference.source',revision,configured_server_ref:endpointRef,endpoint_set_ref:endpointRef,
-    effective_config_ref:configuration,authentication:'trusted_network',trust_policy_ref:qualificationRef},'source_digest');
+    effective_config_ref:configuration,authentication,trust_policy_ref:qualificationRef},'source_digest');
   const profile=seal({profile_id:'reference.profile',revision,model_id:'reference-bound/1',model_revision:'1',
-    collector_artifact_ref:ref('reference.collector',approval.provider_digest),protocol_artifact_ref:method('reference.ntp-v4'),
+    collector_artifact_ref:ref('reference.collector',approval.provider_digest),protocol_artifact_ref:method(nts?'reference.nts':'reference.ntp-v4'),
     platform_qualification_ref:qualified.platform_qualification_ref,clock_method_ref:method('reference.clock-boottime'),
     error_method_ref:method('qualified-server-envelope/1'),era_method_ref:method('auth-interval-era/1'),
     elapsed_model:'observed-delta-relative/1',elapsed_error_ppm:qualified.elapsed_error_ppm,span_quantization_ns:qualified.span_quantization_ns,
-    max_packet_bytes:48,time_scale:'posix-utc',leap_policy:'normal-only',smear_policy:'forbidden'},'profile_digest');
+    max_packet_bytes:nts?1232:48,time_scale:'posix-utc',leap_policy:'normal-only',smear_policy:'forbidden'},'profile_digest');
   const policy=seal({policy_id:'reference.policy',revision,max_exchange_span_ns:pollLease,max_anchor_age_ns:'32000000000',
     max_exchange_age_ns:'32000000000',max_upstream_age_ns:String(upstream),max_half_width_ns:String(halfWidth)},'policy_digest');
   const approvalDoc=seal({approval_id:approval.approval_id,revision,source_ref:ref(source.source_id,source.source_digest,revision),
     profile_ref:ref(profile.profile_id,profile.profile_digest,revision),qualification_ref:qualificationRef,
     authority_service_id:approval.scope.service_id,status:'approved'},'approval_digest');
   const issuer=referenceBundleIssuer({source,profile,policy,approval:approvalDoc});
-  const {approval_ref,policy_ref,profile_ref}=issuer.references;
+  const {approval_ref,policy_ref,profile_ref,source_ref}=issuer.references;
   let activeWindow=null,deadline=null;
   const elapsed=delta=>utcCeil(delta*(1000000n+rho),1000000n)+q;
 
@@ -137,7 +138,7 @@ function referenceInstallation(approval,configuration,endpointRef,current){
         deadline=tick+maximum(0n,activeWindow.upper-upper-q)*1000000n/(1000000n+rho);
       }
       need(lower>=activeWindow.lower&&upper<activeWindow.upper&&tick<deadline,'reference_leap_window');
-      return {format:'leafseamer-reference-approval/1',authentication:'trusted_network',time_scale:'UTC',leap_mode:'normal_only',smear:false,
+      return {format:'leafseamer-reference-approval/1',authentication,time_scale:'UTC',leap_mode:'normal_only',smear:false,
         configuration_ref:configuration,source_digest:source.source_digest,approval_ref,profile_ref,policy_ref,
         elapsed_error_ppm:qualified.elapsed_error_ppm,span_quantization_ns:qualified.span_quantization_ns,
         max_anchor_age_ns:policy.max_anchor_age_ns,max_exchange_age_ns:policy.max_exchange_age_ns,
@@ -147,11 +148,21 @@ function referenceInstallation(approval,configuration,endpointRef,current){
     checkAssessment(value){
       need(BigInt(value.lower_utc_ns)>=activeWindow.lower&&BigInt(value.upper_utc_ns)<activeWindow.upper,'reference_leap_window');
     },
-    prepareEvidence(candidate,{capture_ref},{now}){
+    prepareEvidence(candidate,{capture_ref,runtime_digest},{now},ntsBootstrap){
       const m1=clockInteger(candidate.m1_tick_ns),m4=clockInteger(candidate.m4_tick_ns);
       need(now.tick>=m4&&m4>=m1&&now.tick-m1<2n*second&&elapsed(m4-m1)<=2n*second,'reference_bracket');
       const {sample}=now,lower=clockInteger(sample.lower_ns)-elapsed(now.tick-m1),upper=clockInteger(sample.upper_ns);
       need(upper-lower<=day,'reference_era_window');
+      let bootstrap=null;
+      if(nts){
+        need(ntsBootstrap?.format==='nts-bootstrap/1'&&ntsBootstrap.key_reply_digest===candidate.key_reply_digest&&
+          ntsBootstrap.ntp_endpoint===candidate.endpoint&&same(ntsBootstrap.source_ref,qualified.independent_source_ref)&&
+          same(ntsBootstrap.policy_ref,sample.policy_ref)&&same(ntsBootstrap.runtime_ref,sample.runtime_ref)&&
+          same(ntsBootstrap.runtime_domain_ref,sample.runtime_domain_ref),'reference_nts_bootstrap');
+        const {source_ref:authentication_source_ref,...observation}=ntsBootstrap;
+        bootstrap=seal({bootstrap_id:capture_ref.id,revision:'1',source_ref,profile_ref,approval_ref,
+          endpoint_ref:endpointRef,runtime_digest,capture_ref,authentication_source_ref,...observation},'bootstrap_digest');
+      }
       const [e2,e3,eref]=errors;
       const bytes=Buffer.from(candidate.response,'base64url');
       try{
@@ -162,8 +173,9 @@ function referenceInstallation(approval,configuration,endpointRef,current){
         const age=maximum(0n,utcCeil(t3-tref,word)+e3+eref);
         need(age<upstream,'reference_upstream_age');
         const margin=maximum(e2,e3);
-        return {qualification:qualified,clock_sample:sample,proof:{
+        return {qualification:qualified,clock_sample:sample,...(bootstrap&&{bootstrap}),proof:{
           acquisition_ref:sample.acquisition_ref,verification_ref:capture_ref,provenance_ref:qualified.source_provenance_ref,
+          ...(bootstrap&&{bootstrap_ref:ref(bootstrap.bootstrap_id,bootstrap.bootstrap_digest)}),
           independent_utc_lower_ns:String(lower-margin),independent_utc_upper_ns:String(upper+margin),
           t2_error_ns:String(e2),t3_error_ns:String(e3),upstream_age_at_m1_ns:String(age)}};
       }finally{bytes.fill(0);}
@@ -218,9 +230,10 @@ export function readInstalledLinuxReferenceCapture({identity,providerDigest,appr
     same(approval.scope,{service_id,database_instance_id})&&approval.provider_digest===providerDigest&&
     identifier(approval.approval_id)&&clockInteger(approval.approval_revision)>0n&&identifier(approval.capture_key_id)&&
     Number.isSafeInteger(approval.archive_budget_bytes)&&approval.archive_budget_bytes<=1073741824,'installed_source');
-  const {network}=approval;
-  validateNetwork(network,providesReference);
-  const nts=network.authentication==='nts',reservationBytes=nts?ntsReservedBytes:reservedBytes;
+  validateNetwork(approval.network);
+  const nts=approval.network.authentication==='nts',reservationBytes=nts?ntsReservedBytes:reservedBytes;
+  const network=nts&&providesReference?{...approval.network,bootstrap_evidence:'nts-bootstrap/1'}:approval.network;
+  need(Buffer.byteLength(canonicalize(network))<=12000,'installed_source_endpoint');
   need(approval.archive_budget_bytes>=reservationBytes,'installed_source');
   const start=clockInteger(approval.not_before_ns),expires=clockInteger(approval.expires_ns);
   need(expires>start,'installed_source');

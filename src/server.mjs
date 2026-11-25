@@ -201,7 +201,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
           const reservation = stored.reservation, network=JSON.parse(encoded), authorize = () => polls.authorizeAttempt(attempt);
           return {reservation, attempt, network, authorize,
             ...(polls.storeControl && {storeControl:control=>polls.storeControl(attempt,control),releaseControl:polls.releaseControl}),
-            archive: candidate => archive.store({reservation,attempt,candidate,authorize,network}),
+            archive: (candidate,ntsBootstrap) => archive.store({reservation,attempt,candidate,authorize,network,ntsBootstrap}),
             release: (receipt,acknowledgement) => archive.release({receipt,acknowledgement,reservation,assertCurrent:assertPollCurrent})};
         });
       }

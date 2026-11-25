@@ -12,6 +12,8 @@ const timeoutMs = 2000;
 const pollResponseTimeoutMs = 6000;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const sha256 = /^sha256:[0-9a-f]{64}$/;
+const ntsBootstrapFormat = 'nts-bootstrap/1';
+const same = (left,right) => canonicalize(left) === canonicalize(right);
 const pipePrefix = '\\\\.\\pipe\\LeafSeamer.TimeCollector.';
 const exact = (value, keys) => value !== null && typeof value === 'object' && Object.keys(value).sort().join(',') === keys;
 const validDatagram = value => {
@@ -19,6 +21,47 @@ const validDatagram = value => {
   const bytes = Buffer.from(value, 'base64url');
   return bytes.length >= 48 && bytes.length <= 1232 && bytes.toString('base64url') === value;
 };
+
+function bindNtsBootstrap(candidate,call) {
+  const {nts_bootstrap:observation,endpoint,m1_tick_ns,m4_tick_ns,key_reply_digest}=candidate;
+  const {network,attempt,authReads}=call;
+  const need=ok=>{if(!ok)throw new Error('time_provider_nts_bootstrap');};
+  need(exact(observation,'aead_algorithm,alpn,chain_digests,format,key_completion,key_endpoint,receive,root_digests,send,server_name,tls,tls_version')&&
+    observation.format===ntsBootstrapFormat&&observation.key_endpoint===network.key_endpoint&&observation.server_name===network.server_name&&
+    observation.tls_version==='1.3'&&observation.alpn==='ntske/1'&&observation.aead_algorithm===15);
+  const roots=network.root_der.map(value=>'sha256:'+createHash('sha256').update(Buffer.from(value,'base64url')).digest('hex'));
+  const chain=observation.chain_digests;
+  need(same(observation.root_digests,roots)&&Array.isArray(chain)&&chain.length>=1&&chain.length<=8&&
+    chain.every(value=>typeof value==='string'&&sha256.test(value))&&new Set(chain).size===chain.length&&roots.includes(chain.at(-1)));
+
+  const reads={},used=new Set();
+  let previous=null,authority=null;
+  for(const phase of ['tls','key_completion','send','receive']){
+    const cited=observation[phase];
+    need(exact(cited,'read_id,tick_ns')&&typeof cited.read_id==='string'&&uuid.test(cited.read_id)&&!used.has(cited.read_id));
+    const sample=authReads.get(cited.read_id);
+    need(sample);
+    used.add(cited.read_id);
+    const tick=clockInteger(cited.tick_ns),at=clockInteger(sample.tick_ns),delta=tick-at;
+    need(at>=clockInteger(attempt.attempted_tick_ns)&&tick>=at&&tick<clockInteger(sample.valid_before_tick_ns)&&
+      (previous===null||at>previous));
+    previous=tick;
+    const binding={source_ref:sample.source_ref,policy_ref:sample.policy_ref,runtime_ref:sample.runtime_ref,runtime_domain_ref:sample.runtime_domain_ref};
+    need(authority===null||same(authority,binding));
+    authority=binding;
+    const q=clockInteger(sample.monotonic_quantization_ns)*2n,billion=1000000000n,drift=BigInt(sample.drift_ppb);
+    need(q>0n&&drift>=0n&&drift<=1000000n);
+    const lower=clockInteger(sample.lower_ns)+(delta>q?delta-q:0n)*(billion-drift)/billion;
+    const upper=clockInteger(sample.upper_ns)+((delta+q)*(billion+drift)+billion-1n)/billion;
+    need(lower<=upper);
+    reads[phase]={acquisition_ref:sample.acquisition_ref,read_tick_ns:sample.tick_ns,tick_ns:cited.tick_ns,
+      lower_ns:String(clockInteger(String(lower))),upper_ns:String(clockInteger(String(upper))),valid_before_tick_ns:sample.valid_before_tick_ns};
+  }
+  need(clockInteger(reads.send.tick_ns)<=clockInteger(m1_tick_ns)&&clockInteger(m4_tick_ns)<=clockInteger(reads.receive.read_tick_ns));
+  return {format:ntsBootstrapFormat,...authority,reads,key_endpoint:observation.key_endpoint,ntp_endpoint:endpoint,
+    server_name:observation.server_name,tls_version:observation.tls_version,alpn:observation.alpn,aead_algorithm:observation.aead_algorithm,
+    root_digests:roots,chain_digests:chain,key_reply_digest};
+}
 
 export function sealTimeProviderRuntime({identity,serviceBootId,core,provider}) {
   const {intent,descriptor,receipt,process_observation:observed}=provider;
@@ -91,6 +134,7 @@ export function openTimeProviderLink({text, digest, memberBoot}, {assertCurrent 
       if (frame.length > maximum + 1) throw new Error('time_provider_poll_capacity');
       const result = Promise.withResolvers();
       pending = {...result, ...prepared, sequence, expectedAck: null,
+        authReads:network.bootstrap_evidence===ntsBootstrapFormat?new Map():null,
         timer: setTimeout(() => fail('time_provider_poll_reply_timeout'), pollResponseTimeoutMs)};
       pollSequence++;
       socket.write(frame, error => { if (error) fail('time_provider_link_lost'); });
@@ -127,6 +171,10 @@ export function openTimeProviderLink({text, digest, memberBoot}, {assertCurrent 
         clockInteger(sample.tick_ns) < asked || clockInteger(sample.tick_ns) - asked >= BigInt(timeoutMs) * 1000000n)) {
       sample = null;
     }
+    if(sample&&pending?.authReads){
+      if(pending.authReads.size>=16||pending.authReads.has(body.request_id))sample=null;
+      else pending.authReads.set(body.request_id,structuredClone(sample));
+    }
     const reply = Buffer.from(canonicalize({version: authVersion, type: 'AUTH_RESULT', reply_to: body.request_id,
       binding_digest: digest, sample}) + '\n');
     if (reply.length > authMaximum + 1) throw new Error('time_provider_auth_capacity');
@@ -146,9 +194,12 @@ export function openTimeProviderLink({text, digest, memberBoot}, {assertCurrent 
       throw new Error('time_provider_poll_response');
     }
     const {candidate, control} = body;
+    let bootstrap=null;
     if (body.status === 'candidate') {
       const nts = pending.network.authentication === 'nts';
-      if (control !== null || !exact(candidate, 'endpoint,key_reply,key_reply_digest,m1_tick_ns,m4_tick_ns,request,response') ||
+      const keys='endpoint,key_reply,key_reply_digest,m1_tick_ns,m4_tick_ns,'+
+        (pending.authReads?'nts_bootstrap,':'')+'request,response';
+      if (control !== null || !exact(candidate,keys) ||
           !validDatagram(candidate.request) || !validDatagram(candidate.response) ||
           (nts ? typeof candidate.key_reply !== 'string' || candidate.key_reply.length < 1 || candidate.key_reply.length > 87382 ||
             typeof candidate.key_reply_digest !== 'string' || !sha256.test(candidate.key_reply_digest) ||
@@ -159,6 +210,7 @@ export function openTimeProviderLink({text, digest, memberBoot}, {assertCurrent 
           clockInteger(candidate.m4_tick_ns) >= clockInteger(pending.attempt.valid_before_tick_ns)) {
         throw new Error('time_provider_poll_candidate');
       }
+      if(pending.authReads)bootstrap=bindNtsBootstrap(candidate,pending);
     } else if (candidate !== null || (body.status === 'control' ?
       !exact(control, 'code,observed_tick_ns,wait_ns') || !Number.isInteger(control.code) || control.code < 0 || control.code > 0xffffffff ||
       clockInteger(control.observed_tick_ns) < clockInteger(pending.attempt.attempted_tick_ns) ||
@@ -177,7 +229,7 @@ export function openTimeProviderLink({text, digest, memberBoot}, {assertCurrent 
       call.resolve({status: body.status, candidate, control});
       return;
     }
-    try { call.receipt = persistentControl ? call.storeControl(control) : call.archive(candidate); }
+    try { call.receipt = persistentControl ? call.storeControl(control) : call.archive(candidate,bootstrap); }
     catch (error) { pending = null; call.reject(error); return; }
     assertCurrent();
     call.control = persistentControl ? control : null;

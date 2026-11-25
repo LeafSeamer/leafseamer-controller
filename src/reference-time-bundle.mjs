@@ -47,7 +47,7 @@ export function referenceBundleIssuer({source,profile,policy,approval}){
     const common={revision,request_ref:original(request,'request_id','request_digest'),
       response_bytes_ref:ref('reference.response-bytes',packet.response_digest)};
     const authentication=seal({auth_id:'reference.authentication',...common,source_ref,mode:source.authentication,
-      verification_ref:proof.verification_ref,bootstrap_ref:null,peer_binding_ref:endpoint_ref},'authentication_digest');
+      verification_ref:proof.verification_ref,bootstrap_ref:proof.bootstrap_ref??null,peer_binding_ref:endpoint_ref},'authentication_digest');
     const error=seal({error_id:'reference.error',...common,binding,error_method_ref:profile.error_method_ref,
       qualification_ref:approval.qualification_ref,t2_error_ns:proof.t2_error_ns,t3_error_ns:proof.t3_error_ns,
       upstream_age_upper_at_m1_ns:proof.upstream_age_at_m1_ns,provenance_ref:proof.provenance_ref},'error_digest');
@@ -143,10 +143,17 @@ export function validateReferenceBundle(input,{anchor,runtime,packet,assessment}
     ['ntp_version','ntp_mode','leap','stratum','precision','root_delay_word','root_dispersion_word','t2','t3'].every(key=>same(exchange[key],packet[key])));
   const proofs={authentication_ref:original(authentication,'auth_id','authentication_digest'),error_ref:original(error,'error_id','error_digest'),
     era_ref:original(era,'era_id','era_digest')};
+  const bootstrap=anchor.qualification_original?.bootstrap;
+  if(authentication.mode==='nts'){
+    need(bootstrap&&same(authentication.bootstrap_ref,original(bootstrap,'bootstrap_id','bootstrap_digest'))&&
+      same(bootstrap.source_ref,fields.source_ref)&&same(bootstrap.profile_ref,fields.profile_ref)&&
+      same(bootstrap.approval_ref,fields.approval_ref)&&same(bootstrap.endpoint_ref,request.endpoint_ref)&&
+      same(bootstrap.capture_ref,anchor.capture_ref)&&bootstrap.runtime_digest===anchor.runtime_digest);
+  }else need(authentication.bootstrap_ref===null);
   need(Object.entries(proofs).every(([key,value])=>same(value,e[key])&&same(value,exchange[key]))&&
     [authentication,error,era].every(proof=>same(proof.request_ref,requestRef)&&same(proof.response_bytes_ref,exchange.response_bytes_ref))&&
     authentication.mode===source.authentication&&same(authentication.source_ref,fields.source_ref)&&
-    (authentication.mode!=='nts'||authentication.bootstrap_ref!==null)&&same(error.binding,binding)&&
+    same(error.binding,binding)&&
     same(error.error_method_ref,profile.error_method_ref)&&same(era.method_ref,profile.era_method_ref)&&
     error.t2_error_ns===e.t2_error_ns&&error.t3_error_ns===e.t3_error_ns&&error.upstream_age_upper_at_m1_ns===e.upstream_age_at_m1_ns&&
     era.allowed_utc.lower_ns===e.independent_utc_lower_ns&&era.allowed_utc.upper_ns===e.independent_utc_upper_ns&&
