@@ -10,7 +10,7 @@ const maximum=99999999999999999999n;
 
 // 固定worker内每设备唯一所有者。会话接收器负责全设备共用的seq及原帧日志；
 // 本对象只处理设备闸，不签发Controller的持久授权、Ready或资源释放证明。
-// 处理普通首次传输的控制、授权和运行屏障。取消和重传须另行接入。
+// 处理普通首次传输的控制、授权、运行和参考时间屏障。取消和重传须另行接入。
 export function deviceExecutionGate({binding,transmissions,tick,signal,failed,limits}){
  need(typeof tick==='function'&&signal instanceof AbortSignal&&typeof failed==='function','gate_configuration');
  need(transmissions===undefined||typeof transmissions==='function','gate_configuration');
@@ -18,6 +18,7 @@ export function deviceExecutionGate({binding,transmissions,tick,signal,failed,li
   Number.isSafeInteger(limits.max_metadata_bytes)&&limits.max_metadata_bytes>0&&limits.max_metadata_bytes<=67108864,'gate_capacity_profile');
  const bound=freeze(structuredClone(binding)),budget={...limits},history=new Map(),tokens=new Set(),fenceTokens=new Set(),cuts=new Map(),fencedPermits=new Set(),stored=new Map();
  const denials=new Map(),authorizationPermits=new Map(),runDenials=new Map();let authorizationRevision=0n,runSnapshot=null,commandSnapshot=null;
+ let timeSnapshot=null,minimumTimeGeneration=0n;
  let terminal=false,active=null,barrier=null,control=null,revision=0n,order=0n,lastTick=null,metadata=0,closedOnce=false,openedOnce=false,issuedCut=0n,latestCut=null;
  function withdraw(){active=null;barrier=null;}
  function stop(error=new DeviceExecutionError('gate_closed')){if(terminal)return;terminal=true;withdraw();try{failed(error);}catch{}}
@@ -33,6 +34,10 @@ export function deviceExecutionGate({binding,transmissions,tick,signal,failed,li
   need(same(item.body,body),'gate_identity_conflict');return freeze({...item.ack,reply_to:frame.message_id});}
  function candidate(frame,type,body){return freeze({type,reply_to:frame.message_id,device_id:type==='CLOSE_GATE_ACK'?null:bound.device_id,body});}
  function self(value,field,code){const {[field]:hash,...body}=value;need(digest(body)===hash,code);}
+ function timeDomainMatches(domain){
+  return domain.authority_service_id===bound.scope.authority_service_id&&domain.database_instance_id===bound.scope.database_instance_id&&
+   domain.clock_domain_id===bound.clock_domain_id&&domain.descriptor_digest===bound.descriptor_digest;
+ }
  const runKey=selector=>canonicalize([selector.origin_scope.authority_service_id,selector.origin_scope.database_instance_id,selector.run_id]);
  const runMatches=(intent,selector)=>intent.origin==='automation'&&runGenerationMatches(intent.automation_binding,selector);
  function runProgress(entry,old){if(!old)return;
@@ -78,8 +83,20 @@ export function deviceExecutionGate({binding,transmissions,tick,signal,failed,li
   const snapshot=transmissions?.();
   if(!snapshot){need(control===null&&!openedOnce&&b.open_intents.length===0&&b.open_transmission_intents.length===0,'gate_control_fence_unsupported');return {coverage:[],transmission_coverage:[]};}
   need(same(snapshot.binding,bound),'gate_transmission_binding');
-  const selected=snapshot.transmissions.filter(v=>{if(!selector)return true;if(selector.kind==='run_generation')return runMatches(v.transmission.intent,selector);const guard=snapshot.guards.find(g=>g.guard_id===v.transmission.intent.guard_id);
-   need(guard,'gate_guard_binding');return authorizationRevoked(guard.binding,selector);});
+  const matches=(intent,guard)=>{
+   if(!selector)return true;
+   if(selector.kind==='run_generation')return runMatches(intent,selector);
+   if(selector.kind==='reference_time'){
+    need(guard,'gate_guard_binding');
+    const binding=guard.reference_time?.utc_guard.binding;
+    return guard.time_required===true&&binding&&same(binding.domain,selector.domain)&&BigInt(binding.time_generation)<selector.floor;
+   }
+   return guard&&authorizationRevoked(guard.binding,selector);
+  };
+ const selected=selector===null?snapshot.transmissions:snapshot.transmissions.filter(v=>{
+   const intent=v.transmission.intent,guard=snapshot.guards.find(g=>g.guard_id===intent.guard_id);
+   need(guard,'gate_guard_binding');return matches(intent,guard);
+  });
   const local=new Map(selected.map(v=>[v.transmission.transmission_id,v])),anchors=new Map(),ids=new Set(),issues=new Set();
   for(const intent of b.open_intents){
    for(const key of ['controller_boot_id','worker_boot_id','ipc_session_id','device_id','device_session_id','clock_domain_id','descriptor_digest'])need(intent[key]===bound[key],'gate_intent_binding');
@@ -89,8 +106,7 @@ export function deviceExecutionGate({binding,transmissions,tick,signal,failed,li
    const guard=snapshot.guards.find(v=>v.permit_id===intent.permit_id||v.guard_id===intent.guard_id);
    if(guard)need(guard.permit_id===intent.permit_id&&guard.guard_id===intent.guard_id&&guard.guard_digest===intent.guard_digest&&guard.command_id===intent.command_id,'gate_guard_binding');
    if(guard)need(same(guard.automation_binding,intent.automation_binding),'gate_guard_binding');
-   if(selector?.kind==='run_generation')need(runMatches(intent,selector),'gate_selector_binding');
-   else if(guard&&selector)need(authorizationRevoked(guard.binding,selector),'gate_selector_binding');
+   if(guard||selector?.kind==='run_generation'||selector?.kind==='reference_time')need(matches(intent,guard),'gate_selector_binding');
    anchors.set(intent.permit_id,intent);
   }
   const transmission_coverage=b.open_transmission_intents.map(tx=>{
@@ -183,6 +199,29 @@ export function deviceExecutionGate({binding,transmissions,tick,signal,failed,li
    ledger_digest:b.ledger_digest,...covered,all_write_exits_fenced:true,attempt_binding:a,transmission_ledger_digest:b.transmission_ledger_digest,
    effective_tick_ns:String(t),cancel_coverage:[],cancel_ledger_digest:b.cancel_ledger_digest}));
  }
+ function timeFence(frame){
+  const b=frame.body,key='fence:'+b.barrier_id,old=history.get(key);
+  if(old){need(same(old.body,b),'gate_identity_conflict');return old.ack?freeze({...old.ack,reply_to:frame.message_id}):unavailable(frame,'cache_miss');}
+  const {invalidation:i,attempt_binding:a}=b,{barrier_id,attempt_binding,...body}=b,cut=cuts.get(a.cut_id);
+  const domain=i.old_binding.domain,floor=BigInt(i.next_time_generation);
+  self(i,'invalidation_digest','gate_time_invalidation_digest');
+  need(timeDomainMatches(domain)&&b.clock_domain_id===bound.clock_domain_id&&b.descriptor_digest===bound.descriptor_digest,'gate_time_domain');
+  need(i.deny_new_utc_permits===true&&floor===BigInt(i.old_binding.time_generation)+1n,'gate_time_generation');
+  need(a.target_exit_id===bound.writer_exit_id&&a.cut_digest===digest({type:'TIME_FENCE',target_exit_id:bound.writer_exit_id,body}),'gate_cut_digest');
+  if(cut)need(cut.type==='TIME_FENCE'&&cut.digest===a.cut_digest&&cut.id===a.previous_barrier_id&&BigInt(a.attempt_ordinal)===cut.ordinal+1n,'gate_fence_attempt');
+  else need(a.attempt_ordinal==='1'&&a.previous_barrier_id===null,'gate_fence_attempt');
+  const t=now();next();
+  if(floor>minimumTimeGeneration)minimumTimeGeneration=floor;
+  const covered=coverage(b,{kind:'reference_time',domain,floor});
+  cuts.set(a.cut_id,{type:'TIME_FENCE',id:b.barrier_id,digest:a.cut_digest,ordinal:BigInt(a.attempt_ordinal)});
+  const ids=d=>[...new Set(covered.coverage.filter(v=>v.disposition===d).map(v=>v.intent.command_id))].sort(),inFlight=ids('in_flight');
+  return remember(key,b,candidate(frame,'TIME_FENCE_ACK',{operation_id:b.operation_id,barrier_id:b.barrier_id,clock_domain_id:bound.clock_domain_id,
+   descriptor_digest:bound.descriptor_digest,issued_cut_revision:b.issued_cut_revision,ledger_digest:b.ledger_digest,...covered,
+   invalidated_permit_ids:covered.coverage.filter(v=>v.disposition==='not_sent').map(v=>v.intent.permit_id),
+   in_flight_command_ids:inFlight,unresolved_command_ids:ids('unknown').filter(id=>!inFlight.includes(id)),all_write_exits_fenced:true,
+   attempt_binding:a,transmission_ledger_digest:b.transmission_ledger_digest,effective_tick_ns:String(t),cancel_coverage:[],cancel_ledger_digest:b.cancel_ledger_digest,
+   invalidation_ref:{id:i.invalidation_id,revision:i.revision,digest:i.invalidation_digest},minimum_time_generation:i.next_time_generation}));
+ }
  function renew(frame){
   const b=frame.body,key='renew:'+b.request_id,old=previous(key,b,frame);if(old)return old;
   self(b,'request_digest','gate_fence_digest');const t=now();
@@ -208,14 +247,23 @@ export function deviceExecutionGate({binding,transmissions,tick,signal,failed,li
    same(a.control_authority_ref,r.control_authority_ref),'gate_open_renewal');}
   const run=b.run_deny_snapshot,command=b.command_deny_snapshot,time=b.reference_time_snapshot;
   self(run,'snapshot_digest','gate_run_snapshot_digest');self(command,'snapshot_digest','gate_command_snapshot_digest');
-  if(time!==null)self(time,'snapshot_digest','gate_time_snapshot_digest');
+  if(time===null)need(minimumTimeGeneration===0n,'gate_time_snapshot_required');
+  else{
+   self(time,'snapshot_digest','gate_time_snapshot_digest');
+   need(timeDomainMatches(time.domain),'gate_time_domain');
+   need(BigInt(time.minimum_time_generation)>=minimumTimeGeneration,'gate_time_generation');
+   need(time.snapshot_revision===time.state_ref.revision,'gate_time_snapshot_revision');
+   if(timeSnapshot){
+    need(BigInt(time.snapshot_revision)>=BigInt(timeSnapshot.snapshot_revision),'gate_time_snapshot_revision');
+    if(time.snapshot_revision===timeSnapshot.snapshot_revision)need(same(time,timeSnapshot),'gate_time_snapshot_conflict');
+   }
+  }
   need(same(run.controller_scope,bound.scope)&&same(command.scope,bound.scope)&&command.device_id===bound.device_id,'gate_snapshot_binding');
   const nextRun=denySnapshot(run,runSnapshot,'run'),nextCommand=denySnapshot(command,commandSnapshot,'command');
   const installedRuns=new Map(nextRun.entries.map(entry=>[runKey(entry.selector),entry]));
   for(const [key,old] of runDenials){const entry=installedRuns.get(key);need(entry,'gate_deny_snapshot_omitted');runProgress(entry,old);}
-  need(time===null||(time.domain.authority_service_id===bound.scope.authority_service_id&&time.domain.database_instance_id===bound.scope.database_instance_id&&
-   time.domain.clock_domain_id===bound.clock_domain_id&&time.domain.descriptor_digest===bound.descriptor_digest),'gate_time_domain');
   next();tokens.add(b.gate_token);openedOnce=true;runSnapshot=nextRun;commandSnapshot=nextCommand;
+  if(time!==null){timeSnapshot=time;minimumTimeGeneration=BigInt(time.minimum_time_generation);}
   for(const [key,entry] of installedRuns)runDenials.set(key,entry);
   authorizationRevision=BigInt(b.authorization_revision);
   if(barrier.cut_id)cuts.get(barrier.cut_id).opened=true;
@@ -232,10 +280,11 @@ export function deviceExecutionGate({binding,transmissions,tick,signal,failed,li
   async receive(bytes){try{current();const {frame}=await decodeExecutionPayload(bytes,'c2w');current();
    for(const key of ['ipc_session_id','controller_boot_id','worker_boot_id','device_id','clock_domain_id','descriptor_digest'])need(frame[key]===bound[key],'gate_channel');
    need(frame.journal_mode==='durable','gate_journal_mode');
-   switch(frame.type){case 'FENCE':return fence(frame);case 'AUTH_FENCE':return authorizationFence(frame);case 'RUN_FENCE':return runFence(frame);case 'QUERY_BARRIER':return queryBarrier(frame);case 'BARRIER_STORED':return storeBarrier(frame);case 'GATE_FENCE':return renew(frame);case 'OPEN_GATE':return open(frame);case 'CLOSE_GATE':return close(frame);default:need(false,'gate_message_unsupported');}
+   switch(frame.type){case 'FENCE':return fence(frame);case 'AUTH_FENCE':return authorizationFence(frame);case 'RUN_FENCE':return runFence(frame);case 'TIME_FENCE':return timeFence(frame);case 'QUERY_BARRIER':return queryBarrier(frame);case 'BARRIER_STORED':return storeBarrier(frame);case 'GATE_FENCE':return renew(frame);case 'OPEN_GATE':return open(frame);case 'CLOSE_GATE':return close(frame);default:need(false,'gate_message_unsupported');}
   }catch(error){stop(error);throw error;}},
   currentGate(){try{const value=live();return value?freeze({...value,authorization_denials:[...denials.values()],authorization_denied_permit_ids:[...authorizationPermits.keys()],
    authorization_denied_intents:[...authorizationPermits.values()],run_denials:[...runDenials.values()],command_denials:commandSnapshot.entries,
+   minimum_time_generation:minimumTimeGeneration===0n?null:String(minimumTimeGeneration),
    run_deny_snapshot_ref:{revision:runSnapshot.snapshot_revision,digest:runSnapshot.snapshot_digest},
    command_deny_snapshot_ref:{revision:commandSnapshot.snapshot_revision,digest:commandSnapshot.snapshot_digest}}):null;}catch(error){stop(error);throw error;}},
   // 固定会话已严格解码原wire；同步关闭供其完整设备集合仲裁，不能在设备之间await。

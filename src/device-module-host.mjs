@@ -45,7 +45,7 @@ export function hostDeviceModule({admitted,materials,executionIdentity,obsSecret
    async receive({frame,payload}){
     if(frame.type==='HELLO_ACK')return;
     need(gates.has(frame.device_id),'module_execution_unsupported');
-    if(['FENCE','OPEN_GATE','GATE_FENCE','AUTH_FENCE','RUN_FENCE','QUERY_BARRIER','BARRIER_STORED'].includes(frame.type)){
+    if(['FENCE','OPEN_GATE','GATE_FENCE','AUTH_FENCE','RUN_FENCE','TIME_FENCE','QUERY_BARRIER','BARRIER_STORED'].includes(frame.type)){
      if(frame.type!=='FENCE')need(executions.has(frame.device_id),'module_execution_unbound');
      const response=await gates.get(frame.device_id).receive(payload);if(response)void executionSession.send(response).catch(stop);
     }else{const owner=executions.get(frame.device_id);need(owner,'module_execution_unbound');await owner.receive({frame,payload});}

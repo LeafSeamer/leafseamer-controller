@@ -173,6 +173,59 @@ function renewal(f){
 }
 
 function signSnapshot(value){const {snapshot_digest,...body}=value;return {...body,snapshot_digest:hash(body)};}
+function timeFence(f,items=[]){
+ const invalidation={invalidation_id:'time_invalidation',revision:'1',
+  old_binding:{domain:f.open.body.reference_time_snapshot.domain,time_generation:'1',profile_ref:ref('profile'),source_ref:ref('source'),
+   approval_ref:ref('approval'),policy_ref:ref('policy')},
+  next_time_generation:'2',cause_ref:ref('cause'),deny_new_utc_permits:true,protection_operation_ref:ref('time_protection')};
+ return signCut(f.envelope('TIME_FENCE','time_message',{operation_id:'time_operation',barrier_id:'time_barrier',
+  clock_domain_id:f.binding.clock_domain_id,descriptor_digest:f.binding.descriptor_digest,issued_cut_revision:'1',
+  ledger_digest:hash(items.map(v=>v.intent)),open_intents:items.map(v=>v.intent),transmission_ledger_digest:hash(items),open_transmission_intents:items,
+  cancel_transmissions:[],cancel_ledger_digest:hash([]),invalidation:{...invalidation,invalidation_digest:hash(invalidation)},
+  attempt_binding:{cut_id:'time_cut',cut_digest:hash('cut'),target_exit_id:f.binding.writer_exit_id,attempt_ordinal:'1',previous_barrier_id:null}}));
+}
+test('TIME_FENCE提高OPEN的时间下界，已登记的即时发送仍能进入出口',async()=>{
+ const selected=deferred(),release=deferred(),f=await sending({preparation:cache=>({describe:cache.describe,
+  async withPacket(...args){selected.resolve();await release.promise;return cache.withPacket(...args);}})});
+ await f.writer.installGuard(raw(f.install));const pending=f.writer.dispatch(raw(f.dispatch));await selected.promise;
+ const cut=timeFence(f),ack=await f.response(await f.gateOwner.receive(raw(cut)));
+ assert.deepEqual(ack.body.coverage,[]);assert.equal(ack.body.minimum_time_generation,'2');
+ assert.equal(ack.body.invalidation_ref.digest,cut.body.invalidation.invalidation_digest);
+ assert.equal(f.gateValue().minimum_time_generation,'2');assert.equal(f.gateOwner.state.open,true);
+ assert.deepEqual((await f.gateOwner.receive(raw(barrierQuery(f,cut)))).body,ack.body);
+ release.resolve();assert.equal((await pending).body.disposition,'in_flight');assert.equal(f.writes(),1);
+});
+test('开闸须沿用TIME_FENCE下界及已采用状态修订',async()=>{
+ for(const [modify,error] of [
+  [time=>time,/gate_time_generation/],
+  [()=>null,/gate_time_snapshot_required/],
+  [time=>signSnapshot({...time,minimum_time_generation:'2'}),/gate_time_snapshot_conflict/],
+  [time=>signSnapshot({...time,snapshot_revision:'2',state_ref:{...ref('new_state'),revision:'2'},minimum_time_generation:'2'}),null],
+ ]){
+  const f=await sending();await f.response(await f.gateOwner.receive(raw(timeFence(f))));
+  await f.response(await f.gateOwner.receive(raw(closing(f))));
+  const {fence,open}=renewal(f);await f.response(await f.gateOwner.receive(raw(fence)));
+  open.body.reference_time_snapshot=modify(open.body.reference_time_snapshot);
+  if(error){await assert.rejects(f.gateOwner.receive(raw(open)),error);assert.equal(f.gateOwner.state.open,false);}
+  else{
+   const ack=await f.response(await f.gateOwner.receive(raw(open)));
+   assert.equal(ack.body.reference_time_snapshot_ref.digest,open.body.reference_time_snapshot.snapshot_digest);
+   assert.equal(f.gateValue().minimum_time_generation,'2');
+   await f.response(await f.gateOwner.receive(raw(closing(f,'close_again'))));
+   const barrier=controlFence(f,[]);barrier.body.target_gate_revision='3';signCut(barrier);
+   await f.response(await f.gateOwner.receive(raw(barrier)));
+   const replay=reopenAfterFence(f,barrier);
+   replay.body.reference_time_snapshot=signSnapshot({...replay.body.reference_time_snapshot,minimum_time_generation:'2'});
+   await assert.rejects(f.gateOwner.receive(raw(replay)),/gate_time_snapshot_revision/);
+  }
+ }
+});
+test('TIME_FENCE不能将即时许可列入失效覆盖',async()=>{
+ const f=await sending();await f.writer.installGuard(raw(f.install));
+ await assert.rejects(f.gateOwner.receive(raw(timeFence(f,[f.dispatch.body.permit.transmission]))),/gate_selector_binding/);
+ assert.equal(f.gateOwner.state.open,false);assert.equal(f.writes(),0);
+});
+
 function runFence(f,items=[],floor='2',revision='1'){
  const selector={kind:'run_generation',origin_scope:{authority_service_id:'seamer',database_instance_id:'origin_database'},run_id:'run',deny_through_generation:floor};
  return signCut(f.envelope('RUN_FENCE','run_message',{operation_id:'run_operation',barrier_id:'run_barrier',controller_scope:f.binding.scope,selector,selector_digest:hash(selector),
