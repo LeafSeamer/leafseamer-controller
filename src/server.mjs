@@ -167,8 +167,11 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
         readSource: slot=>timeAuthorization.readSource(slot,authentication),
         readAuthentication: () => authentication.referenceTimeSample(),
         assertCurrent: assertPollCurrent,
-        observeRetirement: installedCapture?()=>null:supervision.observeTimeProviderRetirement,
-        assertRetirement: installedCapture?()=>{throw new Error('time_provider_poll_retirement_unavailable');}:supervision.assertTimeProviderRetirement
+        observeRetirement: installedCapture?original=>linuxProvider.observeRetirement?.(original,linuxSource.tick)??null:supervision.observeTimeProviderRetirement,
+        assertRetirement: installedCapture?observed=>{
+          if(!linuxProvider.assertRetirement)throw new Error('time_provider_poll_retirement_unavailable');
+          linuxProvider.assertRetirement(observed);
+        }:supervision.assertTimeProviderRetirement
       });
       const {readEndpoint, captureProtection, referenceAuthority, schedule} = timeAuthorization;
       if (readEndpoint !== undefined && typeof readEndpoint !== 'function') throw new Error('time_provider_poll_endpoint_authority');
