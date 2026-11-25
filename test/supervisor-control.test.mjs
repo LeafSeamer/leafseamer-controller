@@ -16,6 +16,8 @@ import {initializeStorage, migrateStorage} from '../dist/storage.mjs';
 import {initializeProcessHost, startProcessHost, installedCoreDigest, installedTimeProviderDigest, upgradeTimeProviderJournal} from '../dist/process-host.mjs';
 import {connectCoreSupervisor,coreRefreshDelayMs} from '../dist/supervisor-control.mjs';
 import {timeProviderCaptureStore} from '../dist/time-provider-capture.mjs';
+import {decodeExecutionPayload} from '../dist/device-execution-channel.mjs';
+import {deviceExecutionVersion} from '../dist/sdk/device-execution.mjs';
 const options = {skip: process.platform !== 'win32', timeout: 60000};
 function temporary(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'leafseamer-control-'));
@@ -58,6 +60,7 @@ async function raw(t, mode, setup, provider=false, previous=null, fixturePort=nu
       finally{db.close();}
     }
   }
+  if(mode==='time-provider-invalidation-source')await migrateStorage(dir,92);
   if(mode==='time-provider-authentication') await migrateStorage(dir,81);
   if(mode==='time-provider-anchor'||mode==='time-provider-anchor-write-fault') {
     await migrateStorage(dir,87);
@@ -672,6 +675,47 @@ test('参考授时保护待办漏写时回滚整笔，进程仍拒绝恢复采�
   assert.equal(db.prepare('SELECT count(*) FROM time_provider_reference_protection').pluck().get(),0);
   assert.equal(db.prepare('SELECT count(*) FROM time_provider_reference_exit_cut').pluck().get(),0);
   assert.equal(db.prepare('SELECT count(*) FROM time_provider_reference_anchor').pluck().get(),1);
+ }finally{db.close();}
+});
+
+test('参考授时撤销从真实锚点与同事务出口切点恢复 TIME_FENCE 原件',providerOptions,async t=>{
+ const run=await raw(t,'time-provider-invalidation-source',null,true);
+ const frame=await until(()=>run.output.frames.find(f=>f.event==='reference-invalidation'));
+ assert.equal(frame.beforeSource,null);
+ assert.equal(frame.available.status,'conditional');
+ assert.equal(frame.status.durable,true);assert.equal(frame.afterRestore,null);
+ const {invalidation,issued_cut_revision,targets}=frame.source;
+ assert.equal(issued_cut_revision,'0');assert.deepEqual(targets,[]);
+ assert.deepEqual(invalidation.old_binding,frame.bundle.anchor.binding);
+ assert.deepEqual(invalidation.cause_ref,frame.status.invalidation_ref);
+ assert.equal(invalidation.next_time_generation,'2');
+ const hash=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
+ const {clock_domain_id,descriptor_digest}=invalidation.old_binding.domain;
+ const body={operation_id:frame.status.operation_id,issued_cut_revision,ledger_digest:hash([]),open_intents:[],
+  clock_domain_id,descriptor_digest,open_transmission_intents:[],transmission_ledger_digest:hash([]),
+  cancel_transmissions:[],cancel_ledger_digest:hash([]),invalidation};
+ const target_exit_id='validation_exit';
+ const decoded=await decodeExecutionPayload(Buffer.from(JSON.stringify({
+  ipc_version:deviceExecutionVersion,type:'TIME_FENCE',message_id:'message',reply_to:null,ipc_session_id:'ipc',controller_boot_id:'controller',
+  worker_boot_id:'worker',seq:'1',device_id:'device',clock_domain_id,descriptor_digest,journal_mode:'durable',
+  body:{...body,barrier_id:'barrier',attempt_binding:{cut_id:'cut',cut_digest:hash({type:'TIME_FENCE',target_exit_id,body}),
+   target_exit_id,attempt_ordinal:'1',previous_barrier_id:null}}
+ })),'c2w');
+ assert.deepEqual(decoded.frame.body.invalidation,invalidation);
+ run.child.stdin.end('stop\n');assert.equal((await run.closed)[0],0);
+ const db=new Database(path.join(run.dir,'controller.sqlite'),{fileMustExist:true});
+ try{
+  const [text,cutDigest]=db.prepare('SELECT body_jcs,body_digest FROM time_provider_reference_exit_cut').raw().get();
+  const cut=JSON.parse(text),work=JSON.parse(db.prepare('SELECT body_jcs FROM time_provider_reference_protection').pluck().get());
+  assert.equal(hash(cut),cutDigest);
+  assert.deepEqual(cut.invalidation_ref,invalidation.cause_ref);
+  assert.deepEqual(work.exit_cut_ref,{id:frame.status.operation_id+'.exit-cut',revision:'1',digest:cutDigest});
+  assert.deepEqual(invalidation.protection_operation_ref,work.exit_cut_ref);
+  assert.deepEqual(work.wire_invalidation_ref,{id:invalidation.invalidation_id,revision:'1',digest:invalidation.invalidation_digest});
+  assert.equal(work.issued_cut_revision,issued_cut_revision);
+  const {invalidation_digest,...unsigned}=invalidation;
+  assert.equal(hash(unsigned),invalidation_digest);
+  assert.deepEqual(db.pragma('foreign_key_check'),[]);
  }finally{db.close();}
 });
 

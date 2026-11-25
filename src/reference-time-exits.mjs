@@ -5,6 +5,7 @@ const digest = text => 'sha256:' + createHash('sha256').update(text).digest('hex
 const same = (a,b) => canonicalize(a)===canonicalize(b);
 const need = ok => { if(!ok) throw new Error('reference_time_exit_binding'); };
 const ref = (id,digest) => ({id,revision:'1',digest});
+export const referenceExitCutRef = (operationId,digest) => ref(operationId+'.exit-cut',digest);
 
 function original(text,checksum) {
   const value=JSON.parse(text);
@@ -39,8 +40,10 @@ export function referenceTimeExitStore(db, bootId, domain, supervisor, receiverR
       .raw().all(invalidation.id).map(([id,digest])=>ref(id,digest));
     const cut={format:'leafseamer-reference-exit-cut/1',invalidation_ref:invalidation,domain_ref:domain,targets};
     const text=canonicalize(cut);
+    const checksum=digest(text);
     need(db.prepare('INSERT INTO time_provider_reference_exit_cut VALUES (?,?,?,?,?)').run(invalidation.id,invalidation.digest,
-      targets.length,text,digest(text)).changes===1);
+      targets.length,text,checksum).changes===1);
+    return referenceExitCutRef(invalidation.id,checksum);
   }
 
   function status(operationId) {

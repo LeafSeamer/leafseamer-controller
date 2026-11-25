@@ -21,7 +21,8 @@ const assignment = await bootstrap.assignment(), receipt = await bootstrap.prove
 const policy = JSON.parse(options['--bootstrap-policy']), mode = options['--mode'];
 const controlMode=['time-provider-control','time-provider-control-resume','time-provider-control-write-fault'].includes(mode);
 const scheduleMode=['time-provider-schedule','time-provider-schedule-restart','time-provider-schedule-close'].includes(mode);
-const invalidationMode=['time-provider-invalidation','time-provider-invalidation-write-fault'].includes(mode);
+const invalidationSource=mode==='time-provider-invalidation-source';
+const invalidationMode=invalidationSource||['time-provider-invalidation','time-provider-invalidation-write-fault'].includes(mode);
 const anchorMode=scheduleMode||invalidationMode||['time-provider-anchor','time-provider-anchor-reopen','time-provider-anchor-write-fault'].includes(mode);
 process.stderr.write(JSON.stringify({event: 'bootstrapped', pid: process.pid}) + '\n');
 if(controlMode||anchorMode||['time-provider-capture','time-provider-capture-restart','time-provider-capture-rollback','time-provider-capture-repeat',
@@ -42,10 +43,11 @@ if(controlMode||anchorMode||['time-provider-capture','time-provider-capture-rest
  const packet=Promise.withResolvers();
  const eraBoundary=((1n<<32n)-2208988800n)*1000000000n;
  const approvalDeadline=String(native.tick()+90000000000n);
- const withBundle=mode==='time-provider-anchor';
- let omitEvidence=withBundle, approvalWithdrawn=false;
+ const withBundle=mode==='time-provider-anchor'||invalidationSource;
+ let omitEvidence=mode==='time-provider-anchor', approvalWithdrawn=false;
  const bundleAuthority=withBundle?referenceBundleAuthority({serviceId:policy.service_id,configuration:ref('configuration.loopback'),
-  timeBounds:{lower_ns:String(eraBoundary-1000000000n),upper_ns:String(eraBoundary+1000000000n)}}):null;
+  timeBounds:{lower_ns:String(eraBoundary-1000000000n),upper_ns:String(eraBoundary+1000000000n)},
+  ...(invalidationSource&&{maxAnchorAge:'45000000000',maxExchangeAge:'45000000000',maxUpstreamAge:'50000000000'})}):null;
  const referenceAuthority={sourceSlot:'source.capture',
   readApproval({authorization}){
    if(approvalWithdrawn)return null;
@@ -130,6 +132,8 @@ if(controlMode||anchorMode||['time-provider-capture','time-provider-capture-rest
  }else if(invalidationMode){
   const first=await polls.collect(reserve('capture'));
   const available=polls.currentReference();
+  const bundle=invalidationSource?polls.readReferenceBundle(available.bundle_ref):null;
+  const beforeSource=invalidationSource?polls.referenceProtectionFenceSource():null;
   let inflight=null, late=null;
   if(mode==='time-provider-invalidation'){
    const wait=BigInt(first.receipt.m4_tick_ns)+16000000000n-native.tick();
@@ -149,7 +153,8 @@ if(controlMode||anchorMode||['time-provider-capture','time-provider-capture-rest
   const afterRestore=polls.currentReference(), repeated=polls.referenceProtectionStatus();
   const denied=await rejected(Promise.resolve().then(()=>polls.reserve('source.capture-alias','poll.after-invalidation')));
   process.stderr.write(JSON.stringify({event:'reference-invalidation',available,status,repeated,afterRestore,denied,received,inflight,
-   attempt:inflight?polls.lookup(inflight.id).attempt?.attempt_id:null,late})+'\n');
+   attempt:inflight?polls.lookup(inflight.id).attempt?.attempt_id:null,late,
+   ...(invalidationSource&&{beforeSource,bundle,source:polls.referenceProtectionFenceSource()})})+'\n');
  }else if(mode==='time-provider-anchor-write-fault'){
   const original=reserve('capture');
   const failure=await rejected(polls.collect(original));

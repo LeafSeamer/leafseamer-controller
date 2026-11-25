@@ -221,6 +221,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
         ...(publication && {currentReference:publication.current,projectReferenceCapture:publication.projectCapture,readReferenceBundle:publication.readBundle,
           receiverReference:publication.receiverReference}),
         ...(publication?.protectionStatus && {referenceProtectionStatus:publication.protectionStatus}),
+        ...(publication?.protectionFenceSource && {referenceProtectionFenceSource:publication.protectionFenceSource}),
         ...(referenceSchedule && {scheduleStatus:referenceSchedule.status}),
         ...(archive && {lookupCapture: archive.lookup, readCapture: archive.read, async collect(pollRef){return collect(pollRef);}})
       });

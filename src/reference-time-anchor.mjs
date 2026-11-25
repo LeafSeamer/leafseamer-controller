@@ -154,7 +154,9 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
 
   function withdraw(prior,cause) {
     withdrawn=true;
-    invalidation?.deny(prior,cause);
+    invalidation?.deny(prior,cause,()=>{
+      return storedBundle(prior,anchorRecord([binding.text,binding.digest])).state.binding;
+    });
   }
 
   function context() {
@@ -259,7 +261,7 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
 
   return Object.freeze({
     receiverReference,
-    ...(invalidation && {protectionStatus:invalidation.status,reconcileProtection:invalidation.reconcile,
+    ...(invalidation && {protectionStatus:invalidation.status,reconcileProtection:invalidation.reconcile,protectionFenceSource:invalidation.fenceSource,
       invalidate(cause) { withdraw(head(),cause); }}),
     prepare({reservation,candidate,receipt,network,attempt,ntsBootstrap}) {
       if(withdrawn || reservation.source_slot!==sourceSlot) return null;
