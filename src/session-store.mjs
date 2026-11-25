@@ -36,7 +36,7 @@ function rows(db, sql, ...args) {
 }
 
 // 内部人员会话服务；clock由同服务认证时钟装配，HTTP Cookie与Origin边界另由传输层落实。
-export function sessionStore(db, serviceId, clock, authority = null, tokensEnabled = false, contextBinding = null, createExtensionManagement = null,controlBarrier=null,executionCurrent=null,attachOpeningSource=null,attachEncodingSource=null,queueCommand=null,capabilityCurrent=null,eventScopes=null,deviceAutomationCurrent=null,referenceAcceptance=null,sceneCatalogCurrent=null,readClockReference=null) {
+export function sessionStore(db, serviceId, clock, authority = null, tokensEnabled = false, contextBinding = null, createExtensionManagement = null,controlBarrier=null,executionCurrent=null,attachOpeningSource=null,attachEncodingSource=null,queueCommand=null,capabilityCurrent=null,eventScopes=null,deviceAutomationCurrent=null,referenceAcceptance=null,sceneCatalogCurrent=null,clockReference=null) {
   let stopped = false, dummy = null;
   const buckets = new Map(), global = {start: process.hrtime.bigint(), failed: 0, pending: 0};
   const salt = crypto.randomBytes(32);
@@ -156,7 +156,7 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
    (Number(contextBinding.service.schema_revision)<97||queueCommand)?
    automationCommandExecutionSource({db,service:contextBinding.service,devices,executionCurrent,deviceAutomationCurrent,coreSource:controlBarrier,time,queueCommand}):null;
   if(Number(contextBinding?.service.schema_revision)>=51&&attachEncodingSource&&controlBarrier&&executionCurrent)
-    attachEncodingSource(commandEncodingSource({db,service:contextBinding.service,currentRecordedToken,devices,executionCurrent,coreSource:controlBarrier,automationExecution}));
+    attachEncodingSource(commandEncodingSource({db,service:contextBinding.service,currentRecordedToken,devices,executionCurrent,coreSource:controlBarrier,automationExecution,clockReference}));
   let manualCurrent,evaluatorCurrent,evidenceCurrent;
   const serviceIdentities=Number(contextBinding?.service.schema_revision)>=36&&authority?.current?
     serviceIdentityStore({db,service:contextBinding.service,bootId:contextBinding.bootId,writer,time,authenticated,authority,coreSource:controlBarrier,attachEvaluatorCurrent:current=>{evaluatorCurrent=current;},pairings:()=>peerPairings,eventScopes,deviceAutomationCurrent,authorizeEndorsement,
@@ -183,7 +183,7 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
   const initialResources=Number(contextBinding?.service.schema_revision)>=44&&evidenceCurrent?deviceInitialResource({db,service:contextBinding.service,
     writer,evidenceCurrent,executionCurrent,domain:()=>controlBarrier.domain(),attachCurrent:current=>{initialResourceCurrent=current;},attachRead:read=>{initialResourceRead=read;}}):null;
   const initialOpening=Number(contextBinding?.service.schema_revision)>=45&&initialResourceCurrent?deviceInitialOpen({db,writer,
-    resourceCurrent:initialResourceCurrent,resourceRead:initialResourceRead,domain:()=>controlBarrier.domain(),attach:attachOpeningSource,readClockReference}):null;
+    resourceCurrent:initialResourceCurrent,resourceRead:initialResourceRead,domain:()=>controlBarrier.domain(),attach:attachOpeningSource,readClockReference:clockReference?.readFirst}):null;
   const extensionManagement=createExtensionManagement?.((input,permission,recent)=>{
     const proof=authorizeToken(input,serviceId);if(proof.denied)fail(proof.denied);
     if(proof.principal_kind!=='human'||!proof.permissions.includes(permission))fail('extension_management_denied');

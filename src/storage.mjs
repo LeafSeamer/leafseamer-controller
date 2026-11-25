@@ -508,7 +508,10 @@ export function openStorage(dataDir, expectedIdentity = null) {
           authority===localAuthority?workerLaunches?.deviceAutomationCurrent:null,
           authority===localAuthority && Number(state.schema_revision)>=88 ? accepted=>referenceAnchor?.acceptAt(accepted)??null : null,
           authority===localAuthority?workerLaunches?.deviceSceneCatalogCurrent:null,
-          authority===localAuthority && Number(state.schema_revision)>=112 ? at=>referenceAnchor?.receiverReference.readFirst(at)??null : null); return sessions;
+          authority===localAuthority && Number(state.schema_revision)>=112 ? {
+            readFirst:at=>referenceAnchor?.receiverReference.readFirst(at)??null,
+            isCurrent:input=>referenceAnchor?.receiverReference.isCurrent(input)===true
+          } : null); return sessions;
       },
       close() {
         if (closed) return; closed = true;

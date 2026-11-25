@@ -13,6 +13,8 @@ import {deviceExecutionVersion,assertDeviceExecutionFeatures} from './sdk/device
 import {routes} from './sdk/runtime/panel-wire/preview/routes.mjs';
 import {getSchema,validateValue} from './sdk/runtime/panel-wire/preview/registry.mjs';
 import {obsCutPacketBytes,obsCutPrimitive} from './obs-cut-packet.mjs';
+import {readCommandReferenceOriginal} from './reference-time-anchor.mjs';
+import {prepareScheduledGuard,assertScheduledGuardCurrent} from './command-reference-time.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError('command_final_'+code);};
 const ref=(id,v)=>({id,revision:'1',digest:digest(v)});
 const signed=(v,key)=>({...v,[key]:digest(v)});
@@ -23,13 +25,42 @@ const limits={format:'fixed-memory-transmission-budget/1',profile_id:'leafseamer
 const obsLimits={format:'fixed-obs-cut-transmission-budget/1',profile_id:'leafseamer.obs.isolated_cut.transmission.limits.1',
  max_transmissions:4096,max_bytes:4096*obsCutPacketBytes,per_transmission:{attempts:1,transmissions:1,bytes:obsCutPacketBytes}};
 const row=sqliteRow;
-function materialize({initial,encoding,ready,principalAuthorization,ids,issue,previous,before,selected,sealed}){
+function referenceFor(db,source,ready,encoding,id,selected,clock){
+ if(source.metadata.dispatch.mode==='immediate')return null;
+ const original=readCommandReferenceOriginal(db,source.binding,clock.context_ref);
+ const snapshot=ready.dispatch.plan.resource.reference_time_snapshot;
+ const reference=prepareScheduledGuard({source,snapshot,original,validBefore:clock.valid_before_tick_ns,selected,
+  authorizedBefore:encoding.value.authorization.expires_tick_ns,id});
+ return {...reference,original,snapshot,first_tick_ns:selected};
+}
+function recheckReference(reference,source,provider,now){
+ if(!reference)return;
+ const {original,snapshot,valid_before_tick_ns,first_tick_ns}=reference;
+ need(provider.isCommandReferenceCurrent?.({first_tick_ns,tick_ns:String(now),reference:{service_boot_id:original.service_boot_id,
+  bundle:original.bundle,state:original.state,valid_before_tick_ns}})===true,'reference_unavailable');
+ assertScheduledGuardCurrent(reference,source,snapshot,now);
+}
+function referenceAt(db,source,ready,encoding,id,selected,provider){
+ if(source.metadata.dispatch.mode==='immediate')return null;
+ need(supportsStorageRevision(Number(db.pragma('user_version',{simple:true})),112),'reference_schema');
+ const b=source.binding;
+ const clock=provider.readCommandReference?.({tick_ns:selected,runtime_domain_ref:{clock_domain_id:b.clock_domain_id,descriptor_digest:b.descriptor_digest}});
+ need(clock,'reference_unavailable');
+ const reference=referenceFor(db,source,ready,encoding,id,selected,
+  {context_ref:named(clock.bundle,'bundle_id','bundle_digest'),valid_before_tick_ns:clock.valid_before_tick_ns});
+ need(same(reference.original.bundle,clock.bundle)&&same(reference.original.state,clock.state)&&
+  reference.original.service_boot_id===clock.service_boot_id,'reference_changed');
+ return reference;
+}
+export function materializeCommandFinalAdmission({initial,encoding,ready,principalAuthorization,ids,issue,previous,before,selected,sealed,reference=null}){
  const source=initial.source,command=source.command_id,b=source.binding,opening=ready.dispatch.plan,access=opening.access,packet=encoding.response.reply.frame.body.packet;
  const budget=packet.primitive_id===obsCutPrimitive?obsLimits:limits;
  need(packet.byte_length===budget.per_transmission.bytes&&source.policies.capacity.per_command.max_packet_bytes===packet.byte_length,'budget');
  const {binding:authorizationBinding}=principalAuthorization,{origin,grant_revision,arm_generation}=authorizationBinding;
  const automation=source.metadata.automation_binding,contentDigest=encoding.value.authorization.content_digest;
- const expires=encoding.value.authorization.expires_tick_ns,window={not_before_tick_ns:selected,before_tick_ns:expires};
+ const authorizedBefore=encoding.value.authorization.expires_tick_ns,expires=reference?.deadline??authorizedBefore;
+ need(BigInt(expires)<=BigInt(authorizedBefore)&&Boolean(reference)===(source.metadata.dispatch.mode==='scheduled'),'reference_deadline');
+ const window={not_before_tick_ns:selected,before_tick_ns:expires};
  need(BigInt(encoding.response.value.evidence.received_tick_ns)<=BigInt(selected)&&encoding.response.reply.committedTick<=BigInt(selected)&&
   BigInt(selected)<=BigInt(sealed)&&BigInt(sealed)<BigInt(expires),'deadline');
  need(BigInt(issue)===BigInt(previous)+1n&&BigInt(issue)<=18446744073709551615n&&Number.isSafeInteger(before)&&before>=0&&before<limits.max_transmissions,'budget');
@@ -51,8 +82,8 @@ function materialize({initial,encoding,ready,principalAuthorization,ids,issue,pr
  const ownershipRef=named(ownership,'ownership_id','ownership_digest'),accessRef=named(access,'access_id','access_digest',access.revision);
  const guard=signed({guard_id:ids.guard,permit_id:ids.permit,command_id:command,device_id:b.device_id,controller_boot_id:b.controller_boot_id,worker_boot_id:b.worker_boot_id,
   ipc_session_id:b.ipc_session_id,binding:authorizationBinding,authorization_revision:access.authorization_ref.revision,authorization_deadline_tick_ns:expires,
-  clock_domain_id:b.clock_domain_id,time_required:false,capacity_reservation_id:ids.budget,descriptor_digest:b.descriptor_digest,
-  admission_origin:'non_panel',panel_binding:null,automation_binding:automation,reference_time:null,gate_access_ref:accessRef,ownership_ref:ownershipRef},'guard_digest');
+  clock_domain_id:b.clock_domain_id,time_required:reference!==null,capacity_reservation_id:ids.budget,descriptor_digest:b.descriptor_digest,
+  admission_origin:'non_panel',panel_binding:null,automation_binding:automation,reference_time:reference?.reference_time??null,gate_access_ref:accessRef,ownership_ref:ownershipRef},'guard_digest');
  const guardRef=named(guard,'guard_id','guard_digest'),wireWindow={clock_domain_id:b.clock_domain_id,descriptor_digest:b.descriptor_digest,earliest_tick_ns:selected,latest_tick_ns:expires};
  const intent={permit_id:ids.permit,command_id:command,attempt_id:packet.attempt_id,dispatch_intent_id:ids.intent,worker_boot_id:b.worker_boot_id,device_session_id:b.device_session_id,
   guard_id:ids.guard,guard_digest:guard.guard_digest,clock_domain_id:b.clock_domain_id,descriptor_digest:b.descriptor_digest,controller_boot_id:b.controller_boot_id,
@@ -75,7 +106,8 @@ function materialize({initial,encoding,ready,principalAuthorization,ids,issue,pr
  const after=signed({...resourceBody,format_version:'command-resource-state/1',state_id:ids.resource,revision:'2',control_state_ref:ready.value.control_after_ref,
   sampled_tick_ns:selected,holds:[{hold_ref:holdRef,ownership_ref:ownershipRef,classification:'active'}]},'state_digest');
  const time={format:'command-transmission-time/1',time_id:ids.time,binding:b,permit_id:ids.permit,issued_revision:issue,original_deadline_ref:initial.record.policy.original_deadline_ref,
-  authentication_window:encoding.value.identity_snapshot.authentication_window,reference_time:null,window};
+  authentication_window:encoding.value.identity_snapshot.authentication_window,reference_time:reference?.reference_time??null,
+  ...(reference&&{reference_before_tick_ns:reference.valid_before_tick_ns}),window};
  const sources={origin:encoding.value.authorization.admission_source_ref,capability:encoding.bound.capability_ref,
   encoding:named(encoding.response.value.evidence,'evidence_id','evidence_digest'),authorization:access.authorization_ref,control:access.control_authority_ref,
   gate_commit:ready.ref,gate_access:accessRef,ownership:ownershipRef,permit_authority:named(authority,'permit_id','authority_digest',issue),guard:guardRef,
@@ -84,8 +116,8 @@ function materialize({initial,encoding,ready,principalAuthorization,ids,issue,pr
   run_deny:{id:opening.id+'.run-deny',revision:opening.resource.run_deny_snapshot.snapshot_revision,digest:opening.resource.run_deny_snapshot.snapshot_digest},
   command_deny:{id:opening.id+'.command-deny',revision:opening.resource.command_deny_snapshot.snapshot_revision,digest:opening.resource.command_deny_snapshot.snapshot_digest}};
  const fields={origin:{command_state_ref:initial.record.state_ref},capability:{encoding_source_ref:sources.encoding},
-  encoding:{packet_record_ref:packetRecordRef,packet_ref:packetRef,received_tick_ns:encoding.response.value.evidence.received_tick_ns,expires_tick_ns:expires},
-  authorization:{not_before_tick_ns:encoding.value.authorization.created_tick_ns,before_tick_ns:expires},
+  encoding:{packet_record_ref:packetRecordRef,packet_ref:packetRef,received_tick_ns:encoding.response.value.evidence.received_tick_ns,expires_tick_ns:authorizedBefore},
+  authorization:{not_before_tick_ns:encoding.value.authorization.created_tick_ns,before_tick_ns:authorizedBefore},
   control:{pending_operation_id:null,control_epoch:access.control_epoch,effective_version:access.effective_version,
    mode:automation?'automatic':'manual',holder:automation?null:identity.requester},
   gate_commit:{access_ref:accessRef},gate_access:{purpose:'ordinary',restricted_identity:null,control_authority_ref:access.control_authority_ref,control_epoch:access.control_epoch,
@@ -109,11 +141,16 @@ function materialize({initial,encoding,ready,principalAuthorization,ids,issue,pr
   encoding_ref:encoding.ref,encoding_response_ref:encoding.response.ref,permit_ref:ref(ids.permit,permit),reports:[],evidence:[]};
  return {format:'command-final-admission/1',transaction_id:ids.transaction,command_id:command,prepare_id:encoding.value.prepare_id,commit_id:ids.commit,ids,
   encoding_ref:encoding.ref,encoding_response_ref:encoding.response.ref,principal_authorization_ref:principalAuthorization.ref,
-  hold,ownership_receipt:ownerReceipt,ownership,attempt,inventory,resource_after:after,transmission_charge:charge,guard,permit,permit_authority:authority,time,projections,seal};
+  hold,ownership_receipt:ownerReceipt,ownership,attempt,inventory,resource_after:after,transmission_charge:charge,guard,permit,permit_authority:authority,time,projections,seal,
+  ...(reference&&{schedule_guard:reference.schedule_guard})};
 }
-function validatePayloads(value,encoding,ready,features){
+export function commandGuardInstallBody(value,referenceContext=null){
+ need(value.guard.time_required?value.schedule_guard&&referenceContext:!value.schedule_guard&&referenceContext===null,'guard_reference');
+ return {guard:value.guard,content_digest:value.permit.content_digest,schedule_guard:value.schedule_guard??null,reference_context:referenceContext};
+}
+function validatePayloads(value,encoding,ready,features,referenceContext){
  const b=value.seal.binding,request=encoding.request.frame.body.request;
- const bodies={GUARD_INSTALL:{guard:value.guard,content_digest:value.permit.content_digest,schedule_guard:null,reference_context:null},
+ const bodies={GUARD_INSTALL:commandGuardInstallBody(value,referenceContext),
   DISPATCH:{permit:value.permit,gate_token:ready.value.gate_after.gate_token,send_window:value.permit.transmission.send_window,request,
    parameters_schema_digest:encoding.bound.action.parameters_schema_digest,guard_id:value.guard.guard_id,guard_digest:value.guard.guard_digest,
    prepare_id:encoding.value.prepare_id,packet:encoding.response.reply.frame.body.packet,resend_request_id:null}};
@@ -139,15 +176,18 @@ function commitFinalAdmission(db,{id,provider,tick,features}){
  const before=db.prepare('SELECT count(*) FROM command_transmission_issue').pluck().get(),previous=commandIssueHead(db);
  need(before<limits.max_transmissions,'budget');
  const ids=Object.fromEntries(['transaction','commit','hold','ownership','guard','budget','intent','permit','transmission','resource','time','seal'].map(k=>[k,crypto.randomUUID()]));
+ const reference=referenceAt(db,initial.source,current.ready,encoding,ids.guard,current.selected_tick_ns,provider);
  const input={initial,encoding,ready:current.ready,principalAuthorization:current.principal_authorization,ids,
-  issue:String(BigInt(previous)+1n),previous,before,selected:current.selected_tick_ns};
- let value=materialize({...input,sealed:String(tick())});
- validatePayloads(value,encoding,current.ready,features);
+  issue:String(BigInt(previous)+1n),previous,before,selected:current.selected_tick_ns,reference};
+ let value=materializeCommandFinalAdmission({...input,sealed:String(tick())});
+ validatePayloads(value,encoding,current.ready,features,reference?.reference_context);
  const projection=preparedCommandProjection(initial,value.inventory),write=result=>need(result.changes===1,'storage');
  // 当前资格在生成完整正文后重核，随后只进行本T2的同步写入，不跨IPC等待。
  const last=selectCommandFinalization(db,{id,provider,tick});need(same(last.encoding.ref,encoding.ref)&&same(last.actual.command.record.state_ref,initial.record.state_ref)&&
   same(last.principal_authorization,current.principal_authorization),'changed');
- value=materialize({...input,sealed:String(tick())});
+ const sealing=tick();
+ recheckReference(reference,initial.source,provider,sealing);
+ value=materializeCommandFinalAdmission({...input,sealed:String(sealing)});
  write(db.prepare('INSERT INTO command_final_admission VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(ids.transaction,value.command_id,id,initial.source.binding_ref.id,ids.permit,ids.hold,value.attempt.attempt_id,ids.seal,ids.intent,canonical(value),digest(value),ids.commit));
  write(db.prepare('INSERT INTO command_device_hold VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(ids.hold,ids.transaction,value.command_id,initial.source.binding.device_id,ids.ownership,
   value.ownership_receipt.receipt_id,canonical(value.ownership_receipt),digest(value.ownership_receipt),canonical(value.hold),digest(value.hold),canonical(value.ownership),value.ownership.ownership_digest));
@@ -163,13 +203,14 @@ function commitFinalAdmission(db,{id,provider,tick,features}){
  write(db.prepare('INSERT INTO command_lifecycle_commit VALUES(?,?,2,?,?,?,?,?)').run(ids.commit,value.command_id,canonical(commit),digest(commit),audit,crypto.randomUUID(),audit));
  write(db.prepare('INSERT INTO command_lifecycle_head VALUES(?,2,?)').run(value.command_id,ids.commit));
  const saved=readCommandRecord(db,value.command_id);
+ recheckReference(reference,initial.source,provider,tick());
  need(tick()<BigInt(value.seal.send_window.before_tick_ns),'expired');return {saved,replay:false};
 }
 // 仅重建固定历史，不查询当前授权，也不返回发送权。当前公开头另由命令reader核验。
 export function readCommandFinalAdmission(db,initial,reference){return memoExecutionRead(db,'command-final-admission',reference,()=>readFinalAdmission(db,initial,reference));}
-function readFinalAdmission(db,initial,reference){
+function readFinalAdmission(db,initial,referenceArg){
  need(db.inTransaction,'writer');const r=row(db,'SELECT * FROM command_final_admission WHERE command_id=?',initial.source.command_id);need(r,'missing');
- const value=parse(r.body_jcs,r.body_digest);need(same({id:r.transaction_id,revision:'1',digest:r.body_digest},reference),'reference');
+ const value=parse(r.body_jcs,r.body_digest);need(same({id:r.transaction_id,revision:'1',digest:r.body_digest},referenceArg),'reference');
  const encoding=readCommandEncoding(db,r.prepare_id),ready=readInitialReady(db,initial.source.ready_ref.id),
   principalAuthorization=readCommandPrincipalAuthorization(db,initial.source);
  const issue=Number(db.pragma('user_version',{simple:true}))>=92
@@ -179,7 +220,10 @@ function readFinalAdmission(db,initial,reference){
  const hold=row(db,'SELECT * FROM command_device_hold WHERE transaction_id=?',r.transaction_id),
   inventory=row(db,'SELECT * FROM command_attempt_inventory WHERE transaction_id=?',r.transaction_id);need(issue&&hold&&inventory,'write_set');
  const before=db.prepare('SELECT count(*) FROM command_transmission_issue WHERE issued_revision<?').pluck().get(issue.issued_revision),previous=commandIssueHead(db,issue.issued_revision);
- const expected=materialize({initial,encoding,ready,principalAuthorization,ids:value.ids,issue:String(BigInt(issue.issued_revision)),previous,before,
+ const clock=value.guard.time_required?{context_ref:value.guard.reference_time.context_ref,valid_before_tick_ns:value.time.reference_before_tick_ns}:null;
+ const reference=referenceFor(db,initial.source,ready,encoding,value.ids.guard,value.seal.selected_tick_ns,clock);
+ if(reference)assertScheduledGuardCurrent(reference,initial.source,reference.snapshot,value.seal.sealed_tick_ns);
+ const expected=materializeCommandFinalAdmission({initial,encoding,ready,principalAuthorization,ids:value.ids,issue:String(BigInt(issue.issued_revision)),previous,before,reference,
   selected:value.seal.selected_tick_ns,sealed:value.seal.sealed_tick_ns});
  need(r.body_jcs===canonical(expected)&&r.transaction_id===value.ids.transaction&&r.commit_id===value.ids.commit&&r.command_id===value.command_id&&r.permit_id===value.ids.permit&&
   r.hold_id===value.ids.hold&&r.attempt_id===value.attempt.attempt_id&&r.seal_id===value.ids.seal&&r.dispatch_intent_id===value.ids.intent&&r.binding_id===initial.source.binding_ref.id,'binding');
@@ -190,7 +234,7 @@ function readFinalAdmission(db,initial,reference){
   hold.receipt_id===value.ownership_receipt.receipt_id&&hold.receipt_jcs===canonical(value.ownership_receipt)&&hold.receipt_digest===digest(value.ownership_receipt)&&
   hold.hold_jcs===canonical(value.hold)&&hold.hold_digest===digest(value.hold)&&hold.ownership_jcs===canonical(value.ownership)&&hold.ownership_digest===value.ownership.ownership_digest&&
   inventory.command_id===r.command_id&&inventory.revision===2&&inventory.attempt_id===r.attempt_id&&inventory.body_jcs===canonical(value.inventory)&&inventory.body_digest===digest(value.inventory),'write_set');
- return {value,ref:reference,projection:preparedCommandProjection(initial,value.inventory)};
+ return {value,ref:referenceArg,projection:preparedCommandProjection(initial,value.inventory),...(reference&&{clock_reference:reference})};
 }
 export function observeCommandFinalAdmission(db,{commandId,binding,tick,readOnly=false}){
  need(db.inTransaction,'observer_writer');
@@ -230,10 +274,11 @@ export function currentPreparedCommand(db,{id,binding,provider,tick}){
   const encoding=readCommandEncoding(db,v.prepare_id),actual=provider.currentPrepared(id,encoding.value.identity_snapshot,final.ref),
    observation=observeCommandFinalAdmission(db,{commandId:id,binding,tick,readOnly:true});
   need(same(actual.execution.ready.prepared_resource,{final_admission_ref:final.ref,resource:v.resource_after})&&
-   actual.expires_tick_ns===v.seal.send_window.before_tick_ns&&same(actual.command.record.state_ref,saved.record.state_ref)&&
+   actual.expires_tick_ns===encoding.value.authorization.expires_tick_ns&&same(actual.command.record.state_ref,saved.record.state_ref)&&
    encoding.response?.value.disposition==='prepared'&&same(encoding.ref,v.encoding_ref)&&same(encoding.response.ref,v.encoding_response_ref),'prepared_changed');
   const now=tick();need(now>=BigInt(observation.observed_tick_ns)&&now>=BigInt(v.seal.sealed_tick_ns)&&
    now>=BigInt(actual.now.tick)&&now<BigInt(v.seal.send_window.before_tick_ns),'prepared_expired');
+  recheckReference(final.clock_reference,saved.source,provider,now);
   // 全部当前资格和原截止复核成功后，才合并该命令的周期监视；历史读取不经过这里。
   provider.notePreparedQualification?.(saved.source.ready_ref,id);
   return {saved,final,encoding,observation,selected_tick_ns:String(now)};

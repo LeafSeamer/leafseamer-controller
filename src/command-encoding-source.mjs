@@ -3,6 +3,7 @@ import {canonical,digest,same} from './auth-clock-value.mjs';
 import {readCommandRecord,commandPolicyInput,automationActionPolicy} from './command-record-store.mjs';
 import {selectAuthenticationWindow,currentAuthenticationWindow} from './authentication-window.mjs';
 import {deviceExecutionCapabilities} from './sdk/device-execution.mjs';
+import {readInitialReady} from './device-initial-ready.mjs';
 const need=(value,code)=>{if(!value)throw new IdentityError('command_encoding_'+code);};
 const reference=(id,value)=>({id,revision:'1',digest:digest(value)});
 
@@ -27,6 +28,9 @@ export function automationCommandExecutionSource({db,service,devices,executionCu
   const {ready,ref,value,negotiation}=execution;
   need(ready&&ready.value.gate_after.phase==='ready'&&same(ready.value.binding,value.binding)&&
    deviceExecutionCapabilities.automation.every(feature=>negotiation?.selected_features.includes(feature)),'automation_ready');
+  const schedule=verified.schedule_binding;
+  if(schedule)need(readInitialReady(db,ready.ref.id).dispatch.plan.resource.reference_time_snapshot&&
+   deviceExecutionCapabilities.reference.every(feature=>negotiation?.selected_features.includes(feature)),'automation_reference');
   const action=registered.bindings.find(item=>item.kind==='action'&&same(item.content_ref,action_binding_ref));
   need(registered.registration.device_session_id===value.binding.device_session_id&&action?.value.device_id===target.device_id&&
    action.value.capability_id===target.action_id&&registered.registration.capability_version===target.capability_version&&
@@ -40,7 +44,7 @@ export function automationCommandExecutionSource({db,service,devices,executionCu
    origin:{execution_ref:verified.execution_ref,step_id:verified.step_id,parameters_ref:verified.parameters_ref,
     action_binding_ref,registration_ref:registered.registration_ref,grant_ref,
     run_id:verified.run_id,arm_generation:verified.arm_generation,definition_version:verified.definition_version},
-   action_policy:automationActionPolicy(verified,execution)};
+   action_policy:automationActionPolicy(verified,execution),...(schedule&&{schedule_binding:schedule})};
   return {basis,execution,now,readyExpires:ready.value.expires_tick_ns,validFrom:not_before_ns,validBefore:eligible_before_ns};
  }
  function input(value,core,acquisition,selectedTick,capTick){
@@ -72,7 +76,7 @@ export function automationCommandExecutionSource({db,service,devices,executionCu
 }
 
 // 仅核心装配持有此提供者。命令ID定位同库已受理来源，不能从HTTP提交身份快照或授权正文。
-export function commandEncodingSource({db,service,currentRecordedToken,devices,executionCurrent,coreSource,automationExecution=null}){
+export function commandEncodingSource({db,service,currentRecordedToken,devices,executionCurrent,coreSource,automationExecution=null,clockReference=null}){
  function automated(command,preparedRef){
   need(automationExecution,'automation_observation');
   const s=command.source,execution=automationExecution.current(s.command_id,preparedRef),actor=s.metadata.actor,now=coreSource.domain();
@@ -123,6 +127,7 @@ export function commandEncodingSource({db,service,currentRecordedToken,devices,e
    return {...actual,snapshot,snapshot_ref:reference(id+'.encoding-identity',snapshot),expires_tick_ns:window.before_tick_ns};
   }
  return Object.freeze({
+  ...(clockReference&&{readCommandReference:clockReference.readFirst,isCommandReferenceCurrent:clockReference.isCurrent}),
   select(id){
    const actual=collect(id);if(actual.command.source.metadata.origin==='automation')return actual;
    const core=coreSource.selectCoreSource();

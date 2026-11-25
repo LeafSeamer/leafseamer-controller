@@ -15,6 +15,7 @@ import {readUnsentCommand} from './command-unsent-recovery.mjs';
 import {readObsCutReconciliation} from './obs-cut-reconciliation.mjs';
 import {readCommandFinalAdmission} from './command-final-admission.mjs';
 import {verifyCommandReferenceAcceptance} from './reference-time-anchor.mjs';
+import {scheduledDispatch} from './command-reference-time.mjs';
 import {obsCutModuleDefinition} from './obs-module-profile.mjs';
 import {encodeObsCutPacket,obsCutPacketBytes,readObsCutPacket} from './obs-cut-packet.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('command_'+code);};
@@ -35,13 +36,15 @@ function validate(record){
 function original(text,hash){const value=JSON.parse(text);need(canonical(value)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===hash,'record_integrity');return value;}
 const actor=proof=>({principal_id:proof.principal_id,session_id:proof.session_id,authorization_revision:proof.policy_revision,
  issuer_id:proof.issuer_id,issuer_epoch:proof.issuer_epoch,local_subject_id:proof.principal_id});
-export function commandPolicyInput(value,execution){
+export function commandPolicyInput(value,execution,scheduleBinding=null){
  const b=execution.value,p=value.parameters,obs=b.transport_profile?.format==='leafseamer-obs-cut-transport/1';
  const selected=obs?obsCutModuleDefinition.template:template,action=selected.actions[0];
  need(execution.catalog.qualification.template_digest===digest(selected)&&b.action.action_id===action.action_id&&
   b.action.parameters_schema_digest===action.parameters_schema.digest&&b.action.result_schema_digest===action.result_schema.digest,'capability');
  need(value.action_id===action.action_id&&value.capability_version===action.capability_version,'capability');
- need(value.dispatch.mode==='immediate','reference_time_required');
+ if(scheduleBinding){
+  need(value.origin==='automation'&&!obs&&same(value.dispatch,scheduledDispatch(scheduleBinding,value.automation_binding,value.dispatch.max_queue_ms)),'reference_time_required');
+ }else need(value.dispatch.mode==='immediate','reference_time_required');
  need(Array.isArray(value.preconditions)&&value.preconditions.length===0,'preconditions');
  need(action.completion.supported.includes(value.required_completion),'completion');
  need(value.evidence_timeout_ms>0&&value.evidence_timeout_ms<=action.evidence_timeout_ms,'evidence_timeout');
@@ -185,15 +188,18 @@ function automationRequest(initial,request){
  const run_binding={run_id,definition_version,arm_generation,step_id,logical_action_id:step_id,grant_id:grant_ref.object_id,grant_revision:grant_ref.revision};
  const left=BigInt(window.before_tick_ns)-BigInt(window.selected_tick_ns);
  need(left>0n&&left<=5000000000n,'automation_deadline');
+ const max_queue_ms=Number((left+999999n)/1000000n);
+ const dispatch=basis.schedule_binding?scheduledDispatch(basis.schedule_binding,automation_binding,max_queue_ms):{mode:'immediate',max_queue_ms};
  return {context_id:request.action.preparation.lookup.preparation_id,idempotency_key:request.idempotency_key,...initial.target,
   parameters:initial.authority.parameters,expected_control:control_binding,origin:'automation',run_binding,automation_binding,
-  required_completion:action_policy.required_completion,preconditions:[],dispatch:{mode:'immediate',max_queue_ms:Number((left+999999n)/1000000n)},
+  required_completion:action_policy.required_completion,preconditions:[],dispatch,
   evidence_timeout_ms:action_policy.evidence_timeout_ms};
 }
 export function storeAutomationCommandRecord(db,{command:initial,adjudication,request,commit},execution){
  need(db.inTransaction&&initial.format==='leafseamer.automation-command/2','writer');
  const id=initial.command_id,{identity}=adjudication,scope=identity.key.target_scope,basis=initial.execution_basis,{authentication_window:window}=basis;
- const value=automationRequest(initial,request),{context_id,idempotency_key,...executionContent}=value,policies=commandPolicyInput(value,execution);
+ const value=automationRequest(initial,request),{context_id,idempotency_key,...executionContent}=value;
+ const scheduleBinding=basis.schedule_binding??null,policies=commandPolicyInput(value,execution,scheduleBinding);
  need(same(basis.binding_ref,execution.ref)&&same(basis.ready_ref,execution.ready.ref)&&same(basis.binding,execution.value.binding)&&
   digest(policies.completion)===basis.action_policy.completion_policy_digest&&digest(policies.release)===basis.action_policy.release_policy_digest,'automation_source');
  commandCapacity(db,value.device_id);
@@ -201,6 +207,7 @@ export function storeAutomationCommandRecord(db,{command:initial,adjudication,re
  const source={format:'command-admission-source/2',command_id:id,initial_ref:initialRef,
   admission_ref:{id:adjudication.adjudication_id,revision:'1',digest:adjudication.adjudication_digest},binding_ref:basis.binding_ref,binding:basis.binding,ready_ref:basis.ready_ref,
   context_id:null,token_id:null,authorization_digest:digest(initial.authority),authentication_window:window,
+  ...(scheduleBinding&&{schedule_binding:scheduleBinding}),
   execution_request:value,execution_content_digest:digest(executionContent),policies,
   deadline:{format:'command-deadline/1',command_id:id,scope,accepted:{domain:window.domain_ref,tick_ns:window.selected_tick_ns},dispatch:value.dispatch,
    queue_deadline_tick_ns:window.before_tick_ns,evidence_timeout_ms:value.evidence_timeout_ms},
@@ -274,7 +281,7 @@ function readInitialRecord(db,id){
    same(sealed,{command:initial,adjudication,commit:JSON.parse(ct.toString()),request:content})&&same(initial.identity,a.identity)&&
    source.context_id===null&&source.token_id===null&&source.metadata.accepted_at===null&&
    same(source.binding_ref,basis.binding_ref)&&same(source.binding,basis.binding)&&same(source.ready_ref,basis.ready_ref)&&
-   same(source.authentication_window,basis.authentication_window)&&
+   same(source.authentication_window,basis.authentication_window)&&same(source.schedule_binding,basis.schedule_binding)&&
    same(source.execution_request,value)&&source.execution_content_digest===digest(body)&&source.authorization_digest===digest(initial.authority)&&
    same(source.deadline.accepted,accepted)&&source.deadline.queue_deadline_tick_ns===basis.authentication_window.before_tick_ns&&
    same(source.metadata.target,initial.target)&&same(source.metadata.run_binding,value.run_binding)&&same(source.metadata.automation_binding,value.automation_binding)&&
@@ -300,7 +307,7 @@ function readInitialRecord(db,id){
   const ref=binding.catalog_approval_ref,row=db.prepare('SELECT body_jcs,body_digest FROM device_catalog_approval WHERE approval_id=?').raw().get(ref.id);
   need(row&&row[1]===ref.digest,'record_policy');
   const catalog=original(...row);
-  need(same(source.policies,commandPolicyInput(value,{value:binding,catalog})),'record_policy');
+  need(same(source.policies,commandPolicyInput(value,{value:binding,catalog},source.schedule_binding)),'record_policy');
  }
  need(same(policy.admission_ref,source.admission_ref)&&same(policy.original_deadline_ref,reference(id+'_deadline',source.deadline))&&
   same(policy.completion_policy_ref,reference(id+'_completion_policy',source.policies.completion))&&same(policy.release_policy_ref,reference(id+'_release_policy',source.policies.release))&&

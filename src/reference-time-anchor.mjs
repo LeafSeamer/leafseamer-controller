@@ -116,6 +116,11 @@ export function referenceGateSnapshot({state,bundle},binding) {
 }
 
 export function readReferenceGateSnapshot(db,binding,reference) {
+  const original=readCommandReferenceOriginal(db,binding,reference);
+  return referenceGateSnapshot(original,binding);
+}
+
+export function readCommandReferenceOriginal(db,binding,reference) {
   if(!db.inTransaction)throw new Error('reference_gate_snapshot_writer');
   const saved=bundleRecord(db,reference.id);
   const session=db.prepare('SELECT service_boot_id FROM execution_session WHERE ipc_session_id=?').pluck().get(binding.ipc_session_id);
@@ -123,7 +128,9 @@ export function readReferenceGateSnapshot(db,binding,reference) {
     reference.digest===saved.record.body.reference_bundle?.digest);
   const original=storedBundle(saved.record,saved.runtime);
   requireQualified(original.bundle.bundle_id===reference.id&&original.bundle.bundle_digest===reference.digest);
-  return referenceGateSnapshot(original,binding);
+  const {approval,evidence}=saved.record.body;
+  const expires=[approval.valid_before_tick_ns,evidence.valid_before_tick_ns].map(clockInteger).reduce((a,b)=>a<b?a:b);
+  return {...original,service_boot_id:session,published_tick_ns:saved.record.body.published_tick_ns,authority_before_tick_ns:String(expires)};
 }
 
 function acceptedProjection(record, accepted) {

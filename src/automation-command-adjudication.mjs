@@ -34,7 +34,7 @@ export function automationCommandStore({db,scope,writer,time,authorize,prepare,r
     same(origin?.execution_ref,request.action.execution_ref)&&same(origin?.parameters_ref,request.action.parameters_ref)&&
     same(origin?.grant_ref,request.action.preparation.grant_ref)&&origin.step_id===request.action.step_id&&
     origin.registration_ref?.kind==='source_registration'&&same(origin.registration_ref.scope,scope)&&
-    same(origin.action_binding_ref,authority.action_binding_ref)&&origin.run_id===authority.run_id&&
+    same(origin.action_binding_ref,authority.action_binding_ref)&&same(basis.schedule_binding,authority.schedule_binding)&&origin.run_id===authority.run_id&&
     origin.arm_generation===authority.arm_generation&&origin.definition_version===authority.definition_version&&
     window?.valid_from_ns===authority.not_before_ns&&window.valid_before_ns===authority.eligible_before_ns&&
     same(window.acquisition_ref,command.accepted_acquisition_ref)&&

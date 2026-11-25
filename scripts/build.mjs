@@ -77,6 +77,7 @@ for(const name of ['device-execution-journal.mjs','device-execution.sql','device
 files.push(['device-packet-preparation.mjs',await fs.readFile(path.join(root,'src/device-packet-preparation.mjs'))]);
 files.push(['device-transmission-writer.mjs',await fs.readFile(path.join(root,'src/device-transmission-writer.mjs'))]);
 files.push(['device-reference-guard.mjs',await fs.readFile(path.join(root,'src/device-reference-guard.mjs'))]);
+files.push(['command-reference-time.mjs',await fs.readFile(path.join(root,'src/command-reference-time.mjs'))]);
 files.push(['device-execution-gate.mjs',await fs.readFile(path.join(root,'src/device-execution-gate.mjs'))]);
 files.push(['device-authorization-fence.mjs',await fs.readFile(path.join(root,'src/device-authorization-fence.mjs'))]);
 files.push(['device-worker-session.mjs',await fs.readFile(path.join(root,'src/device-worker-session.mjs'))]);

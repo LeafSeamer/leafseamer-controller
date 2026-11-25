@@ -7,7 +7,7 @@ import {canonical,digest,same} from './auth-clock-value.mjs';
 import {DeviceExecutionError,executionWire} from './device-execution-channel.mjs';
 import {preparedFrame,insertFrame} from './device-execution-handshake.mjs';
 import {executionTick} from './device-execution-handshake.mjs';
-import {currentPreparedCommand,readCommandFinalAdmission} from './command-final-admission.mjs';
+import {currentPreparedCommand,readCommandFinalAdmission,commandGuardInstallBody} from './command-final-admission.mjs';
 import {readOriginalRecord} from './command-record-store.mjs';
 import {deviceExecutionVersion,assertDeviceExecutionFeatures} from './sdk/device-execution.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError('command_guard_'+code);};
@@ -16,11 +16,12 @@ const hash=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('he
 const parse=cacheVerifiedDocument((text,hash)=>{const v=JSON.parse(text);need(canonical(v)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===hash,'integrity');return v;});
 const written=result=>need(result.changes===1,'storage');
 const row=sqliteRow;
-const body=v=>({guard:v.guard,content_digest:v.permit.content_digest,schedule_guard:null,reference_context:null});
+const body=final=>commandGuardInstallBody(final.value,final.clock_reference?.reference_context);
 function expectedAck(v){const g=v.guard;return {guard_id:g.guard_id,guard_digest:g.guard_digest,content_digest:v.permit.content_digest,
  permit_id:g.permit_id,command_id:g.command_id,installed_authorization_revision:g.authorization_revision,state:'installed',
- panel_binding_digest:null,automation_binding_digest:g.automation_binding?digest(g.automation_binding):null,reference_time_digest:null,
- schedule_guard_digest:null,gate_access_ref:g.gate_access_ref,ownership_ref:g.ownership_ref};}
+ panel_binding_digest:null,automation_binding_digest:g.automation_binding?digest(g.automation_binding):null,
+ reference_time_digest:g.reference_time?digest(g.reference_time):null,
+ schedule_guard_digest:v.schedule_guard?.guard_digest??null,gate_access_ref:g.gate_access_ref,ownership_ref:g.ownership_ref};}
 function effect(db,item,id,phase,value,now){
  const domain={transaction_id:item.transaction,source_ref:ref(id+(phase==='request'?'':'.response'),value)},audit={kind:'command_guard_'+phase,guard_id:id,source_digest:digest(value)};
  const e={record_ref:{id:item.record.record_id,revision:'1',digest:item.record.record_digest},disposition:'applied',domain_commit_refs:[ref(item.transaction,domain)],
@@ -61,7 +62,7 @@ function readGuard(db,id){
  need(final&&final.value.guard.guard_id===id,'final_source');
  const value=parse(r.body_jcs,r.body_digest),request=applied(db,r.record_id,id,'request',value);
  need(same(value,{format:'command-guard-install/1',guard_id:id,final_admission_ref:final.ref,request_record_ref:{id:r.record_id,revision:'1',digest:request.record.record_digest}})&&
-  same(request.frame.body,body(final.value))&&request.frame.ipc_session_id===final.value.seal.binding.ipc_session_id&&
+  same(request.frame.body,body(final))&&request.frame.ipc_session_id===final.value.seal.binding.ipc_session_id&&
   request.frame.device_id===final.value.seal.binding.device_id,'request');
  const saved={value,ref:ref(id,value),request,final,command_id:commandId};
  const a=row(db,'SELECT * FROM command_guard_ack WHERE guard_id=?',id);if(!a)return {...saved,ack:null};
@@ -82,12 +83,12 @@ export function selectCommandGuard(db,{id,binding,provider,tick,features}){
  const previous=db.prepare("SELECT sequence FROM execution_frame_record WHERE ipc_session_id=? AND direction='c2w' ORDER BY sequence DESC LIMIT 1").pluck().get(binding.ipc_session_id);
  const frame={ipc_version:deviceExecutionVersion,type:'GUARD_INSTALL',message_id:crypto.randomUUID(),reply_to:null,ipc_session_id:binding.ipc_session_id,
   controller_boot_id:binding.controller_boot_id,worker_boot_id:binding.worker_boot_id,seq:String(BigInt(previous)+1n),device_id:v.seal.binding.device_id,
-  clock_domain_id:binding.clock_domain_id,descriptor_digest:binding.descriptor_digest,journal_mode:'durable',body:body(v)};
+  clock_domain_id:binding.clock_domain_id,descriptor_digest:binding.descriptor_digest,journal_mode:'durable',body:body(actual.final)};
  assertDeviceExecutionFeatures(frame,features);return {frame,id};
 }
 export function commitCommandGuard(db,{candidate,binding,provider,tick}){
  const actual=currentPreparedCommand(db,{id:candidate.id,binding,provider,tick}),v=actual.final.value;
- need(same(candidate.frame.body,body(v)),'changed');const item=preparedFrame(binding,candidate.frame,Buffer.from(JSON.stringify(candidate.frame)),'c2w',tick()),id=v.guard.guard_id;
+ need(same(candidate.frame.body,body(actual.final)),'changed');const item=preparedFrame(binding,candidate.frame,Buffer.from(JSON.stringify(candidate.frame)),'c2w',tick()),id=v.guard.guard_id;
  const value={format:'command-guard-install/1',guard_id:id,final_admission_ref:actual.final.ref,request_record_ref:{id:item.record.record_id,revision:'1',digest:item.record.record_digest}};
  insertFrame(db,item,'command_guard');
  written(db.prepare('INSERT INTO command_guard_request VALUES(?,?,?,?,?,?)').run(id,v.transaction_id,item.record.record_id,item.transaction,canonical(value),digest(value)));

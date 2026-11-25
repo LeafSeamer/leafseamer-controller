@@ -16,6 +16,8 @@ import {deviceExecutionVersion} from '../dist/sdk/device-execution.mjs';
 import {referenceBundleAuthority} from './fixtures/reference-bundle-authority.mjs';
 import {readReferenceGateSnapshot,referenceGateSnapshot} from '../dist/reference-time-anchor.mjs';
 import {encodeReferenceBundle} from '../dist/reference-time-bundle.mjs';
+import {prepareScheduledGuard,assertScheduledGuardCurrent} from '../dist/command-reference-time.mjs';
+import {commandGuardInstallBody,materializeCommandFinalAdmission} from '../dist/command-final-admission.mjs';
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(typeof value==='string'?value:canonicalize(value)).digest('hex');
 const raw=value=>Buffer.from(JSON.stringify(value));
 const ref=id=>({id,revision:'1',digest:hash(id)});
@@ -273,6 +275,56 @@ test('定时发送在设备出口重算 UTC，拒绝提前发送和截止等号'
   const report=await f.response(await f.writer.dispatch(raw(f.dispatch)));
   assert.equal(report.body.disposition,write?'in_flight':'not_sent');assert.equal(f.writes(),Number(write));
  }
+});
+test('Controller 封存定时守卫并沿原界限交给 Worker 安装',async()=>{
+ const origin=automationOrigin(),binding={format:'leafseamer.schedule-step-binding/1',execution_ref:{...origin.execution_binding_ref,kind:'execution'},
+  occurrence_ref:ref('occurrence'),admission_ref:{...ref('occurrence'),digest:hash('admission receipt')},definition_artifact_ref:ref('artifact'),
+  schedule_version:'1',activation_ref:ref('activation'),step_id:origin.step_id,step_window_ref:ref('window'),
+  window:{not_before_utc_ns:'0',not_after_utc_ns:'1000000'}};
+ const source={schedule_binding:binding,metadata:{dispatch:scheduled,automation_binding:origin},deadline:{queue_deadline_tick_ns:'85'}};
+ let expected;
+ const f=await sending({origin,dispatch:scheduled,reference(domain){
+  const supplied=scheduledReference(domain,origin);
+  const original={bundle:supplied.reference_context,state:supplied.state,published_tick_ns:'2',authority_before_tick_ns:'110'};
+  const snapshot={domain,minimum_time_generation:'1'};
+  const input={source,snapshot,original,validBefore:'80',authorizedBefore:'100',selected:'10',id:'guard'};
+  expected=prepareScheduledGuard(input);
+  assert.equal(expected.deadline,'80');
+  assert.equal(prepareScheduledGuard({...input,authorizedBefore:'70'}).deadline,'70');
+  assert.throws(()=>prepareScheduledGuard({...input,source:{...source,schedule_binding:{...binding,step_id:'wrong'}}}),/command_reference_source/);
+  assert.throws(()=>prepareScheduledGuard({...input,snapshot:{...snapshot,minimum_time_generation:'2'}}),/command_reference_generation/);
+  assert.throws(()=>prepareScheduledGuard({...input,selected:'80'}),/command_reference_expired/);
+  assert.throws(()=>assertScheduledGuardCurrent(expected,source,snapshot,'30'),/command_reference_window/);
+  return {...expected,state:original.state};
+ }});
+ const ids=Object.fromEntries(['transaction','commit','hold','ownership','guard','budget','intent','permit','transmission','resource','time','seal'].map(key=>[key,key]));
+ const {packet}=f.dispatch.body,authorization=f.encoded.body.encoding_authorization;
+ const initial={source:{...source,binding:f.binding,command_id:packet.command_id,initial_ref:ref('command'),admission_ref:ref('admission'),
+  policies:{capacity:{per_command:{max_packet_bytes:8}}}},
+  record:{state_ref:ref('queued'),state:{revision:'1'},policy:{original_deadline_ref:ref('deadline')}}};
+ const encoding={ref:ref('encoding'),response:{ref:ref('prepared'),reply:{frame:{body:{packet}},committedTick:3n},
+  value:{evidence:{evidence_id:'prepared',revision:'1',evidence_digest:hash('prepared'),received_tick_ns:'3'}}},
+  value:{prepare_id:'prepare',authorization,identity_snapshot:{authentication_window:{selected_tick_ns:'1',before_tick_ns:'90'}}},
+  bound:{capability_ref:ref('capability')}};
+ const {gate_access:access,run_deny_snapshot,command_deny_snapshot,reference_time_snapshot}=f.open.body;
+ const ready={ref:ref('ready'),value:{control_after_ref:ref('ready_control'),gate_after:{gate_revision:'1'}},
+  dispatch:{plan:{id:'opening',access,resource:{state_id:'free',revision:'1',state_digest:hash('free resource'),
+   holds:[],run_deny_snapshot,command_deny_snapshot,reference_time_snapshot}}}};
+ const final=materializeCommandFinalAdmission({initial,encoding,ready,principalAuthorization:{ref:ref('auth'),binding:f.install.body.guard.binding},
+  ids,issue:'1',previous:'0',before:0,selected:'10',sealed:'11',reference:expected});
+ assert.equal(final.seal.send_window.before_tick_ns,'80');
+ assert.equal(final.projections.encoding.body.expires_tick_ns,authorization.expires_tick_ns);
+ assert.deepEqual(final.time.reference_time,expected.reference_time);
+ const installed=f.envelope('GUARD_INSTALL','controller_guard',commandGuardInstallBody(final,expected.reference_context));
+ f.tick(11n);
+ const ack=await f.response(await f.writer.installGuard(raw(installed)));
+ assert.equal(ack.body.reference_time_digest,hash(expected.reference_time));
+ assert.equal(ack.body.schedule_guard_digest,expected.schedule_guard.guard_digest);
+ f.tick(29n);
+ const dispatch=f.envelope('DISPATCH','controller_dispatch',{...f.dispatch.body,permit:final.permit,
+  guard_id:final.guard.guard_id,guard_digest:final.guard.guard_digest,send_window:final.permit.transmission.send_window});
+ assert.equal((await f.writer.dispatch(raw(dispatch))).body.disposition,'in_flight');
+ assert.equal(f.writes(),1);
 });
 
 test('定时守卫核对步骤身份，发送许可不得延长原队列截止',async()=>{
