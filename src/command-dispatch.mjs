@@ -75,6 +75,14 @@ function validateEvidence(saved,frame,receivedTick){
   Number.isSafeInteger(o.bytes_written)&&o.bytes_written>=0&&o.bytes_written<=saved.final.value.transmission_charge.charged.bytes&&r.transport_entered_tick_ns!==null&&
   BigInt(o.observed_tick_ns)>=BigInt(r.transport_entered_tick_ns)&&BigInt(o.observed_tick_ns)<=receivedTick,'evidence_binding');
 }
+function readDispatchWrite(db,saved){
+ const id=saved.value.permit_id,w=row(db,'SELECT * FROM command_dispatch_write WHERE permit_id=?',id);if(!w)return null;
+ const value=parse(w.body_jcs,w.body_digest),attempt=row(db,'SELECT record_id,started_tick FROM execution_write_attempt WHERE attempt_id=?',w.write_attempt_id);
+ need(attempt&&attempt.record_id===saved.request.record.record_id&&same(value,{format:'command-dispatch-write/1',permit_id:id,request_ref:saved.ref,
+  write_attempt_id:w.write_attempt_id,started_tick_ns:String(BigInt(attempt.started_tick)),commit_id:w.commit_id})&&
+  BigInt(attempt.started_tick)>=saved.request.committedTick,'write');
+ return {value,ref:ref(id+'.write',value)};
+}
 export function readCommandDispatch(db,id){return withExecutionReadView(db,()=>memoExecutionRead(db,'command-dispatch',id,()=>readDispatch(db,id)));}
 function readDispatch(db,id){
  need(db.inTransaction,'writer');const r=row(db,'SELECT * FROM command_dispatch_request WHERE permit_id=?',id);need(r,'missing');
@@ -83,14 +91,10 @@ function readDispatch(db,id){
  need(same(value,{format:'command-dispatch-request/1',permit_id:id,final_admission_ref:final.ref,guard_ack_ref:guard.ack.ref,
   request_record_ref:{id:r.record_id,revision:'1',digest:request.record.record_digest}})&&same(request.frame.body,dispatchBody(db,guard)),'request');
  const saved={value,ref:ref(id,value),request,guard,final,write:null,report:null,evidence:null};
- const w=row(db,'SELECT * FROM command_dispatch_write WHERE permit_id=?',id);if(!w)return saved;
- const writeValue=parse(w.body_jcs,w.body_digest),attempt=row(db,'SELECT record_id,started_tick FROM execution_write_attempt WHERE attempt_id=?',w.write_attempt_id);
- need(attempt&&attempt.record_id===r.record_id&&same(writeValue,{format:'command-dispatch-write/1',permit_id:id,request_ref:saved.ref,write_attempt_id:w.write_attempt_id,
-  started_tick_ns:String(BigInt(attempt.started_tick)),commit_id:w.commit_id})&&BigInt(attempt.started_tick)>=request.committedTick,'write');
- saved.write={value:writeValue,ref:ref(id+'.write',writeValue)};
+ saved.write=readDispatchWrite(db,saved);if(!saved.write)return saved;
  const t=row(db,'SELECT * FROM command_dispatch_report WHERE permit_id=?',id);if(!t)return saved;
  const reportValue=parse(t.body_jcs,t.body_digest),reply=applied(db,t.record_id,id,'report',reportValue);validateReport(saved,reply.frame,reply.observedTick);
- need(t.write_attempt_id===w.write_attempt_id&&same(reportValue,{format:'command-dispatch-report/1',permit_id:id,request_ref:saved.ref,write_ref:saved.write.ref,
+ need(t.write_attempt_id===saved.write.value.write_attempt_id&&same(reportValue,{format:'command-dispatch-report/1',permit_id:id,request_ref:saved.ref,write_ref:saved.write.ref,
   record_ref:{id:t.record_id,revision:'1',digest:reply.record.record_digest},commit_id:t.commit_id}),'report');
  saved.report={value:reportValue,ref:ref(id+'.report',reportValue),reply};
  const e=row(db,'SELECT * FROM command_dispatch_evidence WHERE permit_id=?',id);if(!e)return saved;
@@ -123,16 +127,25 @@ export function commitCommandDispatch(db,{candidate,binding,provider,tick}){
 }
 function stateBody(saved,commit,projection,previous,source){return {format:'command-dispatch-state/1',commit_id:commit,command_id:saved.final.value.command_id,
  revision:projection.state.revision,dispatch_ref:saved.ref,source_ref:source,previous_state_ref:previous.state_ref,record_digest:projection.record.record_digest,state_digest:digest(projection.state)};}
+const selectDispatchState=`SELECT r.record_jcs,r.record_digest,r.state_jcs,r.state_digest,r.manifest_jcs,r.manifest_digest,
+ c.body_jcs,c.body_digest,c.audit_jcs,c.notification_jcs,c.revision,c.command_id
+ FROM command_lifecycle_revision r JOIN command_lifecycle_commit c USING(command_id,revision,commit_id)`;
+function revisionFields(projection){return [canonical(projection.record),projection.record.record_digest,canonical(projection.state),digest(projection.state),
+ canonical(projection.manifest),digest(projection.manifest)];}
+function verifyDispatchState(stored,fields){need(stored&&fields.every((value,index)=>stored[index]===value),'state_integrity');}
 function saveState(db,saved,commit,revision,source,initial=readCommandRecord(db,saved.final.value.command_id)){
  const id=saved.final.value.command_id,previous=initial.record;
  need(BigInt(previous.state.revision)+1n===BigInt(revision),'state_order');
  const projection=dispatchCommandProjection(initial,saved.final,revision,revision==='4'?saved.report.reply.frame.body:null),body=stateBody(saved,commit,projection,previous,source),
   audit=canonical({kind:'command_dispatch_state',command_id:id,revision,commit_ref:ref(commit,body)});
- written(db.prepare('INSERT INTO command_lifecycle_revision VALUES(?,?,?,?,?,?,?,?,?)').run(id,Number(revision),canonical(projection.record),projection.record.record_digest,
-  canonical(projection.state),digest(projection.state),canonical(projection.manifest),digest(projection.manifest),commit));
+ const fields=revisionFields(projection),bodyText=canonical(body),bodyDigest=digest(body);
+ written(db.prepare('INSERT INTO command_lifecycle_revision VALUES(?,?,?,?,?,?,?,?,?)').run(id,Number(revision),...fields,commit));
  written(db.prepare('UPDATE command_lifecycle_head SET revision=?,commit_id=? WHERE command_id=? AND revision=?').run(Number(revision),commit,id,Number(revision)-1));
- written(db.prepare('INSERT INTO command_lifecycle_commit VALUES(?,?,?,?,?,?,?,?)').run(commit,id,Number(revision),canonical(body),digest(body),audit,crypto.randomUUID(),audit));
- return readCommandRecord(db,id);
+ written(db.prepare('INSERT INTO command_lifecycle_commit VALUES(?,?,?,?,?,?,?,?)').run(commit,id,Number(revision),bodyText,bodyDigest,audit,crypto.randomUUID(),audit));
+ // 同一事务已核对原准入与前序状态。回读本次写入的头、修订、提交和审计字段。
+ const stored=db.prepare(selectDispatchState+` JOIN command_lifecycle_head h USING(command_id,revision,commit_id)
+  WHERE h.command_id=? AND h.revision=? AND h.commit_id=?`).raw().get(id,Number(revision),commit);
+ verifyDispatchState(stored,[...fields,bodyText,bodyDigest,audit,audit,Number(revision),id]);
 }
 export function startCommandDispatchWrite(db,{id,binding,provider,tick}){
  const {saved,initial}=withExecutionReadView(db,()=>{
@@ -144,7 +157,9 @@ export function startCommandDispatchWrite(db,{id,binding,provider,tick}){
   write_attempt_id:attempt,started_tick_ns:String(started),commit_id:commit};
  written(db.prepare('INSERT INTO execution_write_attempt VALUES(?,?,?)').run(attempt,saved.request.record.record_id,executionTick(started)));
  written(db.prepare('INSERT INTO command_dispatch_write VALUES(?,?,?,?,?)').run(id,attempt,commit,canonical(value),digest(value)));
- saveState(db,saved,commit,'3',ref(id+'.write',value),initial);
+ const write=readDispatchWrite(db,saved);
+ need(write&&same(write.value,value),'write');
+ saveState(db,saved,commit,'3',write.ref,initial);
  const before_tick=BigInt(saved.final.value.seal.send_window.before_tick_ns);
  need(tick()<before_tick,'expired');
  return {attempt_id:attempt,payload:saved.request.wire.subarray(4),before_tick};
@@ -177,14 +192,12 @@ export function readDispatchLifecycle(db,initial,head,headRow){
  need([3,4].includes(head[0]),'state_revision');const id=initial.source.command_id,permit=db.prepare('SELECT permit_id FROM command_final_admission WHERE command_id=?').pluck().get(id),saved=readCommandDispatch(db,permit);
  let previous=readPreparedCommandRecord(db,initial,saved.final).record,expected,body;
  for(let revision=3;revision<=head[0];revision++){
-  const r=revision===head[0]?headRow:db.prepare(`SELECT r.record_jcs,r.record_digest,r.state_jcs,r.state_digest,r.manifest_jcs,r.manifest_digest,c.body_jcs,c.body_digest,c.audit_jcs,c.notification_jcs,c.revision,c.command_id
-   FROM command_lifecycle_revision r JOIN command_lifecycle_commit c USING(command_id,revision,commit_id) WHERE r.command_id=? AND r.revision=?`).raw().get(id,revision);
+  const r=revision===head[0]?headRow:db.prepare(selectDispatchState+' WHERE r.command_id=? AND r.revision=?').raw().get(id,revision);
   const source=revision===3?saved.write:saved.report;need(r&&source,'state_source');const commit=source.value.commit_id;
   expected=dispatchCommandProjection(initial,saved.final,String(revision),revision===4?saved.report.reply.frame.body:null);body=stateBody(saved,commit,expected,previous,source.ref);
   const audit=canonical({kind:'command_dispatch_state',command_id:id,revision:String(revision),commit_ref:ref(commit,body)});
-  need(r[0]===canonical(expected.record)&&r[1]===expected.record.record_digest&&r[2]===canonical(expected.state)&&r[3]===digest(expected.state)&&
-   r[4]===canonical(expected.manifest)&&r[5]===digest(expected.manifest)&&r[6]===canonical(body)&&r[7]===digest(body)&&r[8]===audit&&r[9]===audit&&
-   r[10]===revision&&r[11]===id&&(revision!==head[0]||head[1]===commit),'state_integrity');previous=expected.record;
+  verifyDispatchState(r,[...revisionFields(expected),canonical(body),digest(body),audit,audit,revision,id]);
+  need(revision!==head[0]||head[1]===commit,'state_integrity');previous=expected.record;
  }
  return {...initial,record:expected.record,lifecycle:{commit_ref:ref(body.commit_id,body),final_admission:saved.final,dispatch:{ref:saved.ref,write_ref:saved.write.ref,report_ref:saved.report?.ref??null,evidence_ref:saved.evidence?.ref??null}}};
 }
