@@ -18,9 +18,7 @@ import {createSubscriptionEndpoint} from './service-subscription-http.mjs';
 import {createIntrospectionEndpoint} from './introspection-http.mjs';
 import {pairingFields, pairingUuid} from './peer-pairing-value.mjs';
 import {openTimeProviderLink} from './time-provider-link.mjs';
-import {referenceTimeScheduler} from './reference-time-scheduler.mjs';
-import canonicalize from './runtime/canonicalize.mjs';
-import {createHash} from 'node:crypto';
+import {openReferenceCaptureRuntime} from './reference-capture-runtime.mjs';
 
 export async function startController({dataDir, host = '127.0.0.1', port = 0, tls = null, authenticationProvider = null, guiDirectory = null, guiManifestSha256 = null, coreBootstrap = null, pairing = null, referenceTimeAuthorization = null, localPairingManagement = false, standalone = false, protectedIngressIdentity = null, linuxClockEvidenceProfile = null, composePairingAdmin = null, extensionInstallationSource = null} = {}) {
   const protectedIngress = protectedIngressIdentity !== null;
@@ -162,69 +160,15 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
         if (closing) throw new Error('controller_closing');
         assertRuntimeCurrent();
       };
-      const polls = storage.openTimeProviderPolls({
-        limits: timeAuthorization.limits,
+      ({api:referenceTimePolls,publication:referencePublication,scheduler:referenceSchedule}=openReferenceCaptureRuntime({
+        storage, authorization:timeAuthorization, authentication, link:timeProviderLink, assertCurrent:assertPollCurrent,
         allowSourceReplacement:!!installedCapture&&typeof linuxProvider.observeRetirement==='function',
-        readSource: slot=>timeAuthorization.readSource(slot,authentication),
-        readAuthentication: () => authentication.referenceTimeSample(),
-        assertCurrent: assertPollCurrent,
-        observeRetirement: installedCapture?original=>linuxProvider.observeRetirement?.(original,linuxSource.tick)??null:supervision.observeTimeProviderRetirement,
-        assertRetirement: installedCapture?observed=>{
+        observeRetirement:installedCapture?original=>linuxProvider.observeRetirement?.(original,linuxSource.tick)??null:supervision.observeTimeProviderRetirement,
+        assertRetirement:installedCapture?observed=>{
           if(!linuxProvider.assertRetirement)throw new Error('time_provider_poll_retirement_unavailable');
           linuxProvider.assertRetirement(observed);
         }:supervision.assertTimeProviderRetirement
-      });
-      const {readEndpoint, captureProtection, referenceAuthority, schedule} = timeAuthorization;
-      if (readEndpoint !== undefined && typeof readEndpoint !== 'function') throw new Error('time_provider_poll_endpoint_authority');
-      if (referenceAuthority !== undefined && !readEndpoint) throw new Error('reference_time_authority');
-      const publication = referenceAuthority===undefined ? null : storage.openReferenceTimeAnchor({...referenceAuthority,readContext:polls.referenceContext});
-      referencePublication=publication;
-      const archive = readEndpoint ? storage.openTimeProviderCapture(captureProtection,publication) : null;
-      function collect(pollRef, scheduled = null) {
-        return timeProviderLink.collect(() => {
-          let stored;
-          if (!scheduled) {
-            stored = polls.lookup(pollRef?.id);
-            if (!stored || stored.digest !== pollRef.digest || stored.reservation.service_boot_id !== storage.serviceBootId) {
-              throw new Error('time_provider_poll_identity_conflict');
-            }
-            if (stored.attempt) throw new Error('time_provider_poll_already_attempted');
-          }
-          const endpoint = (scheduled?.authorization??stored.reservation.authorization).endpoint_ref;
-          const encoded = canonicalize(readEndpoint(Object.freeze({...endpoint})));
-          if (typeof encoded !== 'string' || Buffer.byteLength(encoded) > 12000 ||
-              'sha256:' + createHash('sha256').update(encoded).digest('hex') !== endpoint.digest) {
-            throw new Error('time_provider_poll_endpoint_binding');
-          }
-          archive.assertWritable();
-          if (scheduled) {
-            stored=polls.reserve(scheduled.slot,scheduled.id,scheduled.authorization);
-            pollRef={id:scheduled.id,digest:stored.digest};
-          }
-          const attempt = polls.markAttempt(pollRef);
-          const reservation = stored.reservation, network=JSON.parse(encoded), authorize = () => polls.authorizeAttempt(attempt);
-          return {reservation, attempt, network, authorize,
-            ...(polls.storeControl && {storeControl:control=>polls.storeControl(attempt,control),releaseControl:polls.releaseControl}),
-            archive: (candidate,ntsBootstrap) => archive.store({reservation,attempt,candidate,authorize,network,ntsBootstrap}),
-            release: (receipt,acknowledgement) => archive.release({receipt,acknowledgement,reservation,assertCurrent:assertPollCurrent})};
-        });
-      }
-      if(schedule!==undefined) {
-        if(!schedule || Object.keys(schedule).join(',')!=='sourceSlots' || !archive || !polls.schedulePlan) {
-          throw new Error('reference_time_schedule_authority');
-        }
-        referenceSchedule=referenceTimeScheduler(schedule,{plan:polls.schedulePlan,recover:polls.recover,
-          collect:(slot,id,authorization)=>collect(null,{slot,id,authorization})});
-      }
-      referenceTimePolls = Object.freeze({lookup: polls.lookup, reserve:(slot,id)=>polls.reserve(slot,id), markAttempt: polls.markAttempt,
-        ...(polls.recover && {recover: polls.recover}),
-        ...(publication && {currentReference:publication.current,projectReferenceCapture:publication.projectCapture,readReferenceBundle:publication.readBundle,
-          receiverReference:publication.receiverReference}),
-        ...(publication?.protectionStatus && {referenceProtectionStatus:publication.protectionStatus}),
-        ...(publication?.protectionFenceSource && {referenceProtectionFenceSource:publication.protectionFenceSource}),
-        ...(referenceSchedule && {scheduleStatus:referenceSchedule.status}),
-        ...(archive && {lookupCapture: archive.lookup, readCapture: archive.read, async collect(pollRef){return collect(pollRef);}})
-      });
+      }));
     }
     const gui = guiDirectory === null ? null : loadGuiAssets(guiDirectory, storage.identity, tls.origin, {
       manifestSha256: guiManifestSha256, seamerIdentity: localPairingManagement ? pairing.peers?.[0]?.identity ?? null : null, standalone
@@ -330,6 +274,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
             supervision?.assertCurrent();return result;
           },
           lookup(...args){supervision?.assertCurrent();return sessions.runPreparations.automationCommands.lookup(...args);},
+          result(...args){supervision?.assertCurrent();return sessions.runPreparations.automationCommands.result(...args);},
           reject(...args){supervision?.assertCurrent();return sessions.runPreparations.automationCommands.reject(...args);}
         }:null,
         runApprovalProtection:sessions.runApprovalEndorsements?.receiveProtection?(...args)=>{
