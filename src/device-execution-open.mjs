@@ -4,7 +4,7 @@ import canonicalize from 'canonicalize';
 import {DeviceExecutionError,executionWire} from './device-execution-channel.mjs';
 import {preparedFrame,insertFrame,executionTick} from './device-execution-handshake.mjs';
 import {currentDeviceExecutionBinding} from './device-execution-binding.mjs';
-import {deviceExecutionVersion,assertDeviceExecutionFeatures} from './sdk/device-execution.mjs';
+import {deviceExecutionVersion,deviceExecutionCapabilities,assertDeviceExecutionFeatures} from './sdk/device-execution.mjs';
 import {memoExecutionRead,withExecutionReadView} from './execution-read-view.mjs';
 import {deviceModuleProtocol,deviceModuleEventProtocol} from './sdk/device-module.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError('execution_open_'+code);};
@@ -85,10 +85,11 @@ function readDispatch(db,id){
  }
  return {value,ref:ref(id+'.dispatch',stored.body_digest),opening,plan,request,confirmation,confirmation_ref:ackRow?ref(id+'.ack',ackRow.body_digest):null,ack};
 }
-function expectedAck(body){return {gate_token:body.gate_token,gate_revision:body.gate_revision,state:'open',
+function expectedAck(body){const snapshot=body.reference_time_snapshot;return {gate_token:body.gate_token,gate_revision:body.gate_revision,state:'open',
  run_deny_snapshot_revision:body.run_deny_snapshot.snapshot_revision,run_deny_snapshot_digest:body.run_deny_snapshot.snapshot_digest,
  command_deny_snapshot_revision:body.command_deny_snapshot.snapshot_revision,command_deny_snapshot_digest:body.command_deny_snapshot.snapshot_digest,
- reference_time_snapshot_ref:null,gate_access_ref:{id:body.gate_access.access_id,revision:body.gate_access.revision,digest:body.gate_access.access_digest}};}
+ reference_time_snapshot_ref:snapshot?{id:snapshot.snapshot_id,revision:snapshot.snapshot_revision,digest:snapshot.snapshot_digest}:null,
+ gate_access_ref:{id:body.gate_access.access_id,revision:body.gate_access.revision,digest:body.gate_access.access_digest}};}
 export function currentInitialOpenDispatch(db,{binding,runtime,id,provider}){
  return withExecutionReadView(db,()=>{
  const saved=readInitialOpenDispatch(db,id);need(saved&&saved.request.frame.ipc_session_id===binding.ipc_session_id,'missing');
@@ -100,7 +101,8 @@ export function prepareInitialOpenDispatch(db,{binding,runtime,reference,feature
  need(db.inTransaction&&provider,'writer');const old=readInitialOpenDispatch(db,reference?.id);
  if(old){need(same(old.value.opening_ref,reference),'reference');return currentInitialOpenDispatch(db,{binding,runtime,id:reference.id,provider});}
  const opening=provider.current(reference),device=opening.value.plan.binding.device_id,bound=currentDeviceExecutionBinding(db,runtime,device,binding.ipc_session_id);
- need(same(opening.value.plan.binding,bound.value.binding)&&opening.value.plan.body.reference_time_snapshot===null,'binding');
+ need(same(opening.value.plan.binding,bound.value.binding)&&Boolean(opening.value.plan.body.reference_time_snapshot)===
+  deviceExecutionCapabilities.reference.every(feature=>features.includes(feature)),'binding');
  const configuration=configured(db,bound),previous=db.prepare("SELECT sequence FROM execution_frame_record WHERE ipc_session_id=? AND direction='c2w' ORDER BY sequence DESC LIMIT 1").pluck().get(binding.ipc_session_id);
  const frame={ipc_version:deviceExecutionVersion,type:'OPEN_GATE',message_id:crypto.randomUUID(),reply_to:null,ipc_session_id:binding.ipc_session_id,
   controller_boot_id:binding.controller_boot_id,worker_boot_id:binding.worker_boot_id,seq:String(BigInt(previous)+1n),device_id:device,

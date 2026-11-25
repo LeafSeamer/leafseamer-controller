@@ -243,7 +243,7 @@ export function selectCommandFinalization(db,{id,provider,tick}){
   const ready=readInitialReady(db,actual.command.source.ready_ref.id),opening=ready.dispatch.plan,b=actual.execution.value.binding;
   need(same(ready.ref,actual.command.source.ready_ref)&&same(ready.value.binding,b)&&
    same(opening.access.binding,b)&&opening.access.purpose==='ordinary'&&opening.access.protection===null&&
-   opening.resource.holds.length===0&&opening.resource.reference_time_snapshot===null&&
+   opening.resource.holds.length===0&&
    ready.value.gate_after.phase==='ready','finalization_ready');
   const selected=tick(),expires=BigInt(encoding.value.authorization.expires_tick_ns);
   need(BigInt(response.value.evidence.received_tick_ns)<=selected&&response.reply.committedTick<=selected&&

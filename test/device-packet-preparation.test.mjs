@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import canonicalize from 'canonicalize';
+import Database from 'better-sqlite3';
 import {devicePacketPreparation} from '../dist/device-packet-preparation.mjs';
 import {deviceTransmissionWriter} from '../dist/device-transmission-writer.mjs';
 import {deviceExecutionGate} from '../dist/device-execution-gate.mjs';
@@ -13,6 +14,8 @@ import {openObsCutWriterSession,ObsCutEntryRejected} from '../dist/obs-discovery
 import {encodeObsCutPacket,readObsCutPacket,obsCutPrimitive,obsCutPacketBytes} from '../dist/obs-cut-packet.mjs';
 import {deviceExecutionVersion} from '../dist/sdk/device-execution.mjs';
 import {referenceBundleAuthority} from './fixtures/reference-bundle-authority.mjs';
+import {readReferenceGateSnapshot,referenceGateSnapshot} from '../dist/reference-time-anchor.mjs';
+import {encodeReferenceBundle} from '../dist/reference-time-bundle.mjs';
 const hash=value=>'sha256:'+crypto.createHash('sha256').update(typeof value==='string'?value:canonicalize(value)).digest('hex');
 const raw=value=>Buffer.from(JSON.stringify(value));
 const ref=id=>({id,revision:'1',digest:hash(id)});
@@ -79,10 +82,14 @@ async function sending(options={}){
   transmission_ledger_digest:hash([]),open_transmission_intents:[],cancel_transmissions:[],cancel_ledger_digest:hash([])});
  signCut(fence);
  const run={controller_scope:f.binding.scope,snapshot_revision:'0',entries:[]},commands={scope:f.binding.scope,device_id:f.binding.device_id,snapshot_revision:'0',entries:[]};
- const time={snapshot_id:'time_snapshot',domain:{...f.binding.scope,provider_id:'provider',provider_boot_id:'provider_boot',runtime_binding_ref:ref('runtime'),
+ let time={snapshot_id:'time_snapshot',domain:{...f.binding.scope,provider_id:'provider',provider_boot_id:'provider_boot',runtime_binding_ref:ref('runtime'),
   clock_domain_id:f.binding.clock_domain_id,descriptor_digest:f.binding.descriptor_digest,clock_generation:'1'},snapshot_revision:'1',minimum_time_generation:'1',state_ref:ref('time_state')};
  const reference=options.reference?.(time.domain,origin);
- if(reference)time.state_ref=reference.reference_context.state_ref;
+ if(reference){
+  const {snapshot_digest,...snapshot}=referenceGateSnapshot({state:reference.state,bundle:reference.reference_context},f.binding);
+  assert.equal(hash(snapshot),snapshot_digest);
+  time=snapshot;
+ }
  const open=f.envelope('OPEN_GATE','open_message',{barrier_id:'barrier',gate_token:'token',device_session_id:f.binding.device_session_id,control_epoch:'epoch',control_version:'1',gate_revision:'1',
   authorization_revision:'1',clock_domain_id:f.binding.clock_domain_id,lease_until_tick_ns:'100',descriptor_digest:f.binding.descriptor_digest,
   run_deny_snapshot:{...run,snapshot_digest:hash(run)},command_deny_snapshot:{...commands,snapshot_digest:hash(commands)},reference_time_snapshot:{...time,snapshot_digest:hash(time)},
@@ -190,19 +197,31 @@ function timeFence(f,items=[]){
 }
 const scheduled={mode:'scheduled',occurrence_id:'occurrence',not_before:'1970-01-01T00:00:00.000Z',
  not_after:'1970-01-01T00:00:00.001Z',clock_policy_revision:'1',max_queue_ms:1000};
-function scheduledReference(domain,origin,window={not_before_utc_ns:'0',not_after_utc_ns:'1000000'}){
+function scheduledReference(domain,origin,window={not_before_utc_ns:'0',not_after_utc_ns:'1000000'},persisted=false){
  const authority=referenceBundleAuthority({serviceId:domain.authority_service_id,configuration:ref('config'),
   timeBounds:{lower_ns:'0',upper_ns:'1000000'}});
  const stamp={era:'0',seconds:'2208988800',fraction:String((996970n*(1n<<32n)+999999999n)/1000000000n)};
- const {bundle}=authority.readBundleOriginals({
-  runtime:{service_id:domain.authority_service_id,database_instance_id:domain.database_instance_id,launch_intent:{member_id:domain.provider_id},
-   admission_receipt:{member_boot_id:domain.provider_boot_id},clock_domain_descriptor:domain,runtime_binding_id:domain.runtime_binding_ref.id},
-  packet:{response_deadline_tick_ns:'3',request_size:48,response_size:48,ntp_version:4,ntp_mode:4,leap:0,stratum:1,precision:-20,
-   root_delay_word:'0',root_dispersion_word:'0',request_digest:hash('request'),response_digest:hash('response'),t2:stamp,t3:stamp},
-  anchor:{anchor_id:'anchor',m1_tick_ns:'1',m4_tick_ns:'2',runtime_digest:domain.runtime_binding_ref.digest,authorization:{endpoint_ref:ref('endpoint')},
-   poll_ref:ref('poll'),capture_ref:ref('capture'),lower_utc_ns:'995970',upper_utc_ns:'998972'},
+ const runtime={service_id:domain.authority_service_id,database_instance_id:domain.database_instance_id,launch_intent:{member_id:domain.provider_id},
+  admission_receipt:{member_boot_id:domain.provider_boot_id},clock_domain_descriptor:domain,runtime_binding_id:domain.runtime_binding_ref.id,service_boot_id:'service.boot'};
+ const packet={response_deadline_tick_ns:'3',request_size:48,response_size:48,ntp_version:4,ntp_mode:4,leap:0,stratum:1,precision:-20,
+  root_delay_word:'0',root_dispersion_word:'0',request_digest:hash('request'),response_digest:hash('response'),t2:stamp,t3:stamp};
+ const anchor={anchor_id:'anchor',m1_tick_ns:'1',m4_tick_ns:'2',runtime_digest:persisted?hash(runtime):domain.runtime_binding_ref.digest,
+  authorization:{endpoint_ref:ref('endpoint')},poll_ref:ref('poll'),capture_ref:ref('capture'),lower_utc_ns:'995970',upper_utc_ns:'998972'};
+ const {bundle,state}=authority.readBundleOriginals({runtime,packet,anchor,
   assessment:{tick_ns:'2',lower_utc_ns:'995970',upper_utc_ns:'999972',exchange_age_ns:'1001',anchor_age_ns:'1000',upstream_age_ns:'2001'}
  });
+ if(persisted){
+  const {source,profile,policy,error,era,exchange}=bundle;
+  return {runtime,bundle,state,record:{...anchor,service_boot_id:runtime.service_boot_id,published_tick_ns:'2',packet_summary:packet,t2:stamp,t3:stamp,
+   approval:{valid_before_tick_ns:'5000000000',source_digest:source.source_digest,configuration_ref:source.effective_config_ref,
+    authentication:source.authentication,...authority.references,elapsed_error_ppm:profile.elapsed_error_ppm,span_quantization_ns:profile.span_quantization_ns,
+    ...Object.fromEntries(['max_anchor_age_ns','max_exchange_age_ns','max_upstream_age_ns','max_half_width_ns'].map(key=>[key,policy[key]])),
+    max_span_ns:policy.max_exchange_span_ns},
+   evidence:{valid_before_tick_ns:'5000000000',t2_error_ns:error.t2_error_ns,t3_error_ns:error.t3_error_ns,upstream_age_at_m1_ns:error.upstream_age_upper_at_m1_ns,
+    independent_utc_lower_ns:era.allowed_utc.lower_ns,independent_utc_upper_ns:era.allowed_utc.upper_ns,
+    authentication_ref:exchange.authentication_ref,error_ref:exchange.error_ref,era_ref:exchange.era_ref},
+   reference_bundle:encodeReferenceBundle({bundle,state})}};
+ }
  const utc={guard_id:'utc',revision:'1',model_id:'reference-bound/1',model_revision:'1',binding:bundle.anchor.binding,
   anchor_ref:{...ref(bundle.anchor.anchor_id),digest:bundle.anchor.anchor_digest},
   assessment_ref:{...ref(bundle.assessment.assessment_id),digest:bundle.assessment.assessment_digest},window,expires_tick_ns:'90'};
@@ -210,9 +229,31 @@ function scheduledReference(domain,origin,window={not_before_utc_ns:'0',not_afte
   occurrence_ref:ref('occurrence'),definition_artifact_ref:ref('definition'),schedule_version:'1',activation_ref:ref('activation'),admission_ref:ref('admission'),
   execution_id:origin.execution_id,step_id:origin.step_id,step_window_ref:ref('step_window'),window,queue_deadline_tick_ns:'80',local_clock_domain:domain};
  const schedule_guard={...schedule,guard_digest:hash(schedule)};
- return {reference_context:bundle,schedule_guard,reference_time:{context_ref:{...ref(bundle.bundle_id),digest:bundle.bundle_digest},
+ return {state,reference_context:bundle,schedule_guard,reference_time:{context_ref:{...ref(bundle.bundle_id),digest:bundle.bundle_digest},
   utc_guard:{...utc,guard_digest:hash(utc)},schedule_ref:{...ref(schedule.guard_id),digest:schedule_guard.guard_digest}}};
 }
+
+test('开闸授时快照查回原采集，并拒绝异启动、异库、异域和错误摘要',async()=>{
+ const f=await sending(),domain=f.open.body.reference_time_snapshot.domain;
+ const {runtime,record,bundle,state}=scheduledReference(domain,null,undefined,true);
+ const reference={id:bundle.bundle_id,revision:'1',digest:bundle.bundle_digest},db=new Database(':memory:');
+ try{
+  db.exec(`CREATE TABLE time_provider_reference_anchor(anchor_id TEXT,service_boot_id TEXT,body_jcs TEXT,body_digest TEXT);
+   CREATE TABLE time_provider_runtime_binding(service_boot_id TEXT,body_jcs TEXT,body_digest TEXT);
+   CREATE TABLE execution_session(ipc_session_id TEXT,service_boot_id TEXT);`);
+  db.prepare('INSERT INTO time_provider_runtime_binding VALUES(?,?,?)').run(runtime.service_boot_id,canonicalize(runtime),hash(runtime));
+  db.prepare('INSERT INTO time_provider_reference_anchor VALUES(?,?,?,?)').run(record.anchor_id,record.service_boot_id,canonicalize(record),hash(record));
+  db.prepare('INSERT INTO execution_session VALUES(?,?),(?,?)').run(f.binding.ipc_session_id,runtime.service_boot_id,'other_session','other_boot');
+  const read=db.transaction((binding,value)=>readReferenceGateSnapshot(db,binding,value));
+  assert.throws(()=>readReferenceGateSnapshot(db,f.binding,reference),/reference_gate_snapshot_writer/);
+  const snapshot=read(f.binding,reference);
+  assert.deepEqual(snapshot,referenceGateSnapshot({bundle,state},f.binding));
+  assert.throws(()=>read(f.binding,{...reference,digest:hash('other bundle')}),/reference_time_unqualified/);
+  assert.throws(()=>read({...f.binding,ipc_session_id:'other_session'},reference),/reference_time_unqualified/);
+  assert.throws(()=>read({...f.binding,scope:{...f.binding.scope,database_instance_id:'other'}},reference),/reference_time_unqualified/);
+  assert.throws(()=>read({...f.binding,descriptor_digest:hash('other domain')},reference),/reference_time_unqualified/);
+ }finally{db.close();}
+});
 
 test('定时发送在设备出口重算 UTC，拒绝提前发送和截止等号',async()=>{
  for(const [dispatch,reference,tick,write] of [
@@ -222,6 +263,9 @@ test('定时发送在设备出口重算 UTC，拒绝提前发送和截止等号'
    (domain,origin)=>scheduledReference(domain,origin,{not_before_utc_ns:'1000000',not_after_utc_ns:'2000000'}),29n,false],
  ]){
   const f=await sending({origin:automationOrigin(),dispatch,reference});
+  const snapshot=f.open.body.reference_time_snapshot;
+  const opened=await f.response(await f.gateOwner.receive(raw(f.open)));
+  assert.deepEqual(opened.body.reference_time_snapshot_ref,{id:snapshot.snapshot_id,revision:snapshot.snapshot_revision,digest:snapshot.snapshot_digest});
   const ack=await f.response(await f.writer.installGuard(raw(f.install)));
   assert.equal(ack.body.reference_time_digest,hash(f.install.body.guard.reference_time));
   assert.equal(ack.body.schedule_guard_digest,f.install.body.schedule_guard.guard_digest);

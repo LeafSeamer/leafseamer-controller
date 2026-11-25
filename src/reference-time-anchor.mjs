@@ -90,6 +90,42 @@ function anchorRecord(row) {
   return {body,digest:row[1]};
 }
 
+function storedBundle(record,runtime) {
+  const saved=record.body.reference_bundle;
+  requireQualified(saved && runtime.digest===record.body.runtime_digest);
+  return validateReferenceBundle(decodeReferenceBundle(saved),{anchor:record.body,runtime:runtime.body,
+    packet:{...record.body.packet_summary,t2:record.body.t2,t3:record.body.t3},
+    assessment:assess(record.body,{tick:clockInteger(record.body.m4_tick_ns)})});
+}
+
+function bundleRecord(db,anchorId) {
+  const row=db.prepare(`SELECT a.body_jcs,a.body_digest,r.body_jcs,r.body_digest FROM time_provider_reference_anchor a
+    JOIN time_provider_runtime_binding r USING(service_boot_id) WHERE a.anchor_id=?`).raw().get(anchorId);
+  return row ? {record:anchorRecord(row),runtime:anchorRecord(row.slice(2))} : null;
+}
+
+export function referenceGateSnapshot({state,bundle},binding) {
+  const {domain,time_generation}=state.binding,{state_digest,...stateBody}=state;
+  requireQualified(state.status==='qualified'&&state.invalidation_ref===null&&
+    state_digest===digest(canonicalize(stateBody))&&same(state.binding,bundle.anchor.binding)&&
+    same(bundle.state_ref,{id:state.state_id,revision:state.revision,digest:state_digest})&&
+    domain.authority_service_id===binding.scope.authority_service_id&&domain.database_instance_id===binding.scope.database_instance_id&&
+    domain.clock_domain_id===binding.clock_domain_id&&domain.descriptor_digest===binding.descriptor_digest);
+  const snapshot={snapshot_id:bundle.bundle_id,snapshot_revision:state.revision,minimum_time_generation:time_generation,domain,state_ref:bundle.state_ref};
+  return {...snapshot,snapshot_digest:digest(canonicalize(snapshot))};
+}
+
+export function readReferenceGateSnapshot(db,binding,reference) {
+  if(!db.inTransaction)throw new Error('reference_gate_snapshot_writer');
+  const saved=bundleRecord(db,reference.id);
+  const session=db.prepare('SELECT service_boot_id FROM execution_session WHERE ipc_session_id=?').pluck().get(binding.ipc_session_id);
+  requireQualified(saved&&session===saved.record.body.service_boot_id&&reference.revision==='1'&&
+    reference.digest===saved.record.body.reference_bundle?.digest);
+  const original=storedBundle(saved.record,saved.runtime);
+  requireQualified(original.bundle.bundle_id===reference.id&&original.bundle.bundle_digest===reference.digest);
+  return referenceGateSnapshot(original,binding);
+}
+
 function acceptedProjection(record, accepted) {
   const tick=clockInteger(accepted.tick_ns), {body}=record;
   requireQualified(tick>=clockInteger(body.published_tick_ns));
@@ -195,20 +231,6 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
     } catch { return null; }
   }
 
-  function storedBundle(record,runtime) {
-    const saved=record.body.reference_bundle;
-    requireQualified(saved && runtime.digest===record.body.runtime_digest);
-    return validateReferenceBundle(decodeReferenceBundle(saved),{anchor:record.body,runtime:runtime.body,
-      packet:{...record.body.packet_summary,t2:record.body.t2,t3:record.body.t3},
-      assessment:assess(record.body,{tick:clockInteger(record.body.m4_tick_ns)})});
-  }
-
-  function bundleRecord(anchorId) {
-    const row=db.prepare(`SELECT a.body_jcs,a.body_digest,r.body_jcs,r.body_digest FROM time_provider_reference_anchor a
-      JOIN time_provider_runtime_binding r USING(service_boot_id) WHERE a.anchor_id=?`).raw().get(anchorId);
-    return row ? {record:anchorRecord(row),runtime:anchorRecord(row.slice(2))} : null;
-  }
-
   function receiverDeadline(record,now) {
     const {approval,evidence}=record.body;
     const authority=clockInteger(approval.valid_before_tick_ns),proof=clockInteger(evidence.valid_before_tick_ns);
@@ -233,7 +255,7 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
       try {
         const first=clockInteger(first_tick_ns),tick=clockInteger(tick_ns),deadline=clockInteger(reference.valid_before_tick_ns);
         if(reference.service_boot_id!==bootId || first>tick || tick>=deadline || !matches(id,reference.bundle?.bundle_id))return false;
-        const live=qualification(),stored=bundleRecord(reference.bundle.bundle_id);
+        const live=qualification(),stored=bundleRecord(db,reference.bundle.bundle_id);
         if(!live||!stored||stored.record.body.service_boot_id!==bootId||stored.runtime.digest!==binding.digest)return false;
         const {record,runtime}=stored,{now}=live,{body}=record;
         requireQualified(tick<=now.tick && now.tick<deadline && deadline<=receiverDeadline(record,now) &&
@@ -306,7 +328,7 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
     },
     readBundle(reference){
       if(!reference||reference.revision!=='1'||!matches(id,reference.id)||!matches(hash,reference.digest))return null;
-      const stored=bundleRecord(reference.id);
+      const stored=bundleRecord(db,reference.id);
       if(stored?.record.body.reference_bundle?.digest!==reference.digest)return null;
       return storedBundle(stored.record,stored.runtime).bundle;
     },
