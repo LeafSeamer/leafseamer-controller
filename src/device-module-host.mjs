@@ -9,8 +9,8 @@ import {moduleSocket,moduleTransport,moduleDigestEqual as same} from './device-m
 import {executionSessionIdentity,executionSocket} from './device-execution-channel.mjs';
 import {deviceWorkerSession} from './device-worker-session.mjs';
 import {deviceExecutionGate} from './device-execution-gate.mjs';
-import {deviceWorkerExecution,fixedWorkerExecutionProfile} from './device-worker-execution.mjs';
-import {deviceExecutionVersion,deviceExecutionCapabilities} from './sdk/device-execution.mjs';
+import {deviceWorkerExecution,fixedWorkerExecutionProfile,fixedWorkerExecutionFeatures} from './device-worker-execution.mjs';
+import {deviceExecutionVersion} from './sdk/device-execution.mjs';
 import {obsDefinitionForEntry,obsCutModuleDefinition} from './obs-module-profile.mjs';
 import {createObsDeviceModule} from './obs-device-module.mjs';
 import {createObsCutDeviceModule} from './obs-cut-device-module.mjs';
@@ -52,9 +52,7 @@ export function hostDeviceModule({admitted,materials,executionIdentity,obsSecret
    }});
   void executionSession.start({module_id:materials.manifest.extension_id,module_digest:materials.inventory.files.find(f=>f.file_id===entry.file_id).digest,
    clock_domain_id:execution.clock_domain_id,descriptor_digest:execution.descriptor_digest,clock_domain_descriptor:admitted.descriptor,
-   supported_ipc_versions:[deviceExecutionVersion],supported_features:[...deviceExecutionCapabilities.base,...deviceExecutionCapabilities.initial_control,
-    ...(executionProfile?[...deviceExecutionCapabilities.manual,...deviceExecutionCapabilities.without_reference]:[]),
-    ...(executionProfile==='memory'?deviceExecutionCapabilities.automation:[])]}).catch(stop);
+   supported_ipc_versions:[deviceExecutionVersion],supported_features:fixedWorkerExecutionFeatures(executionProfile)}).catch(stop);
  }
  function file(fileId,role){const selected=materials.inventory.files.find(f=>f.file_id===fileId);need(selected?.role===role,'module_content_binding');
   const target=path.resolve(materials.root_path,selected.path);need(target.startsWith(path.resolve(materials.root_path)+path.sep),'module_content_path');

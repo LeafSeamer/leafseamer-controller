@@ -5,6 +5,9 @@ import crypto from 'node:crypto';
 import {Duplex} from 'node:stream';
 import {setTimeout as delay} from 'node:timers/promises';
 import canonicalize from 'canonicalize';
+import Database from 'better-sqlite3';
+import {selectedHandshake} from '../dist/device-execution-handshake.mjs';
+import {fixedWorkerExecutionFeatures} from '../dist/device-worker-execution.mjs';
 import {deviceWorkerSession} from '../dist/device-worker-session.mjs';
 import {deviceExecutionGate} from '../dist/device-execution-gate.mjs';
 import {executionSessionIdentity,executionWire,decodeExecutionPayload} from '../dist/device-execution-channel.mjs';
@@ -36,9 +39,10 @@ async function fixture(t,options={}){
   return {ipc_version:deviceExecutionVersion,type,message_id:id,reply_to,ipc_session_id:identity.ipc_session_id,controller_boot_id:'core',worker_boot_id:'worker',
    seq,device_id:device,body,clock_domain_id:identity.clock_domain_id,descriptor_digest:identity.descriptor_digest,journal_mode};
  }
- const hello=await session.start({module_id:'synthetic_module',module_digest:hash('module'),clock_domain_id:identity.clock_domain_id,supported_ipc_versions:[deviceExecutionVersion],
+ const hello=await session.start({module_id:options.moduleId??'synthetic_module',module_digest:options.moduleDigest??hash('module'),clock_domain_id:identity.clock_domain_id,supported_ipc_versions:[deviceExecutionVersion],
   supported_features:options.features??features,descriptor_digest:identity.descriptor_digest,clock_domain_descriptor:descriptor});
- const ack=frame('HELLO_ACK','hello_ack','1',null,{selected_ipc_version:deviceExecutionVersion,clock_domain_id:identity.clock_domain_id,gate_state:'closed',selected_features:options.selected??options.features??features,
+ const selected=options.select?.(hello)??options.selected??options.features??features;
+ const ack=frame('HELLO_ACK','hello_ack','1',null,{selected_ipc_version:deviceExecutionVersion,clock_domain_id:identity.clock_domain_id,gate_state:'closed',selected_features:selected,
   descriptor_digest:identity.descriptor_digest,clock_domain_descriptor:descriptor},hello.message_id);
  function push(value){socket.push(executionWire(value instanceof Uint8Array?value:raw(value)));}
  if(options.ack!==false){push(ack);await until(()=>session.state.phase==='ready'||session.state.phase==='closed');assert.equal(session.state.phase,'ready');}
@@ -95,6 +99,47 @@ test('无参考时间OPEN经协商会话进入实际闸，ACK保留null且未协
   assert.equal(denied.seen.filter(v=>v.type==='OPEN_GATE').length,0);assert.equal(denied.devices.get('a').state.open,false);
   assert.match(denied.errors[0].reason??denied.errors[0].message,/execution_feature_missing|execution_reference_snapshot_required/);
  }
+});
+
+test('Controller negotiates a reference-bound gate with the fixed memory Worker only when configured',async t=>{
+ const db=new Database(':memory:');t.after(()=>db.close());
+ db.exec('CREATE TABLE extension_candidate(installation_id TEXT,content_jcs TEXT,content_digest TEXT)');
+ const moduleDigest=name=>'sha256:'+crypto.createHash('sha256').update(fs.readFileSync(new URL('../dist/'+name,import.meta.url))).digest('hex');
+ const entry={entry_id:'worker',kind:'worker',loader:'node_module',file_id:'module',io_policy_file_id:'policy'};
+ const manifest={extension_id:'memory_simulator',entrypoints:[entry]};
+ const inventory={files:[
+  {file_id:'module',role:'module',digest:moduleDigest('simulator-control-module.mjs')},
+  {file_id:'policy',role:'policy',digest:moduleDigest('simulator-control-policy.json')}]};
+ const content={manifest,inventory};
+ db.prepare('INSERT INTO extension_candidate VALUES(?,?,?)').run('installation',canonicalize(content),hash(content));
+ const runtime={launch_intent:{extension_binding:{installation_ref:{object_id:'installation'},
+  manifest_digest:hash(manifest),artifact_set_digest:hash(inventory),entry_id:'worker'}}};
+ const {automation,reference,without_reference}=deviceExecutionCapabilities;
+ const offered=fixedWorkerExecutionFeatures('memory');
+ assert.ok(reference.every(value=>offered.includes(value)));
+ assert.ok(reference.every(value=>!fixedWorkerExecutionFeatures('obs_cut').includes(value)));
+ const select=(version,referenceConfigured,supported_features)=>{
+  db.pragma('user_version='+version);
+  return selectedHandshake(db,runtime,{body:{module_id:manifest.extension_id,module_digest:inventory.files[0].digest,supported_features}},{referenceConfigured});
+ };
+ const previous=offered.filter(value=>!reference.includes(value));
+ for(const [version,configured,features] of [[111,true,offered],[112,false,offered],[112,true,previous]]){
+  const selected=select(version,configured,features);
+  assert.ok(reference.every(value=>!selected.includes(value)));
+  assert.ok(without_reference.every(value=>selected.includes(value)));
+ }
+ const f=await fixture(t,{features:offered,openThroughSession:true,moduleId:manifest.extension_id,moduleDigest:inventory.files[0].digest,
+  select:hello=>select(112,true,hello.body.supported_features)});
+ assert.ok([...automation,...reference].every(value=>f.session.state.selected_features.includes(value)));
+ assert.ok(without_reference.every(value=>!f.session.state.selected_features.includes(value)));
+ const opening=await openDevice(f,'a',false,{frameOnly:true,seq:'2'});
+ f.push(opening);await until(()=>f.writes.length===2||f.session.state.phase==='closed');
+ assert.equal(f.session.state.phase,'ready');
+ assert.equal(f.devices.get('a').state.open,true);
+ assert.equal(f.devices.get('a').currentGate().minimum_time_generation,'1');
+ const ack=(await decodeExecutionPayload(f.writes[1].subarray(4),'w2c')).frame;
+ const snapshot=opening.body.reference_time_snapshot;
+ assert.deepEqual(ack.body.reference_time_snapshot_ref,{id:snapshot.snapshot_id,revision:snapshot.snapshot_revision,digest:snapshot.snapshot_digest});
 });
 
 test('基础能力握手保持关闭，未协商业务在领域回调前被拒绝',async t=>{

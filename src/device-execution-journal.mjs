@@ -41,7 +41,7 @@ export function executionJournalHistory(db,sessionId){
 
 // 成功握手与明确拒收分别有专属领域写集，其它消息不得借此产生成功提交。
 // 工厂只由核心writer装配，不接受HTTP提供的身份、数据库或领域回调。
-export function deviceExecutionJournal({db,current,currentInTransaction,core,isOpen,invalidate,openingSource,encodingSource}){
+export function deviceExecutionJournal({db,current,currentInTransaction,core,isOpen,invalidate,openingSource,encodingSource,referenceConfigured}){
  const framed=Number(db.pragma('user_version',{simple:true}))>=28;
  let binding=null,terminal=false,busy=false,clock=null,lastTick=null;const readyRequests=new Set();
  function tick(){clock??=openNativeClock();const value=clock.tick();need(lastTick===null||value>=lastTick,'execution_frame_clock');lastTick=value;return value;}
@@ -143,7 +143,8 @@ export function deviceExecutionJournal({db,current,currentInTransaction,core,isO
     live();need(Number(db.pragma('user_version',{simple:true}))>=30,'execution_handshake_migration');
     const {frame,payload}=await decodeExecutionPayload(bytes,'w2c');live();const active=checkHello(frame);
     const old=readHandshake(db,binding.ipc_session_id);if(old){need(old.hello.wire.equals(executionWire(payload)),'execution_replay_conflict');return old.receipt;}
-    const selected=selectedHandshake(db,active.binding,frame),ack=handshakeAck(binding,frame,selected);
+    const selected=selectedHandshake(db,active.binding,frame,{referenceConfigured:referenceConfigured?.()===true});
+    const ack=handshakeAck(binding,frame,selected);
     await decodeExecutionPayload(Buffer.from(JSON.stringify(ack)),'c2w');live();checkHello(frame);
     db.transaction(()=>{const now=tick();commitHandshake(db,{binding,hello:frame,payload,ack,observedTick:now,committedTick:tick()});}).immediate();
     return readHandshake(db,binding.ipc_session_id).receipt;

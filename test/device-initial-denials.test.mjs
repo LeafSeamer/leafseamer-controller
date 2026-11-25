@@ -60,6 +60,24 @@ test('Schema 79 起设备快照接纳已协商的运行拒绝能力',t=>{
   else assert.throws(f.capture,/initial_denials_features/);
  }
 });
+test('Schema 112 snapshots accept the full negotiated reference capability set',t=>{
+ const caps=deviceExecutionCapabilities;
+ for(const [revision,features,accepted] of [
+  ['111',[...caps.automation,...caps.reference],false],
+  ['112',[...caps.automation,...caps.reference.slice(1)],false],
+  ['112',[...caps.automation,...caps.reference,...caps.without_reference],false],
+  ['112',[...caps.automation,...caps.reference],true]
+ ]){
+  const f=fixture(t);f.db.prepare('UPDATE service_state SET schema_revision=?').run(revision);f.service.schema_revision=revision;
+  f.add('b','HELLO_ACK',{selected_features:[...caps.base,...caps.initial_control,...caps.manual,...features]});
+  if(accepted){
+   const saved=f.capture();
+   assert.equal(saved.outgoing_frame_refs.length,2);
+   assert.deepEqual(f.run(()=>readInitialDenials(f.db,f.service,'device',saved)),saved);
+  }else assert.throws(f.capture,/initial_denials_features/);
+ }
+});
+
 test('任意设备的已受理命令或不再属于首次关闭的执行历史阻止空快照',t=>{
  const f=fixture(t);f.db.exec("INSERT INTO ca_command_initial VALUES('other_device_command','other_key')");
  assert.throws(f.capture,/initial_denials_command_history/);f.db.exec('DELETE FROM ca_command_initial');

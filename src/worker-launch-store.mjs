@@ -47,7 +47,7 @@ const readCoreOriginal=cacheVerifiedDocument(text=>{
 },{immutable:true});
 
 // 启动意图准备属于核心内部writer，不是安装审批或LaunchAuthorization提供者。
-export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attachStop,openingSource,encodingSource,projectReferenceCapture){
+export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attachStop,openingSource,encodingSource,projectReferenceCapture,referenceConfigured){
   const commandTasks=new Map(),guardTasks=new Map(),dispatchTasks=new Map(),settlementTasks=new Map(),cleanupTasks=new Map(),finalAdmissionTasks=new Map(),encodingTails=new Map();
   let pending=0,acquiring=0,runtime=null,authorization=null;const modules=new Map(),contentPins=new Set(),executionJournals=new Set(),executionClients=new Map();attachStop?.(()=>{for(const client of executionClients.values())client?.close();for(const journal of executionJournals)try{journal.end();}catch{}for(const module of modules.values())module?.close();runtime?.close();authorization?.close();for(const pin of contentPins)pin.close();});
   const available=()=>{need(isOpen()&&db.open,'worker_launch_closed');need(!db.inTransaction,'worker_launch_outer_transaction');};
@@ -84,7 +84,7 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
     all(){return rows(db,'SELECT '+fields+' FROM worker_launch_preparation WHERE service_boot_id=? ORDER BY launch_id COLLATE BINARY',bootId).map(view);}}):null;
   const controlBarrier=Number(service.schema_revision)>=26?deviceControlBarrier({db,bootId,authorization,runtime,isOpen}):null;
   function openJournal(selected){
-    const journal=deviceExecutionJournal({db,core,isOpen,current:()=>runtime.current(selected),currentInTransaction:()=>runtime.currentInTransaction(selected),invalidate:()=>runtime.invalidate(selected),openingSource,encodingSource:()=>{
+    const journal=deviceExecutionJournal({db,core,isOpen,current:()=>runtime.current(selected),currentInTransaction:()=>runtime.currentInTransaction(selected),invalidate:()=>runtime.invalidate(selected),openingSource,referenceConfigured,encodingSource:()=>{
       const provider=encodingSource?.();return provider&&{...provider,
         notePreparedQualification(reference,id){executionClients.get(selected.launch_id)?.notePreparedQualification(reference,id);}};
     }});

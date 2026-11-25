@@ -419,12 +419,12 @@ export function openStorage(dataDir, expectedIdentity = null) {
     }).immediate();
     let closed = false, sessions = null, sessionClock = null, sessionAuthority = null;
     let currentProviderBinding = null, currentProviderSupervisor = null, providerPollsOpened = false, referenceAnchor = null, referenceInvalidation = null;
-    let referenceExits = null;
+    let referenceExits = null, referenceBundleConfigured = false;
     const localAuthority = Number(state.schema_revision) >= 7 ? localPermissionStore(db, state) : null;
     let createExtensionManagement,workerExtensionSource,stopWorkerContent,initialOpeningSource,commandEncodingProvider;
     const extensionInstallations=Number(state.schema_revision)>=13?extensionInstallationStore(db,state,()=>!closed,create=>{createExtensionManagement=create;},source=>{workerExtensionSource=source;},bootId):null;
     const workerLaunches=Number(state.schema_revision)>=12?workerLaunchStore(db,state,bootId,()=>!closed,workerExtensionSource,stop=>{stopWorkerContent=stop;},()=>initialOpeningSource,()=>commandEncodingProvider,
-      capture=>referenceAnchor?.projectCapture(capture)??null):null;
+      capture=>referenceAnchor?.projectCapture(capture)??null,()=>referenceBundleConfigured&&referenceExits!==null):null;
     return Object.freeze({identity: state, serviceBootId: bootId, engine,
       configureVirtualDevice(input){require(!closed,'storage_closed');return configureVirtualDevice(db,state,input);},
       registerObsResource(input){require(!closed,'storage_closed');return registerObsResource(db,state,input);},
@@ -481,6 +481,7 @@ export function openStorage(dataDir, expectedIdentity = null) {
         const needed=Number(state.schema_revision)>=89 ? referenceTimeInvalidationStore(db,bootId,currentProviderBinding,currentProviderSupervisor,referenceExits) : null;
         referenceAnchor = referenceTimeAnchorStore(db,bootId,currentProviderBinding,authority,needed);
         referenceInvalidation=needed;
+        referenceBundleConfigured=typeof authority.readBundleOriginals==='function';
         return referenceAnchor;
       },
       ...(Number(state.schema_revision)>=91 && {reconcileReferenceProtection:()=>referenceExits?.reconcile()}),

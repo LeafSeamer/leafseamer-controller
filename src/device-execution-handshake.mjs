@@ -14,7 +14,7 @@ function row(db,sql,...parameters){const statement=db.prepare(sql),names=stateme
  return values&&Object.fromEntries(names.map((name,index)=>[name,values[index]]));}
 
 // 本模块只为成功握手提供领域写集，不提供任意消息的applied入口。
-export function selectedHandshake(db,runtime,hello){
+export function selectedHandshake(db,runtime,hello,{referenceConfigured=false}={}){
  const extension=runtime.launch_intent.extension_binding;
  const row=db.prepare('SELECT content_jcs,content_digest FROM extension_candidate WHERE installation_id=?').raw().get(extension.installation_ref.object_id);
  need(row,'execution_hello_module');const content=document(...row),manifest=content.manifest,inventory=content.inventory;
@@ -25,11 +25,14 @@ export function selectedHandshake(db,runtime,hello){
   hello.body.module_id===manifest.extension_id&&hello.body.module_digest===file.digest,'execution_hello_module');
  // 协商能力只表明实现支持的消息。各设备仍须独立的执行、控制和发送原件。
  const schema=Number(db.pragma('user_version',{simple:true})),profile=fixedWorkerExecutionProfile({inventory},entry);
- const manual=profile==='memory'&&schema>=47||profile==='obs_cut'&&schema>=101;
- return selectDeviceExecutionFeatures(hello.body.supported_features,[...deviceExecutionCapabilities.base,
-  ...(schema>=31?deviceExecutionCapabilities.initial_control:[]),
-  ...(manual?[...deviceExecutionCapabilities.manual,...deviceExecutionCapabilities.without_reference]:[]),
-  ...(schema>=79&&profile==='memory'?deviceExecutionCapabilities.automation:[])]);
+ const {base,initial_control,manual,without_reference,automation,reference}=deviceExecutionCapabilities;
+ const manualSupported=profile==='memory'&&schema>=47||profile==='obs_cut'&&schema>=101;
+ const offered=hello.body.supported_features;
+ const referenceSupported=profile==='memory'&&schema>=112&&referenceConfigured&&reference.every(feature=>offered.includes(feature));
+ return selectDeviceExecutionFeatures(offered,[...base,
+  ...(schema>=31?initial_control:[]),
+  ...(manualSupported?[...manual,...(referenceSupported?reference:without_reference)]:[]),
+  ...(schema>=79&&profile==='memory'?automation:[])]);
 }
 export function handshakeAck(binding,hello,selected){
  return {ipc_version:deviceExecutionVersion,type:'HELLO_ACK',message_id:crypto.randomUUID(),reply_to:hello.message_id,

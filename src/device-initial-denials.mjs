@@ -11,6 +11,7 @@ import {deviceExecutionCapabilities} from './sdk/device-execution.mjs';
 import {pendingInitialCommands,readCommandRecord} from './command-record-store.mjs';
 import {captureRunDenySnapshot} from './run-generation-denial.mjs';
 import {readRunFence} from './execution-run-fence.mjs';
+import {readTimeFence} from './execution-time-fence.mjs';
 const need=(ok,code)=>{if(!ok)throw new IdentityError('initial_denials_'+code);};
 const bytesDigest=value=>'sha256:'+crypto.createHash('sha256').update(value).digest('hex');
 const allowed=new Set([...deviceExecutionCapabilities.base,...deviceExecutionCapabilities.manual,
@@ -27,7 +28,8 @@ function scope(db,service,current=false){
   (current?supportsSnapshotRevision(row[2],44):Number(row[2])>=44),'schema');
  return {authority_service_id:row[0],database_instance_id:row[1]};
 }
-function frame(db,id,automation=false){
+function frame(db,id,schema){
+ const automation=Number(schema)>=79,reference=Number(schema)>=112;
  const row=db.prepare(`SELECT f.record_jcs,f.record_digest,f.frame_jcs,f.frame_digest,f.wire,f.wire_digest,
   f.message_type,f.ipc_session_id,f.sequence,s.binding_jcs,s.binding_digest,e.disposition
   FROM execution_frame_record f JOIN execution_session s USING(ipc_session_id)
@@ -44,7 +46,13 @@ function frame(db,id,automation=false){
   record.sequence===value.seq&&String(BigInt(sequence))===value.seq&&record.message_id===value.message_id&&
   record.frame_digest===bodyHash&&record.wire_digest===wireHash&&record.wire_length===wire.length&&disposition==='applied','binding');
  need(type==='HELLO_ACK'||type==='FENCE','execution_history');
- if(type==='HELLO_ACK')need(value.body.selected_features.every(v=>allowed.has(v)||automation&&deviceExecutionCapabilities.automation.includes(v)),'features');
+ if(type==='HELLO_ACK'){
+  const selected=value.body.selected_features,caps=deviceExecutionCapabilities;
+  const timed=caps.reference.some(v=>selected.includes(v));
+  need(!timed||reference&&[...caps.reference,...caps.automation].every(v=>selected.includes(v))&&
+   caps.without_reference.every(v=>!selected.includes(v)),'features');
+  need(selected.every(v=>allowed.has(v)||automation&&caps.automation.includes(v)||timed&&caps.reference.includes(v)),'features');
+ }
  else need(value.body.issued_cut_revision==='0'&&value.body.target_gate_revision==='1'&&value.body.attempt_binding.attempt_ordinal==='1'&&
   value.body.attempt_binding.previous_barrier_id===null&&value.body.open_intents.length===0&&
   value.body.open_transmission_intents.length===0&&value.body.cancel_transmissions.length===0,'fence_history');
@@ -72,7 +80,7 @@ export function readInitialDenials(db,service,device,value,prior=[]){
  let previous='';
  for(const reference of value.outgoing_frame_refs){
   need(typeof reference.id==='string'&&reference.id>previous,'order');previous=reference.id;
-  const actual=frame(db,reference.id,Number(value.schema_revision)>=79);need(same(actual.reference,reference)&&(!scoped||actual.device===null||actual.device===device)&&
+  const actual=frame(db,reference.id,value.schema_revision);need(same(actual.reference,reference)&&(!scoped||actual.device===null||actual.device===device)&&
    actual.binding.authority==='controller'&&actual.binding.service_id===expectedScope.authority_service_id&&actual.binding.database_instance_id===expectedScope.database_instance_id,'scope');
  }
  const expectedRun=Number(value.schema_revision)>=79?captureRunDenySnapshot(db,expectedScope,Number(value.run_deny_snapshot?.snapshot_revision)):
@@ -101,16 +109,19 @@ export function captureInitialDenials(db,service,device,ownOpen=null,ready=null,
  for(const [id,type] of rows)if(type==='ENCODE_PACKET'&&!encoding.has(id)){need(ready,'encoding_ready');encodingOnlyFrame(db,id,ready.value.binding,ready.ref);encoding.add(id);}
  for(const [id,type] of rows)if(type==='GUARD_INSTALL'&&!encoding.has(id)){need(ready,'guard_ready');guardOnlyFrame(db,id,ready.value.binding,preparedRef);encoding.add(id);}
  for(const [id,type] of rows)if(type==='DISPATCH'&&!encoding.has(id)){need(ready,'dispatch_ready');dispatchRiskFrame(db,id,ready.value.binding,preparedRef);encoding.add(id);}
- for(const [id,type] of rows)if(type==='RUN_FENCE'){
-  need(automation,'execution_history');
+ for(const [id,type] of rows)if(type==='RUN_FENCE'||type==='TIME_FENCE'){
+  const timed=type==='TIME_FENCE';
+  need(timed?Number(service.schema_revision)>=112:automation,'execution_history');
   const [text,checksum]=db.prepare('SELECT s.binding_jcs,s.binding_digest FROM execution_frame_record f JOIN execution_session s USING(ipc_session_id) WHERE f.record_id=?').raw().get(id);
   const binding=JSON.parse(text);need(canonicalize(binding)===text&&digest(binding)===checksum&&binding.service_id===selectedScope.authority_service_id&&
    binding.database_instance_id===selectedScope.database_instance_id,'scope');
-  readRunFence(db,binding,id);encoding.add(id);
+  if(timed)readTimeFence(db,binding,id);
+  else readRunFence(db,binding,id);
+  encoding.add(id);
  }
  const value={format:supportsPendingCommands?'initial-manual-deny-snapshots/2':'initial-manual-deny-snapshots/1',schema_revision:service.schema_revision,scope:selectedScope,device_id:device,accepted_command_count:pending.length,
   ...(supportsPendingCommands?{pending_admission_refs:pending}:{}),
-  outgoing_frame_refs:rows.filter(([id])=>id!==ownOpen?.id&&!encoding.has(id)).map(([id])=>frame(db,id,automation).reference),
+  outgoing_frame_refs:rows.filter(([id])=>id!==ownOpen?.id&&!encoding.has(id)).map(([id])=>frame(db,id,service.schema_revision).reference),
   run_deny_snapshot:automation?captureRunDenySnapshot(db,selectedScope):sealed({controller_scope:selectedScope,snapshot_revision:'0',entries:[]}),
   command_deny_snapshot:sealed({scope:selectedScope,device_id:device,snapshot_revision:'0',entries:[]})};
  if(deviceScoped)value.history_scope='device';

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import canonicalize from './runtime/canonicalize.mjs';
 import {moduleNeed as need,moduleExact as exact} from './sdk/device-module.mjs';
+import {deviceExecutionCapabilities} from './sdk/device-execution.mjs';
 import {devicePacketPreparation} from './device-packet-preparation.mjs';
 import {deviceTransmissionWriter} from './device-transmission-writer.mjs';
 import {obsDefinitionForEntry,obsCutModuleDefinition,obsCutExecutionProfile} from './obs-module-profile.mjs';
@@ -15,6 +16,13 @@ export function fixedWorkerExecutionProfile(materials,entry){
  if(obsDefinitionForEntry(materials,entry)===obsCutModuleDefinition)return 'obs_cut';
  return materials.inventory.files.find(f=>f.file_id===entry.file_id)?.digest===moduleDigest&&
   materials.inventory.files.find(f=>f.file_id===entry.io_policy_file_id)?.digest===policyDigest?'memory':null;
+}
+
+export function fixedWorkerExecutionFeatures(profile){
+ const {base,initial_control,manual,without_reference,automation,reference}=deviceExecutionCapabilities;
+ return [...base,...initial_control,
+  ...(profile?[...manual,...without_reference]:[]),
+  ...(profile==='memory'?[...automation,...reference]:[])];
 }
 
 // 仅固定host调用。配置取自受监督模块通道的核心持久Binding，命令帧不能更换配置。
