@@ -1,7 +1,7 @@
 import {selectCommandGuard,commitCommandGuard,readCommandGuard,currentCommandGuard,acceptCommandGuard} from './command-guard.mjs';
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
-import {decodeExecutionPayload,executionWire,executionSessionIdentity,DeviceExecutionError} from './device-execution-channel.mjs';
+import {decodeExecutionPayload,decodeLocalCommandDispatch,executionWire,executionSessionIdentity,DeviceExecutionError} from './device-execution-channel.mjs';
 import {deviceExecutionVersion} from './sdk/device-execution.mjs';
 import {contractSelection} from './sdk/index.mjs';
 import {openNativeClock} from './native-clock.mjs';
@@ -345,7 +345,8 @@ export function deviceExecutionJournal({db,current,currentInTransaction,core,isO
    try{live();const features=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features;
     const candidate=db.transaction(()=>selectCommandDispatch(db,{id,binding,provider:encodingSource?.(),tick,features})).immediate();
     if(candidate.saved)return {...candidate.saved,replay:true};
-    await decodeExecutionPayload(Buffer.from(JSON.stringify(candidate.frame)),'c2w');live();
+    const payload=Buffer.from(JSON.stringify(candidate.frame));
+    await decodeLocalCommandDispatch(payload);live();
     return {...db.transaction(()=>commitCommandDispatch(db,{candidate,binding,provider:encodingSource?.(),tick})).immediate(),replay:false};
    }catch(error){fail(error);throw error;}
   },
