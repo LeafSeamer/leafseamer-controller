@@ -4,18 +4,37 @@ import {readCommandRecord,commandPolicyInput,automationActionPolicy} from './com
 import {selectAuthenticationWindow,currentAuthenticationWindow} from './authentication-window.mjs';
 import {deviceExecutionCapabilities} from './sdk/device-execution.mjs';
 import {readInitialReady} from './device-initial-ready.mjs';
+import {referenceGateSnapshot} from './reference-time-anchor.mjs';
 const need=(value,code)=>{if(!value)throw new IdentityError('command_encoding_'+code);};
 const reference=(id,value)=>({id,revision:'1',digest:digest(value)});
 
-export function automationCommandExecutionSource({db,service,devices,executionCurrent,deviceAutomationCurrent,coreSource,time,queueCommand}){
+export function automationCommandExecutionSource({db,service,devices,executionCurrent,deviceAutomationCurrent,coreSource,time,queueCommand,clockReference=null}){
  const active=new Map();
+ function scheduleTarget(execution,now){
+  const {ready,ref,value,negotiation}=execution;
+  const selected=negotiation?.selected_features??[];
+  const capabilities=deviceExecutionCapabilities;
+  need(ready?.value.gate_after.phase==='ready'&&same(ready.value.binding,value.binding)&&
+   [...capabilities.automation,...capabilities.reference].every(feature=>selected.includes(feature))&&
+   BigInt(now.tick)>=BigInt(ready.value.selected_tick_ns)&&BigInt(now.tick)<BigInt(ready.value.expires_tick_ns),'automation_reference');
+  const snapshot=readInitialReady(db,ready.ref.id).dispatch.plan.resource.reference_time_snapshot;
+  const original=clockReference?.readFirst({tick_ns:String(now.tick),runtime_domain_ref:now.ref});
+  need(snapshot&&original&&BigInt(now.tick)<BigInt(original.valid_before_tick_ns)&&original.bundle.policy.revision==='1','automation_reference');
+  const current=referenceGateSnapshot(original,value.binding);
+  need(same(current.domain,snapshot.domain)&&current.minimum_time_generation===snapshot.minimum_time_generation,'automation_reference');
+  return {binding_ref:ref,ready_ref:ready.ref,snapshot};
+ }
+ function automaticControl(deviceId){
+  const control=devices.control(deviceId);
+  need(control.mode==='automatic'&&control.holder===null&&control.pending_change===null&&control.gate_state==='ready','automation_control');
+  return control;
+ }
  function current(verified,preparedRef=null){
   const {target,grant_ref,action_binding_ref,not_before_ns,eligible_before_ns}=verified;
   need(db.inTransaction&&verified.principal.principal_kind==='service'&&grant_ref.kind==='grant'&&
    verified.arm_generation!=='0'&&action_binding_ref&&typeof action_binding_ref.id==='string'&&
    action_binding_ref.revision==='1'&&/^sha256:[0-9a-f]{64}$/.test(action_binding_ref.digest),'automation_origin');
-  const control=devices.control(target.device_id);
-  need(control.mode==='automatic'&&control.holder===null&&control.pending_change===null&&control.gate_state==='ready','automation_control');
+  const control=automaticControl(target.device_id);
   let execution,registered;
   try{
    execution=executionCurrent(target.device_id,{requireReady:true,...(preparedRef&&{preparedRef})});
@@ -29,8 +48,6 @@ export function automationCommandExecutionSource({db,service,devices,executionCu
   need(ready&&ready.value.gate_after.phase==='ready'&&same(ready.value.binding,value.binding)&&
    deviceExecutionCapabilities.automation.every(feature=>negotiation?.selected_features.includes(feature)),'automation_ready');
   const schedule=verified.schedule_binding;
-  if(schedule)need(readInitialReady(db,ready.ref.id).dispatch.plan.resource.reference_time_snapshot&&
-   deviceExecutionCapabilities.reference.every(feature=>negotiation?.selected_features.includes(feature)),'automation_reference');
   const action=registered.bindings.find(item=>item.kind==='action'&&same(item.content_ref,action_binding_ref));
   need(registered.registration.device_session_id===value.binding.device_session_id&&action?.value.device_id===target.device_id&&
    action.value.capability_id===target.action_id&&registered.registration.capability_version===target.capability_version&&
@@ -38,6 +55,7 @@ export function automationCommandExecutionSource({db,service,devices,executionCu
   const now=coreSource.domain();
   need(same(now.ref,{clock_domain_id:value.binding.clock_domain_id,descriptor_digest:value.binding.descriptor_digest})&&
    BigInt(now.tick)>=BigInt(ready.value.selected_tick_ns)&&BigInt(now.tick)<BigInt(ready.value.expires_tick_ns),'automation_clock');
+  if(schedule)scheduleTarget(execution,now);
   const basis={binding_ref:ref,binding:value.binding,ready_ref:ready.ref,
    control_binding:{epoch:control.control_epoch,version:control.effective_version},
    control_authority_ref:ready.value.eligibility_refs.control_authority,authorization_ref:ready.value.eligibility_refs.authorization,
@@ -51,7 +69,14 @@ export function automationCommandExecutionSource({db,service,devices,executionCu
   return {db,service,coreRuntime:core,domain:value.now.ref,acquisitionRef:acquisition,selectedTick,capTick,
    validFrom:value.validFrom,validBefore:value.validBefore};
  }
- return Object.freeze({activate(id,verify){
+ return Object.freeze({
+ observeScheduleTarget(deviceId){
+  need(db.inTransaction,'writer');
+  automaticControl(deviceId);
+  const execution=executionCurrent(deviceId,{requireReady:true});
+  return scheduleTarget(execution,coreSource.domain());
+ },
+ activate(id,verify){
   active.set(id,verify);
   setTimeout(()=>active.delete(id),5000).unref();
   queueCommand(id);

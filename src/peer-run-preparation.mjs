@@ -17,8 +17,17 @@ export function armPreparationLookup(request,controller){
  need(same(request.controller_scope,controller)&&isPreparationDigest(request.request_digest),'preparation_request');return request;
 }
 
-export function armPreparationEligibilityRequest(request,controller){
- fields(request,'lookup,receipt_ref,grant_ref');
+export function armPreparationEligibilityRequest(request,controller,{allowScheduled=false}={}){
+ const scheduled=allowScheduled&&Object.hasOwn(request??{},'schedule_device_ids');
+ fields(request,scheduled?'lookup,receipt_ref,grant_ref,schedule_device_ids':'lookup,receipt_ref,grant_ref');
+ if(scheduled){
+  const ids=request.schedule_device_ids;
+  need(Array.isArray(ids)&&ids.length>=1&&ids.length<=256,'preparation_schedule_devices');
+  ids.forEach((id,index)=>{
+   uuid(id);
+   need(index===0||ids[index-1]<id,'preparation_schedule_devices');
+  });
+ }
  armPreparationLookup(request.lookup,controller);
  controllerReference(request.receipt_ref,'preparation_receipt',controller);
  controllerReference(request.grant_ref,'grant',controller);

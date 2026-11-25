@@ -175,7 +175,7 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
     const chunks=[];let size=0;for await(const chunk of req){size+=chunk.length;need(size<=Number(length),'capacity');chunks.push(chunk);}
     need(size===Number(length)&&same(current(bindingId,req.socket),record),'changed');
     const decode=eligibility?armPreparationEligibilityRequest:lookup?armPreparationLookup:armPreparationRequest;
-    const input=decode(decodeDeviceBindings(Buffer.concat(chunks),preparationRequestLimit),peerScope(identity));
+    const input=decode(decodeDeviceBindings(Buffer.concat(chunks),preparationRequestLimit),peerScope(identity),{allowScheduled:eligibility});
     need(same((eligibility?input.lookup:input).origin_scope,peerScope(peer)),'preparation_scope');
     let outcome;
     try{outcome=await handle(bindingId,req.socket,input);}catch(error){
@@ -390,7 +390,7 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
    need(record.state==='activated'&&identity.service_kind==='seamer'&&target.service_kind==='controller'&&
     local?.permissions.includes('automation.prepare.read')&&(readPreparation||local.permissions.includes('automation.prepare')),'purpose');
    const decode=eligibility?armPreparationEligibilityRequest:lookup?armPreparationLookup:armPreparationRequest;
-   decode(body,peerScope(target));
+   decode(body,peerScope(target),{allowScheduled:eligibility});
    need(same((eligibility?body.lookup:body).origin_scope,peerScope(identity))&&bytes.length<=preparationRequestLimit,'preparation_scope');
   }
   if(protection){

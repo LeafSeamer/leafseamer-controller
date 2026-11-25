@@ -411,6 +411,29 @@ test('显式接入 Controller 准备受理，核验同一计划与控制原件�
  const observe=(input=eligibility)=>seamer.transport.prepareRunPreparationEligibility(originBinding,input);
  const live=await observe();assert.deepEqual(live.original,{request:eligibility,state:'eligible',eligible_before_ns:String(end)});
  assert.equal(writer(live.assertCurrentInTransaction),true);
+ const scheduled={...eligibility,schedule_device_ids:[device]};
+ await assert.rejects(observe(scheduled),{code:'peer_pairing_response'});
+ const withoutScheduleTargets=networkStore;
+ let targetRevision='1',targetReady=true;
+ automationExecution={observeScheduleTarget(id){
+  assert.equal(db.inTransaction,true);assert.equal(id,device);
+  if(!targetReady)throw Error('scheduled gate unavailable');
+  return {ready_ref:{id:device,revision:targetRevision}};
+ }};
+ networkStore=construct();
+ try{
+  const observed=await observe(scheduled);
+  assert.deepEqual(observed.original,{request:scheduled,state:'eligible',eligible_before_ns:String(end)});
+  assert.equal(writer(observed.assertCurrentInTransaction),true);
+  await assert.rejects(observe({...scheduled,schedule_device_ids:[id()]}),{code:'peer_pairing_response'});
+  await assert.rejects(observe({...scheduled,schedule_device_ids:[device,device]}),{code:'peer_pairing_preparation_schedule_devices'});
+  const gateChanged=await networkStore.prepareEligibility(bindingId,'paired TLS',scheduled);
+  targetRevision='2';
+  assert.throws(gateChanged.beforeSend,{code:'peer_pairing_preparation_schedule_changed'});
+  targetReady=false;
+  await assert.rejects(observe(scheduled),{code:'peer_pairing_response'});
+  assert.deepEqual((await observe()).original.request,eligibility);
+ }finally{networkStore=withoutScheduleTargets;automationExecution=null;}
  const fixedWindow=await observe();
  observationOffset=2000000000n;
  assert.equal(writer(fixedWindow.assertCurrentInTransaction),true);

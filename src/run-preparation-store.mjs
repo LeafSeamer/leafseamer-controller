@@ -217,10 +217,19 @@ export function runPreparationStore({db,service,bootId,writer,time,pairingSample
   }finally{pendingEligibility--;}
  }
  async function prepareEligibility(bindingId,socket,input){
-  const request=armPreparationEligibilityRequest(structuredClone(input),scope);
+  const request=armPreparationEligibilityRequest(structuredClone(input),scope,{allowScheduled:true});
   const check=await prepareGrantObservation(bindingId,socket,request);
+  let gateBasis=null;
   const verify=()=>writer(()=>{
-   const {eligible_before_ns}=check();
+   const {record,eligible_before_ns}=check();
+   if(request.schedule_device_ids){
+    need(automationExecution?.observeScheduleTarget,'preparation_schedule_unavailable');
+    const granted=new Set(record.applied_receipt.grant.device_actions.map(action=>action.device_id));
+    need(request.schedule_device_ids.every(id=>granted.has(id)),'preparation_schedule_devices');
+    const targets=request.schedule_device_ids.map(automationExecution.observeScheduleTarget);
+    need(gateBasis===null||same(gateBasis,targets),'preparation_schedule_changed');
+    gateBasis=targets;
+   }
    return {request:structuredClone(request),state:'eligible',eligible_before_ns};
   });
   return {body:verify(),beforeSend:verify};
