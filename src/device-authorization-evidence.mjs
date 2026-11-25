@@ -13,11 +13,15 @@ const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab]
 const namedSeal=(v,key)=>({...v,[key]:digest(v)});
 const document=cacheVerifiedDocument((text,hash,key='digest')=>{
  const v=JSON.parse(text),{[key]:actual,...body}=v;need(canonicalize(v)===text&&actual===hash&&digest(body)===hash,'integrity');return v;
-});
-function body(db,sql,...args){const row=db.prepare(sql).raw().get(...args);need(row,'source_missing');
- return memoExecutionRead(db,'device-evidence-source-document',row,()=>{
-  const v=JSON.parse(row[0]);need(canonicalize(v)===row[0]&&'sha256:'+crypto.createHash('sha256').update(row[0]).digest('hex')===row[1],'source_integrity');return v;
- });}
+},{immutable:true});
+const sourceDocument=cacheVerifiedDocument((text,hash)=>{
+ const value=JSON.parse(text);
+ need(canonicalize(value)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===hash,'source_integrity');
+ return {value,hash};
+},{immutable:true});
+function body(db,sql,...args){
+ const row=db.prepare(sql).raw().get(...args);need(row,'source_missing');return sourceDocument(...row);
+}
 
 // 设备资格和单条动作的 RunGrant 分别核验。
 function revocationCut(db,service,selected,execution){
@@ -25,15 +29,15 @@ function revocationCut(db,service,selected,execution){
  need(db.inTransaction&&selected.context.purpose==='ordinary'&&
   (mode==='manual'&&holder||Number(service.schema_revision)>=96&&mode==='automatic'&&holder===null),'scope');
  need(same(execution.value.binding,selected.binding),'runtime_binding');
- const runtime=body(db,'SELECT body_jcs,body_digest FROM worker_runtime_binding WHERE runtime_id=?',execution.value.runtime_binding_ref.object_id);
+ const {value:runtime,hash:runtimeHash}=body(db,'SELECT body_jcs,body_digest FROM worker_runtime_binding WHERE runtime_id=?',execution.value.runtime_binding_ref.object_id);
  const binding=runtime.launch_intent.extension_binding;
- need(runtime.runtime_binding_id===execution.value.runtime_binding_ref.object_id&&digest(runtime)===execution.value.runtime_binding_ref.digest&&
+ need(runtime.runtime_binding_id===execution.value.runtime_binding_ref.object_id&&runtimeHash===execution.value.runtime_binding_ref.digest&&
   same(runtime.admission_receipt.domain_ref,{clock_domain_id:selected.binding.clock_domain_id,descriptor_digest:selected.binding.descriptor_digest})&&
   runtime.admission_receipt.member_boot_id===selected.binding.worker_boot_id,'runtime_binding');
- const approval=body(db,'SELECT body_jcs,body_digest FROM extension_approval WHERE approval_id=?',binding.approval_ref.object_id);
- const content=body(db,'SELECT content_jcs,content_digest FROM extension_candidate WHERE installation_id=?',binding.installation_ref.object_id);
+ const {value:approval}=body(db,'SELECT body_jcs,body_digest FROM extension_approval WHERE approval_id=?',binding.approval_ref.object_id);
+ const {value:content,hash:contentHash}=body(db,'SELECT content_jcs,content_digest FROM extension_candidate WHERE installation_id=?',binding.installation_ref.object_id);
  need(same(approval.approval_ref,binding.approval_ref)&&same(approval.installation_ref,binding.installation_ref)&&
-  content.installation_id===binding.installation_ref.object_id&&digest(content)===binding.installation_ref.digest&&
+  content.installation_id===binding.installation_ref.object_id&&contentHash===binding.installation_ref.digest&&
   same(content.intake_ref,binding.intake_ref)&&content.receipt.host_trust_epoch===binding.host_trust_epoch&&
   content.receipt.host_installation_id===binding.host_installation_id&&same(content.receipt.platform_profile_ref,binding.platform_profile_ref),'extension_binding');
  const denied=db.prepare('SELECT deny_id,body_jcs,body_digest FROM extension_approval_deny WHERE approval_id=?').raw().all(binding.approval_ref.object_id);
@@ -132,9 +136,15 @@ export function deviceAuthorizationEvidence({db,service,writer,currentContext,ma
  }
  function currentOriginal(device){
   const state=currentDeviceAuthorization(db,device);need(state.value.status==='policy_selected','protected');const saved=head(state);need(saved,'missing');
-  const request=saved.commit.request,selected=currentContext({device_id:device,manual_source_ref:request.manual_source_ref,evaluator_source_ref:request.evaluator_source_ref});
+  // 同一次同步读取的上下文、撤销切点和资源选择使用同一运行绑定。
+  let execution;
+  const executionForDevice=()=>execution??=executionCurrent(device);
+  const request=saved.commit.request;
+  const selected=currentContext({device_id:device,manual_source_ref:request.manual_source_ref,evaluator_source_ref:request.evaluator_source_ref},executionForDevice);
   need(!selected.denied,'revoked');live(saved,selected);
-  const {id,revision,digest:hash,...stored}=saved.cut;need(same(stored,revocationCut(db,service,selected,executionCurrent(device))),'revocation_changed');return saved;
+  const {id,revision,digest:hash,...stored}=saved.cut;
+  need(same(stored,revocationCut(db,service,selected,executionForDevice())),'revocation_changed');
+  return {authorization:saved,execution};
  }
  attachCurrent?.(currentInside);
  return Object.freeze({
@@ -164,10 +174,10 @@ export function deviceAuthorizationEvidence({db,service,writer,currentContext,ma
     written(db.prepare('INSERT INTO device_authorization_evidence_commit VALUES(?,?,?,?,?,?)').run(commit.id,evidence.evidence_id,canonicalize(commit),commit.digest,audit,audit));
     written(previous?db.prepare('UPDATE device_authorization_evidence_head SET evidence_id=?,generation=?,commit_id=? WHERE state_id=? AND evidence_id=?').run(evidence.evidence_id,generation,commit.id,state.ref.id,previous.ref.id):
      db.prepare('INSERT INTO device_authorization_evidence_head VALUES(?,?,?,?)').run(state.ref.id,evidence.evidence_id,generation,commit.id));
-    return currentInside(fixed.device_id);
+    return currentInside(fixed.device_id).authorization;
    })));
   },
-  current(device){return freeze(writer(()=>currentInside(device)));},
+  current(device){return freeze(writer(()=>currentInside(device).authorization));},
   lookup(reference){return freeze(writer(()=>read(reference)));}
  });
 }

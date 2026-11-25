@@ -169,9 +169,10 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
   const controls=Number(contextBinding?.service.schema_revision)>=26&&controlBarrier?deviceControlStore({db,service:contextBinding.service,bootId:contextBinding.bootId,
    writer,time,authorizeToken,contextCurrent,authority,devices,barriers:controlBarrier}):null;
   const automaticAuthorization=Number(contextBinding?.service.schema_revision)>=96&&controlBarrier&&executionCurrent&&evaluatorCurrent?
-   request=>currentAutomaticAuthorizationContext(db,contextBinding.service,request,{evaluator:evaluatorCurrent,coreSource:controlBarrier,executionCurrent}):null;
-  const currentDeviceContext=request=>{
-   if(request?.manual_source_ref===null){if(!automaticAuthorization)fail('device_authorization_unavailable');return automaticAuthorization(request);}
+   (request,observeExecution=executionCurrent)=>currentAutomaticAuthorizationContext(db,contextBinding.service,request,
+    {evaluator:evaluatorCurrent,coreSource:controlBarrier,executionCurrent:observeExecution}):null;
+  const currentDeviceContext=(request,observeExecution)=>{
+   if(request?.manual_source_ref===null){if(!automaticAuthorization)fail('device_authorization_unavailable');return automaticAuthorization(request,observeExecution);}
    return currentManualAuthorizationContext(db,contextBinding.service,request,{manual:manualCurrent,evaluator:evaluatorCurrent,coreSource:controlBarrier});
   };
   const recovery=Number(contextBinding?.service.schema_revision)>=40&&manualCurrent&&evaluatorCurrent?deviceAuthorizationRecovery({db,service:contextBinding.service,
@@ -181,7 +182,7 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
     currentContext:currentDeviceContext}):null;
   let initialResourceCurrent,initialResourceRead;
   const initialResources=Number(contextBinding?.service.schema_revision)>=44&&evidenceCurrent?deviceInitialResource({db,service:contextBinding.service,
-    writer,evidenceCurrent,executionCurrent,domain:()=>controlBarrier.domain(),attachCurrent:current=>{initialResourceCurrent=current;},attachRead:read=>{initialResourceRead=read;}}):null;
+    writer,evidenceCurrent,domain:()=>controlBarrier.domain(),attachCurrent:current=>{initialResourceCurrent=current;},attachRead:read=>{initialResourceRead=read;}}):null;
   const initialOpening=Number(contextBinding?.service.schema_revision)>=45&&initialResourceCurrent?deviceInitialOpen({db,writer,
     resourceCurrent:initialResourceCurrent,resourceRead:initialResourceRead,domain:()=>controlBarrier.domain(),attach:attachOpeningSource,readClockReference:clockReference?.readFirst}):null;
   const extensionManagement=createExtensionManagement?.((input,permission,recent)=>{

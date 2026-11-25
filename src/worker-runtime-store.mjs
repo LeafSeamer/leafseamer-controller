@@ -47,9 +47,9 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
  function checkCurrentInWriter(entry){
   need(db.inTransaction,'worker_runtime_writer');connected();if(entry.stopped||active.get(entry.prepared.intent.launch_id)!==entry)throw Object.assign(new WorkerRuntimeError('worker_runtime_withdrawn'),{cause:entry.failure});
   source.assertWorkerObservation(entry.observation);
-  core();const selected=extension.current(entry.prepared.intent);verifyDependencies?.(entry.prepared.intent,selected);
+  core();const selected=extension.current(entry.prepared.intent),dependencies=verifyDependencies?.(entry.prepared.intent,selected);
   need(!db.prepare('SELECT 1 FROM worker_runtime_withdrawal WHERE runtime_id=?').pluck().get(entry.row.runtime_id),'worker_runtime_withdrawn');
-  return selected;
+  return {selected,dependencies};
  }
  function check(entry){live();return db.transaction(()=>checkInWriter(entry)).immediate();}
  function withdrawFromWriter(entry,error){
@@ -67,7 +67,7 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
   entry.refreshing=(async()=>{try{
    check(entry);
    const {selected,observed}=await observe(entry.prepared.intent);
-   const current=check(entry);source.assertWorkerObservation(observed);
+   const {selected:current}=check(entry);source.assertWorkerObservation(observed);
    need(same(observed.receipt,entry.observation.receipt),'worker_runtime_receipt_changed');
    // 当前检查和下面比较之间不await；使用刚核验的同一份扩展资格。
    need(same(current,selected),'worker_runtime_approval_changed');
@@ -131,10 +131,14 @@ export function workerRuntimeStore({db,service,bootId,isOpen,prepared,core,exten
    available();const value=prepared(key),entry=value&&active.get(value.intent.launch_id);need(entry,'worker_runtime_unavailable');
    try{check(entry);return view(entry.row);}catch(error){withdraw(entry,error?.code?.startsWith('extension_')?'approval_changed':'source_changed',error);throw error;}
   },
-  currentInTransaction(key){
+  currentInTransaction(key,{includeDependencies=false}={}){
    need(db.inTransaction&&db.open,'worker_runtime_writer');const value=prepared(key),entry=value&&active.get(value.intent.launch_id);
    need(entry,'worker_runtime_unavailable');
-   try{checkInWriter(entry);return view(entry.row);}catch(error){withdrawFromWriter(entry,error);throw error;}
+   try{
+    const qualification=checkInWriter(entry),runtime=view(entry.row);
+    // 安装批准和依赖只能与本次运行检查一并返回给同一同步读取。
+    return includeDependencies?{runtime,...qualification}:runtime;
+   }catch(error){withdrawFromWriter(entry,error);throw error;}
   },
   openChannel(key,purpose){
    available();const value=prepared(key),entry=value&&active.get(value.intent.launch_id);

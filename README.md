@@ -129,6 +129,8 @@ Schema 112 的开闸路径可为协商了完整参考时间能力的执行会话
 
 最终准入可从已核验的自动化场次步骤和本机授时原件生成定时守卫。封存的发送期限取原队列、编码授权和授时证据截止中的最早时刻。安装帧从封存记录及同库证据包重建，Worker 回执绑定守卫和授时正文的摘要。Controller 在提交及实际写帧前复核原时间窗口，Worker 在设备出口再次核对。
 
+Schema 113 持久登记与最终准入逐字匹配的排期守卫。同一执行会话必须有对应的授时原件，Worker 的确认同时绑定排期守卫摘要。即时命令沿用显式空排期字段。升级时停机运行 `migrate-storage --data-dir ABSOLUTE_PATH --to-revision 113`。
+
 配对动作绑定对定时来源使用 `leafseamer-action-binding/2` 响应。Controller 查核原 RunGrant、已封存执行、场次受理、固定排期版本和步骤窗口摘要。响应交付请求步骤的 UTC 窗口及索引摘要，Controller 再以本机授时域签发许可。正式握手启用和 Seamer 定时执行循环仍需接入。
 
 受信启动装配可用 `referenceTimeAuthorization.schedule.sourceSlots` 显式启用一至四个固定来源的自动采样。调度与手动采样共用预约、一次发送尝试、采样间隔、退役、退避和归档核销。每次发包都按当前授权复核，停采、来源变化和结果未知会阻止该来源继续预约。`referenceTimePolls.scheduleStatus()` 返回本机调度状态。关闭时取消后续唤醒并停止接收当前轮结果，已经提交的未决尝试留待后续按退役规则处理。

@@ -43,7 +43,7 @@ const decodeEvidence=cacheVerifiedDocument((text,hash)=>{
 
 // 初始来源原件保持空库存；精确T2后继另返回非空资源当前资格，不能替代hold释放或恢复。
 // 全部输入取自同一writer内的实际运行、已批准固定模块、原始采样、屏障与命令/出站账本。
-export function deviceInitialResource({db,service,writer,evidenceCurrent,executionCurrent,domain,attachCurrent,attachRead}){
+export function deviceInitialResource({db,service,writer,evidenceCurrent,domain,attachCurrent,attachRead}){
  function obsInventory(execution,catalog,sample){
   const q=catalog.qualification,plan=execution.primitive_plan;
   need(q.qualification===obsCutModuleDefinition.qualification&&
@@ -65,7 +65,7 @@ export function deviceInitialResource({db,service,writer,evidenceCurrent,executi
    same(observed.obs_cut_observation,{scene_catalog_digest:proof.scene_catalog_digest,program_scene_uuid:proof.target_scene_uuid});
  }
  function sources(device,ownOpen=null,ready=null,preparedRef=null,deviceScoped=Number(service.schema_revision)>=97){
-  need(db.inTransaction,'writer');const authorization=evidenceCurrent(device),execution=executionCurrent(device),b=execution.value.binding;
+  need(db.inTransaction,'writer');const {authorization,execution}=evidenceCurrent(device),b=execution.value.binding;
   need(same(b,authorization.value.requirement.binding),'binding');
   const q=execution.catalog.qualification,p=execution.value.transport_profile,sample=execution.baseline;
   const obs=q.qualification===obsCutModuleDefinition.qualification;

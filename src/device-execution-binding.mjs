@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import canonicalize from 'canonicalize';
 import {moduleNeed as need} from './sdk/device-module.mjs';
-import {memoExecutionRead} from './execution-read-view.mjs';
+import {cacheVerifiedDocument} from './verified-document-cache.mjs';
 import {obsCutExecutionProfile,obsCutModuleDefinition,projectObsSceneCatalog} from './obs-module-profile.mjs';
 import {readConfirmedObsSceneCatalog} from './obs-scene-confirmation.mjs';
 const digest=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
@@ -30,9 +30,9 @@ function currentObsCatalog(db,approved,sample){
  need(current.status==='ready','execution_binding_scene_confirmation');
  return current;
 }
-function read(db,text,expected){return memoExecutionRead(db,'execution-binding-document',[text,expected],()=>{
+const read=cacheVerifiedDocument((text,expected)=>{
  const value=JSON.parse(text);need(canonicalize(value)===text&&digest(text)===expected,'execution_binding_integrity');return value;
-});}
+},{immutable:true});
 
 // 只读当前writer中的真实装配；旧连接原件和握手本身不产生发送资格。
 export function currentDeviceExecutionBinding(db,runtime,device,sessionId){
@@ -41,7 +41,7 @@ export function currentDeviceExecutionBinding(db,runtime,device,sessionId){
   JOIN device_catalog_approval c ON c.approval_id=b.catalog_approval_id WHERE b.ipc_session_id=? AND b.device_id=?`).raw().all(sessionId,device);
  const matches=[];
  for(const row of rows){
-  const value=read(db,row[0],row[1]),catalog=read(db,row[2],row[3]);
+  const value=read(row[0],row[1]),catalog=read(row[2],row[3]);
   const latest=db.prepare(`SELECT frame_jcs,message_type FROM device_module_frame WHERE channel_id=? AND direction='w2c'
    AND message_type IN ('CONNECTED','DISCONNECTED') AND json_extract(frame_jcs,'$.body.device_id')=?
    ORDER BY length(sequence) DESC,sequence DESC LIMIT 1`).raw().get(catalog.channel_id,device);
@@ -52,15 +52,15 @@ export function currentDeviceExecutionBinding(db,runtime,device,sessionId){
   const q=catalog.qualification;
   const selected=selectedTemplate(q);
   const sample=db.prepare('SELECT body_jcs,body_digest FROM device_baseline_sample WHERE approval_id=? ORDER BY length(sample_sequence) DESC,sample_sequence DESC LIMIT 1').raw().get(catalog.approval_id);
-  need(sample,'execution_binding_sample');const baseline=read(db,...sample);
+  need(sample,'execution_binding_sample');const baseline=read(...sample);
   need(baseline.device_id===device&&baseline.device_session_id===value.binding.device_session_id&&baseline.catalog_approval_ref.digest===row[3],'execution_binding_sample');
   if(selected===obsCutModuleDefinition.template){
    need(same(value.primitive_plan.scene_catalog,currentObsCatalog(db,catalog,baseline))&&
     same(value.transport_profile.resource_ref,q.obs_binding.resource_ref),'execution_binding_stale');
   }
-  matches.push({ref:{id:value.binding_id,revision:'1',digest:row[1]},value,catalog,baseline});
+  matches.push({ref:Object.freeze({id:value.binding_id,revision:'1',digest:row[1]}),value,catalog,baseline});
  }
- need(matches.length===1,'execution_binding_current');return frozen(matches[0]);
+ need(matches.length===1,'execution_binding_current');return Object.freeze(matches[0]);
 }
 
 // 固定模块的核心内部装配。记录实际连接及不可变编码和传输配置，保持关闭。
@@ -74,13 +74,13 @@ export function bindDeviceExecution(db,runtime,catalog){
  return db.transaction(()=>{
   const sessionRow=db.prepare(`SELECT s.binding_jcs,s.binding_digest FROM execution_session s LEFT JOIN execution_session_end e USING(ipc_session_id)
    WHERE s.runtime_id=? AND e.ipc_session_id IS NULL`).raw().get(runtime.ref.object_id);
-  need(sessionRow,'execution_binding_session');const session=read(db,...sessionRow);
+  need(sessionRow,'execution_binding_session');const session=read(...sessionRow);
   const evidenceRow=db.prepare('SELECT body_jcs,body_digest FROM extension_approval_capabilities WHERE approval_id=?').raw().get(q.approval_ref.object_id);
-  need(evidenceRow,'execution_binding_capability');const evidence=read(db,...evidenceRow);
+  need(evidenceRow,'execution_binding_capability');const evidence=read(...evidenceRow);
   need(evidence.documents.filter(v=>same(v.template,selected)&&hash(v.template)===q.template_digest).length===1,'execution_binding_capability');
   const sceneCatalog=obs?currentObsCatalog(db,approved,sample):null;
   const old=db.prepare('SELECT body_jcs,body_digest FROM device_execution_binding WHERE catalog_approval_id=?').raw().get(approved.approval_id);
-  if(old){const value=read(db,...old);need(value.session_ref.id===session.ipc_session_id&&value.session_ref.digest===sessionRow[1]&&same(value.runtime_binding_ref,runtime.ref),'execution_binding_stale');
+  if(old){const value=read(...old);need(value.session_ref.id===session.ipc_session_id&&value.session_ref.digest===sessionRow[1]&&same(value.runtime_binding_ref,runtime.ref),'execution_binding_stale');
    if(obs)need(same(value.primitive_plan.scene_catalog,sceneCatalog),'execution_binding_stale');
    return frozen({ref:ref(value.binding_id,value),value});}
   const id=crypto.randomUUID(),exit='exit_'+hash({ipc_session_id:session.ipc_session_id,device_id:approved.device_id,device_session_id:approved.device_session_id}).slice(7);

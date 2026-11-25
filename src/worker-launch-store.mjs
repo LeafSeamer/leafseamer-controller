@@ -96,13 +96,13 @@ export function workerLaunchStore(db,service,bootId,isOpen,extensionSource,attac
        JOIN worker_launch_preparation p USING(launch_id) JOIN worker_launch_device d USING(launch_id)
        LEFT JOIN worker_runtime_withdrawal w USING(runtime_id) WHERE d.device_id=? AND r.service_boot_id=? AND w.runtime_id IS NULL LIMIT 5`,device,bootId);
       need(candidates.length===1,'device_capabilities_unavailable');const candidate=candidates[0],module=modules.get(candidate.launch_id);
-      need(module,'device_capabilities_unavailable');const active=runtime.currentInTransaction({launch_id:candidate.launch_id,launch_intent_digest:candidate.intent_digest});
-      return {active,module};
+      need(module,'device_capabilities_unavailable');
+      const current=runtime.currentInTransaction({launch_id:candidate.launch_id,launch_intent_digest:candidate.intent_digest},{includeDependencies:true});
+      return {...current,module};
   }
   function currentDeviceCatalogInput(device){
-      const {active,module}=currentDeviceModule(device);
-      const selected=extensionSource.current(active.binding.launch_intent),dependencies=currentWorkerDependencies(db,service,active.binding.launch_intent,selected);
-      return {service,device,runtime:active,selected,dependencies,channel:module.binding.ipc_session_id};
+      const {runtime,selected,dependencies,module}=currentDeviceModule(device);
+      return {service,device,runtime,selected,dependencies,channel:module.binding.ipc_session_id};
   }
   function readDeviceEventsCurrent(device,expectedSourceRef=null,after='0',limit=32){
     need(isOpen()&&db.open&&db.inTransaction&&Number(service.schema_revision)>=64,'device_events_writer');

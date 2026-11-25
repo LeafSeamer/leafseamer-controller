@@ -49,11 +49,11 @@ export async function automationPeer({business,manager,config,device,refresh,rep
    const response=await commands.submit(...args),reference=response.adjudication.command_ref;
    if(response.created&&reference){
     report({event:'automation-target-accepted',reference});
-    if(config.scheduled_admission)return response;
+    if(config.scheduled_admission&&!config.scheduled_dispatch)return response;
     for(const [stage,method] of [['encoded','whenCommandEncoded'],['finalized','whenCommandFinalized'],['guarded','whenCommandGuarded'],['dispatched','whenCommandDispatched']]){
      business.workerLaunches[method](reference.object_id).then(result=>{
-      report({event:'automation-target-stage',stage,disposition:result?.ack?.value?.disposition});
-     },()=>{});
+      report({event:'automation-target-stage',stage,present:result!=null,disposition:result?.response?.value?.disposition??result?.ack?.value?.disposition});
+     },error=>report({event:'automation-target-stage-failed',stage,code:error.code??error.name,cause:error.cause?.code,constraint:error.code==='SQLITE_CONSTRAINT_TRIGGER'?error.message:undefined}));
     }
     business.workerLaunches.whenCommandSettled(reference.object_id).then(result=>report(result?{event:'automation-target-settled',reference}:
      {event:'automation-target-failed',reference,code:'execution_settlement_ineligible'}),
