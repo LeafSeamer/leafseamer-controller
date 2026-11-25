@@ -3,21 +3,54 @@ import {pairingFields as fields,pairingInteger as integer,pairingNeed as need,pa
 import {isPreparationDigest as hash} from './peer-run-arm-plan.mjs';
 export {actionAdmissionRequest} from './peer-action-binding.mjs';
 import {assertEndorsementParameters,endorsementScope} from './run-endorsement-scope.mjs';
+import {scheduledDispatch} from './command-reference-time.mjs';
 
 function reference(ref,kind,scope,id){
  fields(ref,'kind,scope,object_id,revision,digest');
  need(ref.kind===kind&&same(ref.scope,scope)&&ref.object_id===id&&ref.revision==='1'&&hash(ref.digest),'action_reference');
 }
 
+function scheduleOrigin(value,execution,executionRef,stepId,planRequest,plan){
+ fields(value,'admission,step_window,window_index');
+ const {admission,step_window,window_index}=value,{scope,execution_id,run_id,admission_ref,artifact_ref}=execution;
+ need(admission?.format==='leafseamer.schedule-admission/1'&&same(admission.scope,scope)&&
+  admission.execution_id===execution_id&&admission.run_id===run_id&&same(admission.artifact_ref,artifact_ref)&&
+  same(artifact_ref,planRequest.artifact_ref)&&digest(admission)===admission_ref?.digest,'action_schedule_admission');
+ reference(admission_ref,'schedule_admission',scope,admission.occurrence_id);
+ need(hash(admission.occurrence_plan_digest)&&Array.isArray(window_index)&&window_index.length>0&&window_index.length<=256&&
+  window_index.every(item=>item&&typeof item.step_id==='string'&&hash(item.step_window_digest))&&
+  new Set(window_index.map(item=>item.step_id)).size===window_index.length&&digest(window_index)===admission.step_window_index_digest,
+  'action_schedule_occurrence');
+ need(step_window&&hash(step_window.step_window_digest),'action_schedule_step');
+ const windows=window_index.filter(item=>item.step_id===stepId);
+ const {step_window_digest,...step}=step_window,binding=plan.payload.binding;
+ need(windows.length===1&&same(windows[0],{step_id:stepId,step_window_digest})&&step.step_id===stepId&&
+  digest(step)===step_window_digest&&step.action_binding_id===binding.action_binding_ref.id&&
+  (admission.first_step_id!==stepId||same(admission.step_window_ref,{id:step.step_window_id,revision:'1',digest:step_window_digest})),
+  'action_schedule_step');
+ const selected={format:'leafseamer.schedule-step-binding/1',execution_ref:executionRef,
+  occurrence_ref:{id:admission.occurrence_id,revision:'1',digest:admission.occurrence_plan_digest},
+  admission_ref:{id:admission_ref.object_id,revision:admission_ref.revision,digest:admission_ref.digest},
+  definition_artifact_ref:{id:artifact_ref.object_id,revision:artifact_ref.revision,digest:artifact_ref.digest},
+  schedule_version:admission.schedule_version_ref.revision,activation_ref:admission.activation_ref,
+  step_id:stepId,step_window_ref:{id:step.step_window_id,revision:'1',digest:step_window_digest},window:step.window};
+ // Validate the same narrow dispatch policy later consumed by command admission and guard installation.
+ scheduledDispatch(selected,{step_id:stepId,execution_binding_ref:{...executionRef,kind:'execution_binding'}},1);
+ return selected;
+}
+
 export function actionAdmissionBinding(value,request,prepared){
- fields(value,'execution,step_plan,step_ready,parameters,eligible_before_ns');
+ const scheduled=value?.execution?.origin_kind==='schedule';
+ fields(value,scheduled?'execution,step_plan,step_ready,parameters,eligible_before_ns,schedule':'execution,step_plan,step_ready,parameters,eligible_before_ns');
  const {execution,step_plan:plan,step_ready:ready,parameters,eligible_before_ns}=value;
  const {execution_ref,step_id,parameters_ref,preparation}=request,{origin_scope,controller_scope}=preparation.lookup;
  const {request:planRequest,applied_receipt:receipt}=prepared,{grant}=receipt;
  need(execution&&Array.isArray(execution.steps)&&Array.isArray(execution.grant_basis),'action_execution');
  const {execution_id,run_id,arm_generation,steps,grant_basis}=execution;
- need(execution.format==='leafseamer.trigger-execution/1'&&execution.runtime_revision==='3'&&same(execution.scope,origin_scope)&&
-  execution.origin_kind==='trigger'&&hash(execution.origin_digest)&&digest(execution)===execution_ref.digest&&execution_id===execution_ref.object_id&&
+ const originDigest=scheduled?execution.admission_ref?.digest:execution.origin_digest;
+ need((scheduled?execution.format==='leafseamer.scheduled-execution/1':
+  execution.format==='leafseamer.trigger-execution/1'&&execution.runtime_revision==='3'&&execution.origin_kind==='trigger')&&
+  same(execution.scope,origin_scope)&&hash(originDigest)&&digest(execution)===execution_ref.digest&&execution_id===execution_ref.object_id&&
   same(execution.artifact_ref,planRequest.artifact_ref)&&run_id===grant.run_id&&arm_generation===grant.arm_generation&&
   planRequest.mode==='arm'&&planRequest.execution_id===null,
   'action_execution');
@@ -27,6 +60,7 @@ export function actionAdmissionBinding(value,request,prepared){
  need(payload?.kind==='action'&&binding?.target&&plan.execution_id===execution_id&&plan.step_id===step_id&&digest(plan)===listed.plan_digest&&
   same(binding.grant_ref,receipt.grant_ref)&&same(binding.target.controller_scope,controller_scope)&&
   grant.device_actions.some(action=>same(action,binding.target.device_action)),'action_plan');
+ const schedule=scheduled?scheduleOrigin(value.schedule,execution,execution_ref,step_id,planRequest,plan):null;
  fields(ready,'ref,body');fields(parameters,'ref,body');
  uuid(ready.body?.ready_id);
  reference(ready.ref,'step_ready',origin_scope,ready.body.ready_id);
@@ -35,7 +69,7 @@ export function actionAdmissionBinding(value,request,prepared){
  const body=parameters.body,eligible=integer(eligible_before_ns);
  need(body&&same(parameters.ref,parameters_ref)&&digest(body)===parameters_ref.digest&&body.format==='leafseamer.action-parameters/1'&&
   same(body.execution_ref,execution_ref)&&body.step_id===step_id&&body.step_plan_digest===listed.plan_digest&&
-  same(body.step_ready_ref,ready.ref)&&body.origin_digest===execution.origin_digest&&same(body.grant_ref,receipt.grant_ref)&&
+  same(body.step_ready_ref,ready.ref)&&body.origin_digest===originDigest&&same(body.grant_ref,receipt.grant_ref)&&
   same(body.parameter_schema_ref,binding.parameter_schema_ref)&&same(body.delay_window_refs,ready.body.delay_window_refs??[])&&
   body.parameters!==null&&typeof body.parameters==='object'&&!Array.isArray(body.parameters)&&digest(body.parameters)===body.parameters_digest&&
   eligible>0n&&eligible<=integer(body.eligible_before_ns)&&eligible<=integer(execution.approved_before_ns)&&
@@ -45,5 +79,5 @@ export function actionAdmissionBinding(value,request,prepared){
   definition_version:grant.definition_version,principal:grant.principal,grant_ref:receipt.grant_ref,
   target:binding.target.device_action,parameters:body.parameters,parameter_schema_ref:body.parameter_schema_ref,
   ...(binding.action_binding_ref&&{action_binding_ref:binding.action_binding_ref}),
-  delay_window_refs:body.delay_window_refs,eligible_before_ns};
+  delay_window_refs:body.delay_window_refs,eligible_before_ns,...(schedule&&{schedule_binding:schedule})};
 }

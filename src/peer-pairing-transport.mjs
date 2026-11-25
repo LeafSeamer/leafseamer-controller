@@ -18,7 +18,8 @@ import {runArmOperationReference,runInitiatorReadRequest,runInitiatorReadReply} 
 import {armPlanReference,armPlanReadRequest,armPlanReadReply,armPreparationRequest} from './peer-run-arm-plan.mjs';
 import {armPreparationEligibilityRequest,armPreparationEligibilityReply,armPreparationLookup,armPreparationReply,preparationProtocol,preparationRequestLimit,preparationResponseLimit,
  runEligibilityObservationMs,runEligibilityObservationNs} from './peer-run-preparation.mjs';
-import {actionAdmissionRequest,actionBindingPath,actionBindingReply,actionBindingRequestLimit,actionBindingResponseLimit,actionBindingVersion} from './peer-action-binding.mjs';
+import {actionAdmissionRequest,actionBindingPath,actionBindingReply,actionBindingRequestLimit,actionBindingResponseLimit,
+ actionBindingVersion,scheduledActionBindingVersion} from './peer-action-binding.mjs';
 import {automationCommandPaths,automationCommandReply,automationCommandRequest,automationCommandRequestLimit,automationCommandResponseLimit,automationCommandVersion} from './peer-automation-command.mjs';
 import {approvalProtectionNotice,runApprovalProtectionReply,runApprovalProtectionVersion,endorsementRevocationNotice,endorsementRevocationReceipt} from './peer-run-approval-protection.mjs';
 const day=86400000000000n,sha=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
@@ -121,7 +122,8 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
     }
     const commandRead=commandOperation==='lookup'||commandOperation==='result';
     const body=actionRead?observation.body:commandRead?observation:observation.adjudication;
-    const reply={version,challenge_id:challenge,pair_attempt_id:record.transcript.pair_attempt_id,
+    const reply={version:actionRead&&body.execution?.origin_kind==='schedule'?scheduledActionBindingVersion:version,
+     challenge_id:challenge,pair_attempt_id:record.transcript.pair_attempt_id,
      transcript_digest:record.transcript_digest,body};
     if(actionRead)actionBindingReply(reply,input,record,challenge);
     else automationCommandReply(reply,input,record,challenge,commandOperation);
