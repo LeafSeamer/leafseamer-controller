@@ -3,6 +3,7 @@ import {createHash,createSecretKey} from 'node:crypto';
 import {isIP} from 'node:net';
 import canonicalize from './runtime/canonicalize.mjs';
 import {clockInteger} from './native-clock.mjs';
+import {referenceBundleIssuer,resolveReferenceNtpTimestamp,utcCeil} from './reference-time-bundle.mjs';
 
 const directory='/etc/leafseamer/reference-source';
 const sourceSlot='reference.primary';
@@ -12,6 +13,121 @@ const identifier=value=>typeof value==='string'&&/^[A-Za-z0-9_.:-]{1,128}$(?![\s
 const exact=(value,keys)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join(',')===keys;
 const same=(a,b)=>canonicalize(a)===canonicalize(b);
 const need=(ok,reason)=>{if(!ok)throw new Error('time_provider_poll_'+reason);};
+const second=1000000000n,day=86400n*second,word=1n<<32n;
+const minimum=(a,b)=>a<b?a:b;
+const maximum=(a,b)=>a>b?a:b;
+const ref=(id,digest,revision='1')=>({id,digest,revision});
+const seal=(body,field)=>({...body,[field]:hash(canonicalize(body))});
+const bounded=(value,limit)=>{const n=clockInteger(value);need(n>0n&&n<=limit,'reference_bounds');return n;};
+function requireRef(value){
+  need(exact(value,'digest,id,revision')&&identifier(value.id)&&/^sha256:[a-f0-9]{64}$/.test(value.digest)&&
+    clockInteger(value.revision)>0n,'reference_reference');
+}
+
+function referenceInstallation(approval,configuration,endpointRef,current){
+  const qualified=approval.reference;
+  need(exact(qualified,'elapsed_error_ppm,independent_source_ref,leap_schedule,max_half_width_ns,max_upstream_age_ns,monitoring_ref,platform_qualification_ref,source_provenance_ref,span_quantization_ns,t2_error_ns,t3_error_ns,tref_error_ns,utc_mode')&&
+    qualified.utc_mode==='normal_utc_no_smear'&&Number.isInteger(qualified.elapsed_error_ppm)&&
+    qualified.elapsed_error_ppm>0&&qualified.elapsed_error_ppm<=1000,'reference_qualification');
+  for(const key of ['independent_source_ref','monitoring_ref','platform_qualification_ref','source_provenance_ref'])requireRef(qualified[key]);
+  const q=bounded(qualified.span_quantization_ns,1000000n),rho=BigInt(qualified.elapsed_error_ppm);
+  const errors=['t2_error_ns','t3_error_ns','tref_error_ns'].map(key=>bounded(qualified[key],second));
+  const upstream=bounded(qualified.max_upstream_age_ns,day);
+  const halfWidth=bounded(qualified.max_half_width_ns,second);
+  const leap=qualified.leap_schedule;
+  need(exact(leap,'bulletin_ref,events,valid_from_ns,valid_until_ns')&&Array.isArray(leap.events)&&leap.events.length<=16,'reference_leap_schedule');
+  requireRef(leap.bulletin_ref);
+  const from=clockInteger(leap.valid_from_ns),until=clockInteger(leap.valid_until_ns);
+  let bandStart=from;
+  const windows=[];
+  for(const event of leap.events){
+    need(exact(event,'direction,utc_ns')&&[-1,1].includes(event.direction),'reference_leap_schedule');
+    const at=clockInteger(event.utc_ns);
+    need(at%second===0n&&at>=from&&at<until&&at-day>=bandStart,'reference_leap_schedule');
+    windows.push({lower:bandStart,upper:at-day});
+    bandStart=at+day;
+  }
+  if(bandStart<until)windows.push({lower:bandStart,upper:until});
+  need(until>from,'reference_leap_schedule');
+  const validFrom=clockInteger(approval.not_before_ns),validUntil=clockInteger(approval.expires_ns);
+  const {approval_revision:revision}=approval,qualificationRef=ref('reference.qualification',hash(canonicalize(qualified)),revision);
+  const method=id=>ref(id.replace('/','.'),hash(canonicalize({id,version:1})));
+  const source=seal({source_id:'reference.source',revision,configured_server_ref:endpointRef,endpoint_set_ref:endpointRef,
+    effective_config_ref:configuration,authentication:'trusted_network',trust_policy_ref:qualificationRef},'source_digest');
+  const profile=seal({profile_id:'reference.profile',revision,model_id:'reference-bound/1',model_revision:'1',
+    collector_artifact_ref:ref('reference.collector',approval.provider_digest),protocol_artifact_ref:method('reference.ntp-v4'),
+    platform_qualification_ref:qualified.platform_qualification_ref,clock_method_ref:method('reference.clock-boottime'),
+    error_method_ref:method('qualified-server-envelope/1'),era_method_ref:method('auth-interval-era/1'),
+    elapsed_model:'observed-delta-relative/1',elapsed_error_ppm:qualified.elapsed_error_ppm,span_quantization_ns:qualified.span_quantization_ns,
+    max_packet_bytes:48,time_scale:'posix-utc',leap_policy:'normal-only',smear_policy:'forbidden'},'profile_digest');
+  const policy=seal({policy_id:'reference.policy',revision,max_exchange_span_ns:pollLease,max_anchor_age_ns:'32000000000',
+    max_exchange_age_ns:'32000000000',max_upstream_age_ns:String(upstream),max_half_width_ns:String(halfWidth)},'policy_digest');
+  const approvalDoc=seal({approval_id:approval.approval_id,revision,source_ref:ref(source.source_id,source.source_digest,revision),
+    profile_ref:ref(profile.profile_id,profile.profile_digest,revision),qualification_ref:qualificationRef,
+    authority_service_id:approval.scope.service_id,status:'approved'},'approval_digest');
+  const issuer=referenceBundleIssuer({source,profile,policy,approval:approvalDoc});
+  const {approval_ref,policy_ref,profile_ref}=issuer.references;
+  let activeWindow=null,deadline=null;
+  const elapsed=delta=>utcCeil(delta*(1000000n+rho),1000000n)+q;
+
+  const authority=Object.freeze({
+    sourceSlot,
+    readApproval(_request,{sample,tick}){
+      current();
+      const lower=clockInteger(sample.lower_ns),upper=clockInteger(sample.upper_ns);
+      need(same(sample.source_ref,qualified.independent_source_ref)&&clockInteger(sample.monotonic_quantization_ns)<=q&&
+        BigInt(sample.drift_ppb)*1000n<=rho*(1000000000n-BigInt(sample.drift_ppb)),'reference_clock_source');
+      if(!activeWindow){
+        const window=windows.find(item=>lower>=item.lower&&upper<item.upper);
+        need(window,'reference_leap_window');
+        activeWindow={lower:maximum(window.lower,validFrom),upper:minimum(window.upper,validUntil)};
+        deadline=tick+maximum(0n,activeWindow.upper-upper-q)*1000000n/(1000000n+rho);
+      }
+      need(lower>=activeWindow.lower&&upper<activeWindow.upper&&tick<deadline,'reference_leap_window');
+      return {format:'leafseamer-reference-approval/1',authentication:'trusted_network',time_scale:'UTC',leap_mode:'normal_only',smear:false,
+        configuration_ref:configuration,source_digest:source.source_digest,approval_ref,profile_ref,policy_ref,
+        elapsed_error_ppm:qualified.elapsed_error_ppm,span_quantization_ns:qualified.span_quantization_ns,
+        max_anchor_age_ns:policy.max_anchor_age_ns,max_exchange_age_ns:policy.max_exchange_age_ns,
+        max_half_width_ns:policy.max_half_width_ns,max_span_ns:policy.max_exchange_span_ns,max_upstream_age_ns:policy.max_upstream_age_ns,
+        valid_before_tick_ns:String(deadline)};
+    },
+    checkAssessment(value){
+      need(BigInt(value.lower_utc_ns)>=activeWindow.lower&&BigInt(value.upper_utc_ns)<activeWindow.upper,'reference_leap_window');
+    },
+    prepareEvidence(candidate,{capture_ref},{now}){
+      const m1=clockInteger(candidate.m1_tick_ns),m4=clockInteger(candidate.m4_tick_ns);
+      need(now.tick>=m4&&m4>=m1&&now.tick-m1<2n*second&&elapsed(m4-m1)<=2n*second,'reference_bracket');
+      const {sample}=now,lower=clockInteger(sample.lower_ns)-elapsed(now.tick-m1),upper=clockInteger(sample.upper_ns);
+      need(upper-lower<=day,'reference_era_window');
+      const [e2,e3,eref]=errors;
+      const bytes=Buffer.from(candidate.response,'base64url');
+      try{
+        const t2=resolveReferenceNtpTimestamp(bytes,32,lower,upper,e2).value;
+        const t3=resolveReferenceNtpTimestamp(bytes,40,lower,upper,e3).value;
+        const tref=resolveReferenceNtpTimestamp(bytes,16,lower-upstream,upper,eref).value;
+        need(t3>=t2&&t3-t2<=(elapsed(m4-m1)+e2+e3)*word&&tref-eref*word<=t3+e3*word,'reference_exchange');
+        const age=maximum(0n,utcCeil(t3-tref,word)+e3+eref);
+        need(age<upstream,'reference_upstream_age');
+        const margin=maximum(e2,e3);
+        return {qualification:qualified,clock_sample:sample,proof:{
+          acquisition_ref:sample.acquisition_ref,verification_ref:capture_ref,provenance_ref:qualified.source_provenance_ref,
+          independent_utc_lower_ns:String(lower-margin),independent_utc_upper_ns:String(upper+margin),
+          t2_error_ns:String(e2),t3_error_ns:String(e3),upstream_age_at_m1_ns:String(age)}};
+      }finally{bytes.fill(0);}
+    },
+    readEvidence(input){
+      current();
+      const {qualification,proof}=input.qualification_original;
+      need(same(qualification,qualified),'reference_qualification');
+      const {independent_utc_lower_ns,independent_utc_upper_ns,t2_error_ns,t3_error_ns,upstream_age_at_m1_ns}=proof;
+      return {format:'leafseamer-reference-evidence/1',exchange_digest:input.exchange_digest,
+        ...issuer.exchangeProofs(input,proof).proofs,independent_utc_lower_ns,independent_utc_upper_ns,
+        t2_error_ns,t3_error_ns,upstream_age_at_m1_ns,valid_before_tick_ns:String(deadline)};
+    },
+    readBundleOriginals:issuer.issue
+  });
+  return {authority,approvalRef:approval_ref,sourceDigest:source.source_digest};
+}
 
 function protectedMount(){
   const stat=fs.lstatSync(directory);
@@ -42,8 +158,10 @@ export function readInstalledLinuxReferenceCapture({identity,providerDigest,appr
     return bytes;
   }
   const bytes=currentApproval(),approval=JSON.parse(bytes.toString('utf8'));
-  need(exact(approval,'approval_id,approval_revision,archive_budget_bytes,capture_key_id,expires_ns,format,network,not_before_ns,provider_digest,scope')&&
-    bytes.equals(Buffer.from(canonicalize(approval)))&&approval.format==='leafseamer-linux-reference-capture-approval/1'&&
+  const providesReference=approval?.format==='leafseamer-linux-reference-capture-approval/2';
+  need(exact(approval,'approval_id,approval_revision,archive_budget_bytes,capture_key_id,expires_ns,format,network,not_before_ns,provider_digest,'+
+    (providesReference?'reference,':'')+'scope')&&bytes.equals(Buffer.from(canonicalize(approval)))&&
+    (providesReference||approval.format==='leafseamer-linux-reference-capture-approval/1')&&
     same(approval.scope,{service_id,database_instance_id})&&approval.provider_digest===providerDigest&&
     identifier(approval.approval_id)&&clockInteger(approval.approval_revision)>0n&&identifier(approval.capture_key_id)&&
     Number.isSafeInteger(approval.archive_budget_bytes)&&approval.archive_budget_bytes>=reservedBytes&&
@@ -75,6 +193,8 @@ export function readInstalledLinuxReferenceCapture({identity,providerDigest,appr
     readKey(input,id){return keyFor(input,id,false);}
   });
   captureProtection.currentKey(scope);
+  const configuration=ref('reference.configuration',approvalDigest);
+  const reference=providesReference?referenceInstallation(approval,configuration,endpointRef,current):null;
   return Object.freeze({
     limits:Object.freeze({max_outstanding:1,max_reserved_bytes:approval.archive_budget_bytes}),schedule:Object.freeze({sourceSlots:Object.freeze([sourceSlot])}),
     readSource(slot,clock){
@@ -84,12 +204,12 @@ export function readInstalledLinuxReferenceCapture({identity,providerDigest,appr
       need(lower>=start&&upper>=lower&&expires>upper+2n*q&&Number.isInteger(drift_ppb)&&drift_ppb>=0&&drift_ppb<=1000000,'installed_source_window');
       const policyDeadline=tick+(expires-upper-2n*q)*1000000000n/(1000000000n+BigInt(drift_ppb));
       const authenticationDeadline=clockInteger(valid_before_tick_ns);
-      return {source_slot:slot,source_digest:endpointDigest,reserved_bytes:reservedBytes,poll_lease_ns:pollLease,minimum_poll_interval_ns:pollInterval,
-        approval_ref:{id:approval.approval_id,revision:approval.approval_revision,digest:approvalDigest},
-        configuration_ref:{id:'reference.configuration',revision:'1',digest:approvalDigest},endpoint_ref:{...endpointRef},
+      return {source_slot:slot,source_digest:reference?.sourceDigest??endpointDigest,reserved_bytes:reservedBytes,poll_lease_ns:pollLease,minimum_poll_interval_ns:pollInterval,
+        approval_ref:reference?.approvalRef??ref(approval.approval_id,approvalDigest,approval.approval_revision),
+        configuration_ref:configuration,endpoint_ref:{...endpointRef},
         valid_before_tick_ns:String(policyDeadline<authenticationDeadline?policyDeadline:authenticationDeadline)};
     },
     readEndpoint(reference){current();need(same(reference,endpointRef),'installed_source_endpoint');return {...network};},
-    captureProtection
+    captureProtection,...(reference&&{referenceAuthority:reference.authority,sourceSlot})
   });
 }

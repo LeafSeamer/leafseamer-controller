@@ -1,14 +1,11 @@
 import {createHash, randomUUID} from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {clockInteger} from './native-clock.mjs';
-import {decodeReferenceBundle,encodeReferenceBundle,referencePacketSummary,validateReferenceBundle} from './reference-time-bundle.mjs';
+import {decodeReferenceBundle,encodeReferenceBundle,referencePacketSummary,validateReferenceBundle,
+  resolveReferenceNtpTimestamp,utcFloor as floor,utcCeil as ceil} from './reference-time-bundle.mjs';
 
 const fraction = 1n << 32n;
-const billion = 1000000000n;
 const million = 1000000n;
-const ntpEpoch = 2208988800n;
-// Fixed-point UTC numerators use 2^32 units per nanosecond.
-const eraSpan = fraction * billion * fraction;
 const signed = /^(0|-?[1-9][0-9]{0,29})$/;
 const hash = /^sha256:[0-9a-f]{64}$/;
 const id = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -16,8 +13,6 @@ const exact = (value, keys) => value && typeof value === 'object' && !Array.isAr
 const matches = (pattern, value) => typeof value==='string' && value.trim()===value && pattern.test(value);
 const digest = value => 'sha256:' + createHash('sha256').update(value).digest('hex');
 const same = (left,right) => canonicalize(left)===canonicalize(right);
-const floor = (n,d) => n<0n ? (n-d+1n)/d : n/d;
-const ceil = (n,d) => -floor(-n,d);
 const pad = tick => String(tick).padStart(20,'0');
 
 class Unqualified extends Error {}
@@ -69,15 +64,6 @@ function elapsed(delta, p) {
   return {lower:lower<0n?0n:lower,upper:delta*(million+error)+quantization};
 }
 
-function timestamp(bytes, offset, lower, upper, error) {
-  const seconds = BigInt(bytes.readUInt32BE(offset)), fractional = BigInt(bytes.readUInt32BE(offset+4));
-  const base = ((seconds-ntpEpoch)*fraction+fractional)*billion;
-  const earliest = ceil((lower-error)*fraction-base,eraSpan);
-  const latest = floor((upper+error)*fraction-base,eraSpan);
-  requireQualified(earliest===latest && earliest>=-2147483648n && earliest<=2147483647n && (seconds!==0n || fractional!==0n));
-  return {value:base+earliest*eraSpan,era:String(earliest),seconds:String(seconds),fraction:String(fractional)};
-}
-
 function derive(candidate, p, e) {
   const m1=clockInteger(candidate.m1_tick_ns), m4=clockInteger(candidate.m4_tick_ns);
   requireQualified(m4>=m1 && m4-m1<=clockInteger(p.max_span_ns));
@@ -85,7 +71,7 @@ function derive(candidate, p, e) {
   const e2=clockInteger(e.t2_error_ns), e3=clockInteger(e.t3_error_ns);
   const bytes = Buffer.from(candidate.response,'base64url');
   try {
-    const t2=timestamp(bytes,32,lower,upper,e2), t3=timestamp(bytes,40,lower,upper,e3);
+    const t2=resolveReferenceNtpTimestamp(bytes,32,lower,upper,e2), t3=resolveReferenceNtpTimestamp(bytes,40,lower,upper,e3);
     requireQualified(t2.value<=t3.value);
     const L=floor(t3.value-e3*fraction,fraction);
     const U=ceil((t2.value+e2*fraction)*million+elapsed(m4-m1,p).upper*fraction,fraction*million);
@@ -138,7 +124,8 @@ export function verifyCommandReferenceAcceptance(db, observed, accepted, ipcSess
   catch { return false; }
 }
 
-export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readApproval, readEvidence, readContext, readBundleOriginals}, invalidation = null) {
+export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readApproval, readEvidence, readContext, readBundleOriginals,
+  prepareEvidence, checkAssessment}, invalidation = null) {
   if (!matches(id,sourceSlot) || typeof readApproval!=='function' || typeof readEvidence!=='function' || typeof readContext!=='function' ||
       (readBundleOriginals!==undefined&&typeof readBundleOriginals!=='function')) {
     throw new Error('reference_time_authority');
@@ -148,6 +135,12 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
 
   function head() {
     return anchorRecord(latest.get(bootId));
+  }
+
+  function assessCurrent(anchor,context){
+    const result=assess(anchor,context);
+    checkAssessment?.(result);
+    return result;
   }
 
   function sealBundle(anchor){
@@ -167,7 +160,7 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
   function context() {
     const before=readContext(sourceSlot);
     const p=approval(readApproval(Object.freeze({source_slot:sourceSlot,runtime_digest:binding.digest,
-      authorization:JSON.parse(canonicalize(before.facts))})),before);
+      authorization:JSON.parse(canonicalize(before.facts))}),before),before);
     const now=readContext(sourceSlot);
     requireQualified(now.tick>=before.tick && same(now.facts,before.facts) && now.tick<clockInteger(p.valid_before_tick_ns));
     return {now,p};
@@ -184,13 +177,14 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
     }
   }
 
-  function acquireEvidence({poll_ref,attempt_id,plaintext_digest,m1_tick_ns,m4_tick_ns,packet_summary}, {p,now}) {
+  function acquireEvidence({poll_ref,attempt_id,plaintext_digest,m1_tick_ns,m4_tick_ns,packet_summary,qualification_original}, {p,now}) {
     const bindingFields={poll_ref,attempt_id,runtime_digest:binding.digest,approval_ref:p.approval_ref,
       profile_ref:p.profile_ref,policy_ref:p.policy_ref,plaintext_digest};
     const exchangeDigest=digest(canonicalize(bindingFields));
     const verified=evidence(readEvidence({...structuredClone(bindingFields),exchange_digest:exchangeDigest,
       source_digest:p.source_digest,authentication:p.authentication,m1_tick_ns,m4_tick_ns,
-      ...(packet_summary&&{packet:structuredClone(packet_summary),runtime:JSON.parse(binding.text),endpoint_ref:structuredClone(now.facts.endpoint_ref)})}),exchangeDigest,p,now);
+      ...(packet_summary&&{packet:structuredClone(packet_summary),runtime:JSON.parse(binding.text),endpoint_ref:structuredClone(now.facts.endpoint_ref)}),
+      ...(qualification_original&&{qualification_original:structuredClone(qualification_original)})}),exchangeDigest,p,now);
     requireQualified(verified.era_ref.digest!==plaintext_digest && verified.era_ref.digest!==exchangeDigest);
     return verified;
   }
@@ -200,13 +194,13 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
     const record=head();
     if(!record) return null;
     let current;
-    try { current=authority(record); assess(record.body,current.now); }
+    try { current=authority(record); assessCurrent(record.body,current.now); }
     catch { return null; }
     try { requireQualified(same(record.body.evidence,acquireEvidence(record.body,current))); }
     catch { withdraw(record,'evidence_withdrawn'); return null; }
     try {
       current=authority(record);
-      return {record,now:current.now,assessment:assess(record.body,current.now)};
+      return {record,now:current.now,assessment:assessCurrent(record.body,current.now)};
     } catch { return null; }
   }
 
@@ -239,7 +233,7 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
         if(!live || !same(runtime_domain_ref,live.now.sample.runtime_domain_ref)) return null;
         const {record,now}=live;
         requireQualified(tick<=now.tick && tick>=clockInteger(record.body.published_tick_ns));
-        assess(record.body,{tick});
+        assessCurrent(record.body,{tick});
         const original=storedBundle(record,anchorRecord([binding.text,binding.digest]));
         return {service_boot_id:bootId,valid_before_tick_ns:String(receiverDeadline(record,now)),...original};
       } catch { return null; }
@@ -254,8 +248,8 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
         requireQualified(tick<=now.tick && now.tick<deadline && deadline<=receiverDeadline(record,now) &&
           first>=clockInteger(body.published_tick_ns) && same(body.authorization,live.record.body.authorization) &&
           same(body.approval,live.record.body.approval));
-        assess(body,{tick:first});
-        assess(body,now);
+        assessCurrent(body,{tick:first});
+        assessCurrent(body,now);
         const original=storedBundle(record,runtime);
         return same(reference.bundle,original.bundle)&&same(reference.state,original.state)&&
           (record.digest===live.record.digest || same(body.evidence,acquireEvidence(body,{now,p:live.record.body.approval})));
@@ -274,13 +268,16 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
         const current=authority(prior), {now,p}=current;
         requireQualified(same(now.facts,reservation.authorization) && network.authentication===p.authentication);
         const packet_summary=readBundleOriginals?referencePacketSummary(candidate,attempt.valid_before_tick_ns):null;
-        const e=acquireEvidence({...receipt,packet_summary},current);
+        const qualification_original=prepareEvidence&&normalize(prepareEvidence(candidate,receipt,current));
+        const e=acquireEvidence({...receipt,packet_summary,qualification_original},current);
         const result=derive(candidate,p,e);
         const body={format:'leafseamer-reference-anchor/1',model:'reference-bound/1',anchor_id:randomUUID(),service_boot_id:bootId,
           runtime_digest:binding.digest,source_slot:sourceSlot,authorization:now.facts,approval:p,evidence:e,...receipt,...result,
-          ...(packet_summary&&{packet_summary})};
-        assess(body,now);
+          ...(packet_summary&&{packet_summary}),...(qualification_original&&{qualification_original})};
+        assessCurrent(body,{tick:clockInteger(candidate.m4_tick_ns)});
+        assessCurrent(body,now);
         const bundle=sealBundle(body);
+        if(prepareEvidence)requireQualified(bundle);
         if(bundle)body.reference_bundle=bundle;
         return body;
       } catch { return null; }
@@ -297,12 +294,12 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
         requireQualified(same(proposed.evidence,acquireEvidence(proposed,current)));
         current=authority(prior);
         requireQualified(same(proposed.approval,current.p) && same(proposed.authorization,current.now.facts));
-        assess(proposed,current.now);
+        assessCurrent(proposed,current.now);
       } catch { return; }
       const body={...proposed,previous_anchor_digest:prior?.digest??null,published_tick_ns:String(current.now.tick)};
       const limit=Math.min(remainingBytes,16384);
       let text=canonicalize(body);
-      if(Buffer.byteLength(text)>limit&&body.reference_bundle){delete body.reference_bundle;text=canonicalize(body);}
+      if(Buffer.byteLength(text)>limit&&body.reference_bundle&&!prepareEvidence){delete body.reference_bundle;text=canonicalize(body);}
       if(Buffer.byteLength(text)>limit) return;
       if (db.prepare('INSERT INTO time_provider_reference_anchor VALUES (?,?,?,?,?,?,?,?,?)').run(body.anchor_id,bootId,body.poll_ref.id,
         body.capture_ref.id,body.capture_ref.digest,pad(clockInteger(body.m4_tick_ns)),body.previous_anchor_digest,text,digest(text)).changes!==1) {
@@ -337,7 +334,7 @@ export function referenceTimeAnchorStore(db, bootId, binding, {sourceSlot, readA
       const {body,digest}=live.record;
       try {
         requireQualified(before>=clockInteger(body.published_tick_ns));
-        const start=assess(body,{tick:before}), end=assess(body,{tick:after});
+        const start=assessCurrent(body,{tick:before}), end=assessCurrent(body,{tick:after});
         return {anchor_ref:{id:body.anchor_id,revision:'1',digest},
           runtime_domain_ref:{...live.now.sample.runtime_domain_ref},
           elapsed_profile_ref:{...body.approval.profile_ref},
