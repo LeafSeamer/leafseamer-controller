@@ -4,10 +4,11 @@ import {createDeviceExecutionCodec,deviceExecutionVersion} from './sdk/device-ex
 import {contractSelection} from './sdk/index.mjs';
 import {createDecoder,profile} from './sdk/runtime/panel-wire/decoder.mjs';
 const codec=createDeviceExecutionCodec(contractSelection),limit=262144,bufferLimit=4*(limit+4);
-const localDispatchLimit=16384;
-const localDecoder=createDecoder(contractSelection),localDispatch=localDecoder.worker(deviceExecutionVersion,'c2w','DISPATCH');
-const localDispatchOptions=Object.freeze({profile:profile({max_message_bytes:localDispatchLimit,max_depth:48,max_value_nodes:65536,
- max_object_members:4096,max_key_utf8_bytes:256,max_string_utf8_bytes:localDispatchLimit,parse_deadline_ms:2000}),
+const localCommandLimit=16384;
+const localDecoder=createDecoder(contractSelection),localDispatch=localDecoder.worker(deviceExecutionVersion,'c2w','DISPATCH'),
+ localGuard=localDecoder.worker(deviceExecutionVersion,'c2w','GUARD_INSTALL');
+const localCommandOptions=Object.freeze({profile:profile({max_message_bytes:localCommandLimit,max_depth:48,max_value_nodes:65536,
+ max_object_members:4096,max_key_utf8_bytes:256,max_string_utf8_bytes:localCommandLimit,parse_deadline_ms:2000}),
  yieldNow:()=>Promise.resolve()});
 const lastValidated=new Map();
 export class DeviceExecutionError extends Error{constructor(code){super(code);this.name='DeviceExecutionError';this.code=code;}}
@@ -29,18 +30,19 @@ export function executionSocket(memberBoot,side){
  need(process.platform==='win32'&&/^[0-9a-f]{32}$(?![\s\S])/.test(memberBoot)&&['core','worker'].includes(side),'execution_endpoint');
  return net.createConnection('\\\\.\\pipe\\LeafSeamer.Execution.'+memberBoot+'.'+side);
 }
-export function decodeExecutionPayload(bytes,direction){return decodePayload(bytes,direction,false);}
-// 仅用于Controller本地生成的小型DISPATCH。入站帧和较大帧继续使用SDK的协作调度。
-export function decodeLocalCommandDispatch(bytes){return decodePayload(bytes,'c2w',true);}
-async function decodePayload(bytes,direction,local){
+export function decodeExecutionPayload(bytes,direction){return decodePayload(bytes,direction);}
+// Controller本地生成的小型Guard和派发帧使用同一严格解析器。入站帧和较大帧沿用协作调度。
+export function decodeLocalCommandDispatch(bytes){return decodePayload(bytes,'c2w',localDispatch,'execution_dispatch_frame');}
+export function decodeLocalCommandGuard(bytes){return decodePayload(bytes,'c2w',localGuard,'execution_guard_frame');}
+async function decodePayload(bytes,direction,local=null,wrongType=null){
  need(bytes instanceof Uint8Array&&bytes.byteLength>0&&bytes.byteLength<=limit,'execution_frame_size');
  const copy=Buffer.from(bytes);
  const previous=lastValidated.get(direction);
- if(previous?.bytes.equals(copy)&&(!local||previous.frame.type==='DISPATCH'))return {frame:previous.frame,payload:copy};
+ if(previous?.bytes.equals(copy)&&(!local||previous.frame.type===local.type))return {frame:previous.frame,payload:copy};
  // 此处type只选择校验根；完整原字节仍经SDK的重复键、数字、深度及Schema检查。
  let type;try{type=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(copy)).type;}catch{need(false,'execution_frame');}
- need(!local||type==='DISPATCH','execution_dispatch_frame');
- const frame=local&&copy.length<=localDispatchLimit?(await localDecoder.decode(copy,localDispatch,localDispatchOptions)).value:
+ need(!local||type===local.type,wrongType);
+ const frame=local&&copy.length<=localCommandLimit?(await localDecoder.decode(copy,local,localCommandOptions)).value:
   await codec.decode(copy,direction,type);
  // 每个方向只保留最后一帧的不可变语法结果。授权、寿命、序号和写前检查由各领域调用负责。
  lastValidated.set(direction,{bytes:Buffer.from(copy),frame});

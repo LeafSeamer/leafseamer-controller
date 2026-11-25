@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {PassThrough,Duplex} from 'node:stream';
-import {executionTransport,executionWire,decodeExecutionPayload,decodeLocalCommandDispatch,executionSessionIdentity} from '../dist/device-execution-channel.mjs';
+import {executionTransport,executionWire,decodeExecutionPayload,decodeLocalCommandDispatch,decodeLocalCommandGuard,executionSessionIdentity} from '../dist/device-execution-channel.mjs';
 import {deviceExecutionVersion} from '../dist/sdk/device-execution.mjs';
 const frame=n=>({ipc_version:deviceExecutionVersion,type:'CLOSE_GATE',message_id:'close.'+n,reply_to:null,
  ipc_session_id:'ipc',controller_boot_id:'core',worker_boot_id:'worker',seq:String(n),device_id:null,
@@ -94,14 +94,17 @@ test('重复原字节复用不可变语法结果，变字节、错方向和重�
  assert.notStrictEqual((await decodeExecutionPayload(raw,'c2w')).frame,first.frame);
 });
 
-test('本地派发校验拒绝错类型缓存、重复键与不完整正文',async()=>{
+test('本地Guard和派发校验拒绝错类型缓存、重复键与不完整正文',async()=>{
  const other=payload(93);
  await decodeExecutionPayload(other,'c2w');
- await assert.rejects(decodeLocalCommandDispatch(other),/execution_dispatch_frame/);
- for(const raw of ['{"type":"DISPATCH","type":"DISPATCH"}','{"type":"DISPATCH","body":{}}']){
-  const bytes=Buffer.from(raw);
-  const regular=await decodeExecutionPayload(bytes,'c2w').catch(error=>error);
-  assert.ok(regular instanceof Error);
-  await assert.rejects(decodeLocalCommandDispatch(bytes),error=>error.message===regular.message);
+ for(const [type,decode,wrong] of [['DISPATCH',decodeLocalCommandDispatch,/execution_dispatch_frame/],
+  ['GUARD_INSTALL',decodeLocalCommandGuard,/execution_guard_frame/]]){
+  await assert.rejects(decode(other),wrong);
+  for(const raw of [JSON.stringify({type}),`{"type":"${type}","type":"${type}"}`]){
+   const bytes=Buffer.from(raw);
+   const regular=await decodeExecutionPayload(bytes,'c2w').catch(error=>error);
+   assert.ok(regular instanceof Error);
+   await assert.rejects(decode(bytes),error=>error.message===regular.message);
+  }
  }
 });
