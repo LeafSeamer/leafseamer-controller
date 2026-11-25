@@ -309,22 +309,22 @@ export function deviceExecutionJournal({db,current,currentInTransaction,core,isO
   },
   async prepareCommandGuard(id){
    try{live();const features=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features;
-    const candidate=db.transaction(()=>selectCommandGuard(db,{id,binding,provider:encodingSource?.(),tick,features})).immediate();
+    const candidate=db.transaction(()=>selectCommandGuard(db,{id,binding,features})).immediate();
     if(candidate.saved)return {...candidate.saved,replay:true};
     await decodeExecutionPayload(Buffer.from(JSON.stringify(candidate.frame)),'c2w');live();
     return {...db.transaction(()=>commitCommandGuard(db,{candidate,binding,provider:encodingSource?.(),tick})).immediate(),replay:false};
    }catch(error){fail(error);throw error;}
   },
-  async sendCommandGuard(transport,id){
+  async sendCommandGuard(transport,selected){
    let write=null,finished=false;
-   try{live();const saved=db.transaction(()=>readCommandGuard(db,id)).immediate(),payload=saved.request.wire.subarray(4);
+   try{live();const id=selected.value.guard_id,wire=Buffer.from(selected.request.wire),payload=wire.subarray(4);
     await decodeExecutionPayload(payload,'c2w');live();
     const sent=await transport.send(payload,{beforeWrite(){live();need(!write,'execution_guard_write_reuse');
      write=db.transaction(()=>{const actual=currentCommandGuard(db,{id,binding,provider:encodingSource?.(),tick}),attempt=crypto.randomUUID();
-      need(actual.request.wire.equals(saved.request.wire),'execution_guard_changed');
+      need(actual.request.wire.equals(wire),'execution_guard_changed');
       need(db.prepare('INSERT INTO execution_write_attempt VALUES(?,?,?)').run(attempt,actual.request.record.record_id,executionTick(tick())).changes===1,'execution_guard_storage');
-      return {attempt_id:attempt};
-     }).immediate();need(tick()<BigInt(saved.final.value.seal.send_window.before_tick_ns),'execution_guard_expired');
+      return {attempt_id:attempt,before_tick:BigInt(actual.final.value.seal.send_window.before_tick_ns)};
+     }).immediate();need(tick()<write.before_tick,'execution_guard_expired');
     }});
     need(write&&sent?.not_started!==true&&sent?.wire_length===payload.length+4,'execution_write_unknown');
     const result=api.finishHandshakeWrite(write.attempt_id,'complete');finished=true;need(result.result==='complete','execution_write_unknown');return result;

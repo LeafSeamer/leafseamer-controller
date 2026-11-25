@@ -103,7 +103,7 @@ export async function connectDeviceExecution({journal,current,invalidate,onClose
      if(selected.replay){if(!selected.ack)throw new DeviceExecutionError('execution_guard_result_unknown');return journal.commandGuardHistory(selected.value.guard_id);}
      let resolve,reject;const response=new Promise((yes,no)=>{resolve=yes;reject=no;});response.catch(()=>{});
      call={type:'GUARD_ACK',message:selected.request.frame.message_id,resolve,reject,timer:setTimeout(()=>close(new DeviceExecutionError('execution_guard_timeout')),5000)};pending=call;
-     const [,history]=await Promise.all([journal.sendCommandGuard(transport,selected.value.guard_id),response]);check();
+     const [,history]=await Promise.all([journal.sendCommandGuard(transport,selected),response]);check();
      return qualify?journal.currentCommandGuard(selected.value.guard_id):history;
     }catch(error){close(error);throw error;}finally{if(call){clearTimeout(call.timer);if(pending===call)pending=null;}encoding=false;}
    },

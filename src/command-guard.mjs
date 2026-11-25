@@ -8,7 +8,7 @@ import {DeviceExecutionError,executionWire} from './device-execution-channel.mjs
 import {preparedFrame,insertFrame} from './device-execution-handshake.mjs';
 import {executionTick} from './device-execution-handshake.mjs';
 import {currentPreparedCommand,readCommandFinalAdmission,commandGuardInstallBody} from './command-final-admission.mjs';
-import {readOriginalRecord} from './command-record-store.mjs';
+import {readCommandRecord,readOriginalRecord} from './command-record-store.mjs';
 import {deviceExecutionVersion,assertDeviceExecutionFeatures} from './sdk/device-execution.mjs';
 const need=(ok,code)=>{if(!ok)throw new DeviceExecutionError('command_guard_'+code);};
 const ref=(id,v)=>({id,revision:'1',digest:digest(v)});
@@ -75,15 +75,18 @@ function readGuard(db,id){
   (a.disposition==='historical'||reply.committedTick<BigInt(final.value.seal.send_window.before_tick_ns)),'ack');
  return {...saved,ack:{value:acknowledgement,ref:ref(id+'.response',acknowledgement),reply}};
 }
-export function selectCommandGuard(db,{id,binding,provider,tick,features}){
+export function selectCommandGuard(db,{id,binding,features}){
  need(db.inTransaction&&supportsStorageRevision(Number(db.pragma('user_version',{simple:true})),53),'writer');
  const prior=db.prepare('SELECT g.guard_id FROM command_guard_request g JOIN command_final_admission f ON f.transaction_id=g.final_transaction_id WHERE f.command_id=?').pluck().get(id);
  if(prior)return {saved:readCommandGuard(db,prior)};
- const actual=currentPreparedCommand(db,{id,binding,provider,tick}),v=actual.final.value;
+ // 选帧仅使用已封存的准入原件。提交和写入分别在各自事务中复核当前资格。
+ const final=readCommandRecord(db,id).lifecycle?.final_admission;
+ need(final,'final_source');
+ const v=final.value;
  const previous=db.prepare("SELECT sequence FROM execution_frame_record WHERE ipc_session_id=? AND direction='c2w' ORDER BY sequence DESC LIMIT 1").pluck().get(binding.ipc_session_id);
  const frame={ipc_version:deviceExecutionVersion,type:'GUARD_INSTALL',message_id:crypto.randomUUID(),reply_to:null,ipc_session_id:binding.ipc_session_id,
   controller_boot_id:binding.controller_boot_id,worker_boot_id:binding.worker_boot_id,seq:String(BigInt(previous)+1n),device_id:v.seal.binding.device_id,
-  clock_domain_id:binding.clock_domain_id,descriptor_digest:binding.descriptor_digest,journal_mode:'durable',body:body(actual.final)};
+  clock_domain_id:binding.clock_domain_id,descriptor_digest:binding.descriptor_digest,journal_mode:'durable',body:body(final)};
  assertDeviceExecutionFeatures(frame,features);return {frame,id};
 }
 export function commitCommandGuard(db,{candidate,binding,provider,tick}){
