@@ -55,11 +55,12 @@ function applied(db,id,prepare,phase,value){
 }
 
 export function readCommandGuard(db,id){return withExecutionReadView(db,()=>memoExecutionRead(db,'command-guard',id,()=>readGuard(db,id)));}
-function readGuard(db,id){
+function readGuard(db,id,verifiedFinal=null){
  need(db.inTransaction,'writer');const r=row(db,'SELECT * FROM command_guard_request WHERE guard_id=?',id);need(r,'missing');
  const source=row(db,'SELECT command_id,body_digest FROM command_final_admission WHERE transaction_id=?',r.final_transaction_id);need(source,'final_source');
- const commandId=source.command_id,initial=readOriginalRecord(db,commandId),final=readCommandFinalAdmission(db,initial,{id:r.final_transaction_id,revision:'1',digest:source.body_digest});
- need(final&&final.value.guard.guard_id===id,'final_source');
+ const commandId=source.command_id,finalRef={id:r.final_transaction_id,revision:'1',digest:source.body_digest};
+ const final=verifiedFinal??readCommandFinalAdmission(db,readOriginalRecord(db,commandId),finalRef);
+ need(final&&same(final.ref,finalRef)&&final.value.command_id===commandId&&final.value.guard.guard_id===id,'final_source');
  const value=parse(r.body_jcs,r.body_digest),request=applied(db,r.record_id,id,'request',value);
  need(same(value,{format:'command-guard-install/1',guard_id:id,final_admission_ref:final.ref,request_record_ref:{id:r.record_id,revision:'1',digest:request.record.record_digest}})&&
   same(request.frame.body,body(final))&&request.frame.ipc_session_id===final.value.seal.binding.ipc_session_id&&
@@ -95,7 +96,7 @@ export function commitCommandGuard(db,{candidate,binding,provider,tick}){
  const value={format:'command-guard-install/1',guard_id:id,final_admission_ref:actual.final.ref,request_record_ref:{id:item.record.record_id,revision:'1',digest:item.record.record_digest}};
  insertFrame(db,item,'command_guard');
  written(db.prepare('INSERT INTO command_guard_request VALUES(?,?,?,?,?,?)').run(id,v.transaction_id,item.record.record_id,item.transaction,canonical(value),digest(value)));
- effect(db,item,id,'request',value,tick());const saved=readCommandGuard(db,id);
+ effect(db,item,id,'request',value,tick());const saved=readGuard(db,id,actual.final);
  need(tick()<BigInt(v.seal.send_window.before_tick_ns),'expired');return saved;
 }
 export function currentCommandGuard(db,options){return withExecutionReadView(db,()=>currentGuard(db,options));}
@@ -126,7 +127,7 @@ function acceptGuard(db,{binding,decoded,provider,tick,features,receivedTick}){
  const item=preparedFrame(binding,frame,payload,'w2c',receivedTick,saved.request.record.record_id),value={format:'command-guard-ack/1',guard_id:id,
   request_ref:saved.ref,record_ref:{id:item.record.record_id,revision:'1',digest:item.record.record_digest},write_attempt_id:write.attempt_id,disposition};
  insertFrame(db,item,'command_guard');written(db.prepare('INSERT INTO command_guard_ack VALUES(?,?,?,?,?,?,?)').run(id,item.record.record_id,item.transaction,write.attempt_id,disposition,canonical(value),digest(value)));
- effect(db,item,id,'response',value,tick());const result=readCommandGuard(db,id);
+ effect(db,item,id,'response',value,tick());const result=readGuard(db,id,saved.final);
  need(disposition==='historical'||tick()<BigInt(saved.final.value.seal.send_window.before_tick_ns),'expired');return result;
 }
 // Guard安装自身不触发设备I/O。只排除逐字验证且属于该精确T2的帧，不能排除DISPATCH。

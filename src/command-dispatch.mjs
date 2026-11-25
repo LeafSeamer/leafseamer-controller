@@ -84,13 +84,19 @@ function readDispatchWrite(db,saved){
  return {value,ref:ref(id+'.write',value)};
 }
 export function readCommandDispatch(db,id){return withExecutionReadView(db,()=>memoExecutionRead(db,'command-dispatch',id,()=>readDispatch(db,id)));}
-function readDispatch(db,id){
+function readDispatchRequest(db,id,prepared=null){
  need(db.inTransaction,'writer');const r=row(db,'SELECT * FROM command_dispatch_request WHERE permit_id=?',id);need(r,'missing');
- const guard=readCommandGuard(db,r.guard_id),final=guard.final;need(final.value.permit.permit_id===id&&r.final_transaction_id===final.value.transaction_id&&guard.ack?.value.disposition==='installed','source');
+ const guard=prepared?.guard??readCommandGuard(db,r.guard_id),final=guard.final;
+ need(r.guard_id===guard.value.guard_id&&final.value.permit.permit_id===id&&r.final_transaction_id===final.value.transaction_id&&
+  guard.ack?.value.disposition==='installed','source');
  const value=parse(r.body_jcs,r.body_digest),request=applied(db,r.record_id,id,'request',value);
  need(same(value,{format:'command-dispatch-request/1',permit_id:id,final_admission_ref:final.ref,guard_ack_ref:guard.ack.ref,
-  request_record_ref:{id:r.record_id,revision:'1',digest:request.record.record_digest}})&&same(request.frame.body,dispatchBody(db,guard)),'request');
- const saved={value,ref:ref(id,value),request,guard,final,write:null,report:null,evidence:null};
+  request_record_ref:{id:r.record_id,revision:'1',digest:request.record.record_digest}})&&
+  same(request.frame.body,prepared?.requestBody??dispatchBody(db,guard)),'request');
+ return {value,ref:ref(id,value),request,guard,final,write:null,report:null,evidence:null};
+}
+function readDispatch(db,id){
+ const saved=readDispatchRequest(db,id);
  saved.write=readDispatchWrite(db,saved);if(!saved.write)return saved;
  const t=row(db,'SELECT * FROM command_dispatch_report WHERE permit_id=?',id);if(!t)return saved;
  const reportValue=parse(t.body_jcs,t.body_digest),reply=applied(db,t.record_id,id,'report',reportValue);validateReport(saved,reply.frame,reply.observedTick);
@@ -103,7 +109,8 @@ function readDispatch(db,id){
   record_ref:{id:e.record_id,revision:'1',digest:evidenceReply.record.record_digest}}),'evidence');
  saved.evidence={value:evidenceValue,ref:ref(id+'.evidence',evidenceValue),reply:evidenceReply};return saved;
 }
-export function selectCommandDispatch(db,{id,binding,provider,tick,features}){
+export function selectCommandDispatch(db,options){return withExecutionReadView(db,()=>selectDispatchFrame(db,options));}
+function selectDispatchFrame(db,{id,binding,features}){
  need(db.inTransaction&&supportsStorageRevision(Number(db.pragma('user_version',{simple:true})),54),'writer');
  const prior=db.prepare('SELECT d.permit_id FROM command_dispatch_request d JOIN command_final_admission f ON f.transaction_id=d.final_transaction_id WHERE f.command_id=?').pluck().get(id);
  if(prior)return {saved:readCommandDispatch(db,prior)};
@@ -117,13 +124,21 @@ export function selectCommandDispatch(db,{id,binding,provider,tick,features}){
  assertDeviceExecutionFeatures(frame,features);return {frame,guard_id:guardId};
 }
 export function commitCommandDispatch(db,{candidate,binding,provider,tick}){
- const guard=withExecutionReadView(db,()=>{const current=currentCommandGuard(db,{id:candidate.guard_id,binding,provider,tick,requireAck:true});
-  need(same(candidate.frame.body,dispatchBody(db,current)),'changed');return current;}),v=guard.final.value,id=v.permit.permit_id;
+ const prepared=withExecutionReadView(db,()=>{
+  const guard=currentCommandGuard(db,{id:candidate.guard_id,binding,provider,tick,requireAck:true});
+  const requestBody=dispatchBody(db,guard);
+  need(same(candidate.frame.body,requestBody),'changed');return {guard,requestBody};
+ });
+ const {guard}=prepared,v=guard.final.value,id=v.permit.permit_id;
  const item=preparedFrame(binding,candidate.frame,Buffer.from(JSON.stringify(candidate.frame)),'c2w',tick()),value={format:'command-dispatch-request/1',permit_id:id,
   final_admission_ref:guard.final.ref,guard_ack_ref:guard.ack.ref,request_record_ref:{id:item.record.record_id,revision:'1',digest:item.record.record_digest}};
  insertFrame(db,item,'command_dispatch');written(db.prepare('INSERT INTO command_dispatch_request VALUES(?,?,?,?,?,?,?)')
   .run(id,v.transaction_id,candidate.guard_id,item.record.record_id,item.transaction,canonical(value),digest(value)));
- effect(db,item,id,'request',value,tick());const saved=readCommandDispatch(db,id);need(tick()<BigInt(v.seal.send_window.before_tick_ns),'expired');return saved;
+ effect(db,item,id,'request',value,tick());
+ // 原准入、Guard和正文在当前写事务已核对。这里回读新登记的派发请求。
+ const saved=readDispatchRequest(db,id,prepared);
+ need(!readDispatchWrite(db,saved),'write_reuse');
+ need(tick()<BigInt(v.seal.send_window.before_tick_ns),'expired');return saved;
 }
 function stateBody(saved,commit,projection,previous,source){return {format:'command-dispatch-state/1',commit_id:commit,command_id:saved.final.value.command_id,
  revision:projection.state.revision,dispatch_ref:saved.ref,source_ref:source,previous_state_ref:previous.state_ref,record_digest:projection.record.record_digest,state_digest:digest(projection.state)};}
