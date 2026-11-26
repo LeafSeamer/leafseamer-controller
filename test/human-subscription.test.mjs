@@ -27,7 +27,7 @@ import {contractSelection as selection} from '../dist/sdk/selection.mjs';
 const id=()=>crypto.randomUUID();
 const login={login:'status.test',password:'Synthetic-status-password-123'};
 
-test('迁移保留身份，真实 HTTPS 和 WebSocket 人员订阅绑定票据、连接代际及固定页', {timeout:90000}, async t=>{
+test('迁移保留身份，真实 HTTPS 和 WebSocket 人员订阅确认快照、追赶与实时投影', {timeout:90000}, async t=>{
  let cleanup,db,server,clock,humanEvents;
  const sockets=new Set();
  t.after(async()=>{
@@ -57,8 +57,12 @@ test('迁移保留身份，真实 HTTPS 和 WebSocket 人员订阅绑定票据�
  });
  const migrated=await migrateStorage(f.dir,115);
  assert.equal(migrated.schema_revision,'115');
+ const history=inspect(f.dir,db=>db.prepare('SELECT * FROM schema_migration ORDER BY CAST(to_revision AS INTEGER)').all());
+ assert.equal((await migrateStorage(f.dir,116)).schema_revision,'116');
+ assert.equal((await migrateStorage(f.dir,116)).changed,false);
  inspect(f.dir,db=>{
   assert.deepEqual(db.prepare('SELECT * FROM identity_receipt').all(),prior.identity);
+  assert.deepEqual(db.prepare("SELECT * FROM schema_migration WHERE to_revision!='116' ORDER BY CAST(to_revision AS INTEGER)").all(),history);
   assert.deepEqual(db.pragma('foreign_key_check'),[]);
  });
  f.reopen();
@@ -70,7 +74,12 @@ test('迁移保留身份，真实 HTTPS 和 WebSocket 人员订阅绑定票据�
  // 仅在这个临时库注入装配完毕的设备来源。人员认证、范围与订阅均走产品写入器。
  const device=id(),registration_id=id(),sourceKey={authority_service_id:service.service_id,database_instance_id:service.database_instance_id,
   registration_id,source_stream_id:id(),source_epoch:id()};
- const registration={registration_id,revision:'1',source_key:sourceKey,binding_ref:{revision:'1',target:{kind:'device',device_id:device}},
+ const scope={authority_service_id:service.service_id,database_instance_id:service.database_instance_id};
+ const registration={registration_id,revision:'1',source_key:sourceKey,binding_ref:{registration_id,revision:'1',
+  owner_service_id:service.service_id,database_instance_id:service.database_instance_id,provider_id:'provider',provider_boot_id:'boot',
+  capture_policy_id:'policy',capture_policy_revision:'1',delivery_semantics:'discrete',
+  target:{kind:'device',device_id:device,trigger_id:'changed',capability_version:'1.0.0'}},
+  payload_schema_ref:{kind:'schema',scope,object_id:'schema',revision:'1',digest:'sha256:'+'a'.repeat(64)},
   canonical_delivery:'ordered_subscription'};
  const sourceParent=db.prepare("SELECT sql FROM sqlite_master WHERE name='device_event_source_parent'").pluck().get();
  db.pragma('foreign_keys=OFF');
@@ -80,10 +89,34 @@ test('迁移保留身份，真实 HTTPS 和 WebSocket 人员订阅绑定票据�
   db.exec(sourceParent);
  }).immediate();
  db.pragma('foreign_keys=ON');
- db.transaction(()=>deviceSourceProjectionStore(db).publish(registration)).immediate();
+ const projections=deviceSourceProjectionStore(db);
+ db.transaction(()=>projections.publish(registration)).immediate();
+ let sourceSequence='0';
+ function appendSourceEvent(sequence,publish=true){
+  // 临时库模拟已接收的模块帧，保留真实日志、发布写入器与订阅约束。
+  const record_id=id(),transaction=id(),event_id=id(),value={value:Number(sequence)};
+  const origin={source_key:sourceKey,event_id,source_sequence:sequence,source_time_ref:null,binding_ref:registration.binding_ref,
+   payload:{schema_ref:registration.payload_schema_ref,value}};
+  const eventParent=db.prepare("SELECT sql FROM sqlite_master WHERE name='device_source_event_parent'").pluck().get();
+  db.pragma('foreign_keys=OFF');
+  try{
+   db.transaction(()=>{
+    db.exec('DROP TRIGGER device_source_event_parent');
+    db.prepare('INSERT INTO device_source_event VALUES(?,?,?,?,?,?,?,?,?)')
+     .run(record_id,registration_id,event_id,sequence,canonical(origin),digest(origin),id(),canonical({event_id,sequence,payload:value}),transaction);
+    db.exec(eventParent);
+    db.prepare('INSERT INTO device_source_event_outbox VALUES(?,?,?)')
+     .run(record_id,transaction,canonical({record_id,origin,origin_digest:digest(origin)}));
+    if(publish)projections.publish(registration,[record_id]);
+    else db.prepare("INSERT INTO device_source_notification(entry_kind,registration_id,event_id,body_jcs,body_digest) VALUES('source.event',?,?,?,?)")
+     .run(registration_id,record_id,canonical({origin}),digest({origin}));
+   }).immediate();
+  }finally{db.pragma('foreign_keys=ON');}
+  sourceSequence=sequence;
+ }
  const eventScopes=deviceEventScopeStore({db,service,bootId,currentSource(selected){
   assert.equal(selected,device);
-  return {registration,highest_committed_sequence:'0',fault:null};
+  return {registration,highest_committed_sequence:sourceSequence,fault:null};
  }});
 
  const {ca,leaves:[tls]}=peerCertificates();
@@ -202,8 +235,11 @@ test('迁移保留身份，真实 HTTPS 和 WebSocket 人员订阅绑定票据�
    expected_connection_generation:generation,replace_existing,resume:null,connection_attempt_id:id()};
  }
  async function attach(socket,input){
-  const replied=once(socket,'message');socket.send(JSON.stringify(input));
-  const [bytes]=await replied;return JSON.parse(bytes);
+  const replied=frame(socket);socket.send(JSON.stringify(input));return replied;
+ }
+ async function frame(socket){
+  const [bytes]=await once(socket,'message',{signal:AbortSignal.timeout(5000)});
+  return JSON.parse(bytes);
  }
  const manifest=generation=>send('GET',route+'/snapshot?expected_connection_generation='+generation,null,{Authorization:person.bearer});
  const attempt=attemptId=>send('GET',route+'/connections/'+attemptId,null,{Authorization:person.bearer});
@@ -289,6 +325,83 @@ test('迁移保留身份，真实 HTTPS 和 WebSocket 人员订阅绑定票据�
   }finally{await browser.close();}
  }
 
+ const projectionTicket=await issue(await ticketInput(ready.body));assert.equal(projectionTicket.status,201);
+ const projectionSocket=await open(projectionTicket.body);
+ const generation=browserAttached?'3':'2';
+ const fixed=await attach(projectionSocket,attachment(ready.body,generation,true));
+ const baselineGeneration=String(Number(generation)+1);
+ assert.equal(fixed.binding.connection_generation,baselineGeneration);
+ assert.deepEqual((await manifest(baselineGeneration)).body,firstManifest.body);
+
+ appendSourceEvent('1');
+ appendSourceEvent('2',false);
+ const key=created.body.binding.subscription_id;
+ const deliveries=()=>db.prepare('SELECT journal_sequence,body_jcs FROM service_subscription_delivery WHERE subscription_id=? ORDER BY cursor').raw().all(key);
+ const start=await attach(projectionSocket,{schema_version:fixed.schema_version,type:'client.snapshot.applied',binding:fixed.binding,snapshot:fixed.snapshot_ref});
+ const ack=(message,binding=message.binding)=>({schema_version:fixed.schema_version,type:'client.ack',binding,
+  ack_kind:'projection_applied',cursor:message.cursor,payload_digest:message.payload_digest});
+ function assertProjection(message,mode,cursor,sequence,binding=fixed.binding){
+  assert.equal(message.type,'server.data');assert.equal(message.delivery_mode,mode);assert.equal(message.cursor,cursor);
+  assert.equal(message.previous_cursor,String(Number(cursor)-1));assert.deepEqual(message.binding,binding);
+  assert.equal(message.entry.entry_kind,'entity.upsert');
+  assert.equal(message.entry.payload.entity_id,registration_id);
+  assert.equal(message.entry.payload.view.contiguous_sequence,sequence);
+  assert.equal(digest(message.entry).slice(7),message.payload_digest);
+ }
+ assertProjection(start,'reconcile','1','1');
+ const catchingUp=(await get()).body;
+ assert.equal(catchingUp.state,'catching_up');assert.equal(catchingUp.ack_cursor,'0');
+ assert.deepEqual(deliveries().map(([sequence])=>sequence),[3]);
+ const tail=db.prepare("SELECT sequence,body_jcs FROM device_source_notification WHERE sequence=4 AND entry_kind='source.event'").get();
+ const rawOrigin=JSON.parse(tail.body_jcs).origin;
+ const forbidden={entry_kind:'source.event',payload:{origin:rawOrigin,origin_digest:digest(rawOrigin)}};
+ assert.throws(()=>db.prepare('INSERT INTO service_subscription_delivery VALUES(?,?,?,?,?,NULL)')
+  .run(key,2,tail.sequence,canonical(forbidden),digest(forbidden)),/reconcile_delivery_parent/);
+ const checkpoint=await attach(projectionSocket,ack(start));
+ assert.equal(checkpoint.type,'server.sync.ready');assert.equal(checkpoint.cursor,'2');
+ assert.equal(checkpoint.baseline_snapshot_id,fixed.snapshot_ref.snapshot_id);
+ assert.equal((await get()).body.state,'catching_up');
+ const awaitCursor=async (cursor,state)=>{
+  for(let count=0;count<20;count++){
+   const {body}=await get();
+   if(body.ack_cursor===cursor){assert.equal(body.state,state);return body;}
+  }
+  assert.fail('未持久确认游标 '+cursor);
+ };
+ projectionSocket.send(JSON.stringify(ack(checkpoint)));
+ const live=await awaitCursor('2','live');
+ db.transaction(()=>projections.publish(registration)).immediate();
+ const liveFrame=frame(projectionSocket);humanEvents.sweep();
+ const delta=await liveFrame;
+ assertProjection(delta,'live','3','2');
+ assert.equal((await get()).body.ack_cursor,'2');
+
+ const stopped=once(projectionSocket,'close');
+ projectionSocket.close();await stopped;
+ const resumeTicket=await issue(await ticketInput(live));assert.equal(resumeTicket.status,201);
+ const resumedSocket=await open(resumeTicket.body);
+ const replayed=new Promise((resolve,reject)=>{
+  const messages=[],timer=setTimeout(()=>reject(Error('WebSocket 恢复帧超时')),5000);
+  resumedSocket.on('message',function collect(bytes){
+   messages.push(JSON.parse(bytes));
+   if(messages.length===2){clearTimeout(timer);resumedSocket.off('message',collect);resolve(messages);}
+  });
+ });
+ resumedSocket.send(JSON.stringify({...attachment(live,baselineGeneration,true),
+  resume:{ack_kind:'projection_applied',cursor:live.ack_cursor,payload_digest:live.ack_payload_digest}}));
+ const [resumed,replayedDelta]=await replayed;
+ assert.equal(resumed.type,'server.attached');assert.equal(resumed.state,'catching_up');
+ assert.equal(resumed.binding.connection_generation,String(Number(baselineGeneration)+1));
+ assertProjection(replayedDelta,'reconcile','3','2',resumed.binding);
+ assert.equal(replayedDelta.payload_digest,delta.payload_digest);
+ const newCheckpoint=await attach(resumedSocket,ack(replayedDelta));
+ assert.equal(newCheckpoint.type,'server.sync.ready');assert.equal(newCheckpoint.cursor,'4');
+ const stale=once(resumedSocket,'close');
+ resumedSocket.send(JSON.stringify(ack(newCheckpoint,fixed.binding)));await stale;
+ assert.equal((await get()).body.ack_cursor,'3');
+ assert.deepEqual(deliveries().map(([sequence,body])=>[sequence,JSON.parse(body).entry_kind]),
+  [[3,'entity.upsert'],[null,'sync.ready'],[5,'entity.upsert'],[null,'sync.ready']]);
+
  const close=(revision,csrf=person.csrf)=>send('DELETE',route+'?expected_revision='+revision,null,
   {Authorization:person.bearer,'X-CSRF-Token':csrf});
  const finalRevision=(await get()).body.revision;
@@ -312,6 +425,8 @@ test('迁移保留身份，真实 HTTPS 和 WebSocket 人员订阅绑定票据�
  assert.equal(denied.status,403);
  assert.equal(db.prepare('SELECT used_count FROM request_context WHERE context_id=?').pluck().get(request.context_id),1);
  assert.deepEqual(db.prepare('SELECT state FROM service_event_subscription_revision ORDER BY rowid').pluck().all(),
-  ['building','snapshot_ready','snapshot_ready','snapshot_ready',...(browserAttached?['snapshot_ready']:[]),'closed','building','building','revoked']);
- assert.deepEqual(db.pragma('foreign_key_check').map(row=>row.table),['device_event_source','device_event_source','device_event_source']);
+  ['building','snapshot_ready','snapshot_ready','snapshot_ready',...(browserAttached?['snapshot_ready']:[]),'snapshot_ready',
+   'catching_up','catching_up','live','catching_up','catching_up','closed','building','building','revoked']);
+ assert.deepEqual(db.pragma('foreign_key_check').map(row=>row.table).sort(),
+  ['device_event_source','device_event_source','device_event_source','device_source_event','device_source_event']);
 });

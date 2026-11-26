@@ -57,8 +57,10 @@ export function subscriptionReconcile(db) {
         const rows = db.prepare(`SELECT n.sequence,n.entry_kind,n.registration_id,n.body_jcs,n.body_digest,e.origin_jcs,e.origin_digest
           FROM device_source_notification n JOIN service_event_subscription_pin p
           ON p.registration_id=n.registration_id AND p.subscription_id=?
+          JOIN service_event_subscription subscription ON subscription.subscription_id=p.subscription_id
           LEFT JOIN device_source_event e ON e.record_id=n.event_id AND e.registration_id=n.registration_id
-          WHERE n.sequence>? AND n.sequence<=? ORDER BY n.sequence LIMIT ?`).raw().all(subscriptionId,lastSequence,end,limit);
+          WHERE n.sequence>? AND n.sequence<=? AND (subscription.purpose='canonical_trigger' OR n.entry_kind='entity.upsert')
+          ORDER BY n.sequence LIMIT ?`).raw().all(subscriptionId,lastSequence,end,limit);
         let cursor = lastCursor;
         const insert = db.prepare('INSERT INTO service_subscription_delivery VALUES(?,?,?,?,?,NULL)');
         for (const [sequence, kind, registrationId, body, hash, original, originDigest] of rows) {

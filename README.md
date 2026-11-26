@@ -972,7 +972,9 @@ Schema 114 接通 Controller 的人员订阅生命周期。先用本机 `set-sta
 
 Schema 115 接通人员票据、连接附着和固定快照读取。为 `issueWsTicket` 创建请求上下文后，使用同一人员令牌及 CSRF 提交 `POST /api/v1/ws-tickets`，绑定当前订阅、授权修订、已登记客户端、范围摘要和 HTTPS Origin。201 首次交付票据，重复请求返回 200 和非秘密绑定。消费在升级响应前持久提交。票据在原上下文、令牌、订阅期限及单调时钟的共同窗口内有效，签发窗口上限为 30 秒。
 
-`/api/v1/events` 升级时提供契约和 `leafseamer.ticket.<ticket>` 两个子协议。服务器回显契约，发送 `contract.ready` 后处理 `client.attach`。替换仍活跃的连接须指定当前代际和 `replace_existing`。当前会话可查询连接尝试，并以当前附着代际读取 `/snapshot` 和 `/snapshots/{snapshot_id}/pages/{page_index}`。快照读回复核原连接、人员令牌、范围和期限。同源浏览器 GET 使用由 TLS 主机和浏览器 Fetch Metadata 确认的来源。增量交付和工作台重同步仍待实现。
+`/api/v1/events` 升级时提供契约和 `leafseamer.ticket.<ticket>` 两个子协议。服务器回显契约，发送 `contract.ready` 后处理 `client.attach`。替换仍活跃的连接须指定当前代际和 `replace_existing`。当前会话可查询连接尝试，并以当前附着代际读取 `/snapshot` 和 `/snapshots/{snapshot_id}/pages/{page_index}`。快照读回复核原连接、人员令牌、范围和期限。同源浏览器 GET 使用由 TLS 主机和浏览器 Fetch Metadata 确认的来源。
+
+显式迁移到 Schema 116 后，人员客户端校验并采用固定快照，再用当前连接绑定和同一快照引用发送 `client.snapshot.applied`。Controller 顺序发送所授权来源的公开投影。客户端应用每一帧后，以 `projection_applied` 确认该帧的游标和摘要。确认 `server.sync.ready` 后，服务器继续发送实时投影。断开后，客户端取得新票据，并用服务器最后持久确认的游标、摘要和代际请求恢复。服务器会重放未确认帧，客户端按其游标和摘要幂等处理。快照、续传及每次发布仍受人员令牌、原订阅范围和期限约束。
 
 Schema 68显式增加固定来源范围的持久快照。后台从building订阅预留8MiB、原运行时钟域及5秒构建截止和内部日志pin；独立只读事务取得全部来源投影后，释放读连接，在有界内存完成页面封存，再由writer重核授权、原期限、时钟域及预留并原子保存manifest、所有页面原字节、基线摘要、内部日志映射和snapshot_ready修订。任一缺写整笔回滚；进程中断留下的预留失效，不从新状态补页。读取及封存是本进程内阶段，只有完整发布结果持久可见。
 

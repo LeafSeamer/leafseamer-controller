@@ -16,7 +16,7 @@ import {createDecoder} from '../dist/sdk/runtime/panel-wire/decoder.mjs';
 import {createPeerWebsocketServer,openPeerWebsocket} from '../dist/peer-event-websocket.mjs';
 import {eventChannelProtocol} from '../dist/service-event-channel.mjs';
 import {createSubscriptionEndpoint} from '../dist/service-subscription-http.mjs';
-import {certificate} from './https-auth-fixture.mjs';
+import {peerCertificates} from './fixtures/peer-certificates.mjs';
 import {fixture as clockFixture} from './auth-clock-fixture.mjs';
 
 function start(t) {
@@ -215,9 +215,10 @@ test('实际 mTLS 实时交付、丢失 ACK 重放及新代际追赶', {skip:!pr
  const view=store.access('binding',null,created.binding.subscription_id).view;
  assert.equal(view.state,'snapshot_ready');
  const event=sourceEvent(f,8);
- const material=certificate(), endpoint=createSubscriptionEndpoint({store}),incoming=endpoint.channel;
+ const {ca,leaves:[publisherTls,consumerTls]}=peerCertificates();
+ const endpoint=createSubscriptionEndpoint({store}),incoming=endpoint.channel;
  const websockets=createPeerWebsocketServer({protocol:eventChannelProtocol});
- const http=https.createServer({...material,ca:material.cert,requestCert:true,rejectUnauthorized:true},async(req,res)=>{
+ const http=https.createServer({...publisherTls,ca,requestCert:true,rejectUnauthorized:true},async(req,res)=>{
   try{
    assert.equal(req.socket.authorized,true);
    const headers=[];for(let i=0;i<req.rawHeaders.length;i+=2)headers.push([req.rawHeaders[i].toLowerCase(),req.rawHeaders[i+1]]);
@@ -242,7 +243,7 @@ test('实际 mTLS 实时交付、丢失 ACK 重放及新代际追赶', {skip:!pr
  requestSubscription(_id,{method,path:route,headers}){
   return new Promise((resolve,reject)=>{
    const req=https.request({host:'127.0.0.1',port:http.address().port,path:route,method,headers:Object.fromEntries(headers),
-    ...material,ca:material.cert,rejectUnauthorized:true},res=>{
+    ...consumerTls,ca,rejectUnauthorized:true},res=>{
     const chunks=[],pairs=[];
     for(let i=0;i<res.rawHeaders.length;i+=2)pairs.push([res.rawHeaders[i].toLowerCase(),res.rawHeaders[i+1]]);
     res.on('data',chunk=>chunks.push(chunk));res.on('error',reject);
@@ -253,7 +254,7 @@ test('实际 mTLS 实时交付、丢失 ACK 重放及新代际追赶', {skip:!pr
  },
  async openSubscriptionChannel(_id,{protocol,onFrame,onClose}){
   const channel=await openPeerWebsocket('wss://127.0.0.1:'+http.address().port+'/internal/events',protocol,
-   {...material,ca:material.cert,rejectUnauthorized:true},{stable:socket=>assert.equal(socket.authorized,true),onFrame,onClose});
+   {...consumerTls,ca,rejectUnauthorized:true},{stable:socket=>assert.equal(socket.authorized,true),onFrame,onClose});
   return {...channel,send(bytes){
    const frame=JSON.parse(bytes);
    if(frame.type==='client.ack'&&frame.cursor===suppressCursor)return;

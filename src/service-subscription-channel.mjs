@@ -12,6 +12,9 @@ const deliveryMode=view=>view.state==='live'?'live':'reconcile';
 export function subscriptionChannels({db,service,bootId,writer,sweep,read,revision,check,snapshots,checkHuman,durationSample,scopeCurrent}){
  const channels=new WeakMap(),live=new Map();
  const reconcile=Number(service.schema_revision)>=71?subscriptionReconcile(db):null;
+ const deliversHuman=Number(service.schema_revision)>=116;
+ const ackKind=view=>view.purpose==='canonical_trigger'?'durable_ingest':
+  deliversHuman&&view.purpose==='status_projection'?'projection_applied':null;
  function entry(handle){const channel=channels.get(handle);need(channel&&live.has(channel.id),'connection');return channel;}
  function head(key){return db.prepare('SELECT a.attempt_id,a.connection_id,a.generation,a.response_jcs FROM service_subscription_attempt a JOIN service_subscription_connection h USING(subscription_id,attempt_id) WHERE a.subscription_id=?').raw().get(key);}
  function current(row){
@@ -37,6 +40,7 @@ export function subscriptionChannels({db,service,bootId,writer,sweep,read,revisi
    return {schema_version:'event-channel/0.1.0-draft.1',type:'server.sync.ready',binding:view.binding,
     baseline_snapshot_id:entry.payload.baseline_snapshot_id,cursor,previous_cursor,payload_digest,delivery_mode:'reconcile'};
   }
+  need(view.purpose==='canonical_trigger'||value.entry.entry_kind==='entity.upsert','delivery_mapping');
   const frame={format_version:'snapshot-projection/0.2.0-draft.1',type:'server.data',binding:view.binding,delivery_mode:deliveryMode(view),...value};
   need(Buffer.byteLength(JSON.stringify(frame))<=65536,'reconcile_frame_capacity');
   return frame;
@@ -46,13 +50,15 @@ export function subscriptionChannels({db,service,bootId,writer,sweep,read,revisi
   const entry=frame.type==='server.sync.ready'
    ? {entry_kind:'sync.ready',payload:{baseline_snapshot_id:frame.baseline_snapshot_id}}
    : frame.entry;
-  need(flowing(view.state)&&frame.delivery_mode===deliveryMode(view)&&same(view.binding,frame.binding)&&frame.previous_cursor===view.ack_cursor&&
+  need(ackKind(view)&&(view.purpose==='canonical_trigger'||['sync.ready','entity.upsert'].includes(entry?.entry_kind))&&
+   flowing(view.state)&&frame.delivery_mode===deliveryMode(view)&&same(view.binding,frame.binding)&&frame.previous_cursor===view.ack_cursor&&
    frame.cursor===String(BigInt(view.ack_cursor)+1n)&&digest(entry).slice(7)===frame.payload_digest,'delivery_binding');
   const hash=db.prepare('SELECT body_digest FROM service_subscription_delivery WHERE subscription_id=? AND cursor=?').pluck().get(channel.subscription,frame.cursor);
   need(hash==='sha256:'+frame.payload_digest,'delivery_mapping');
  }
  return Object.freeze({
   deliversReconcile:reconcile!==null,
+  deliversHuman,
   context(binding,socket,key,input,original=null){writer(sweep);return writer(()=>{const saved=read(key);authorized({binding,socket},saved);const latest=head(key);
    need(input.expected_connection_generation!=='0'&&input.expected_connection_generation===saved.view.binding.connection_generation&&current(latest)&&latest[2]===input.expected_connection_generation,'generation');need(saved.view.state==='snapshot_ready','state');
    need(typeof durationSample==='function'&&typeof scopeCurrent==='function','context_unavailable');
@@ -65,8 +71,9 @@ export function subscriptionChannels({db,service,bootId,writer,sweep,read,revisi
    need(same(input.owner,saved.view.owner)&&['stream_id','stream_epoch','scope_digest','authorization_revision'].every(key=>input[key]===binding[key]),'binding');
    if(input.resume===null)need(['building','snapshot_ready'].includes(saved.view.state),'resume_unavailable');
    else{
-    need(Number(service.schema_revision)>=70&&flowing(saved.view.state)&&saved.view.purpose==='canonical_trigger','resume_unavailable');
-    const resume=input.resume;need(resume&&Object.keys(resume).sort().join(',')==='ack_kind,cursor,payload_digest'&&resume.ack_kind==='durable_ingest'&&resume.cursor===saved.view.ack_cursor&&resume.payload_digest===saved.view.ack_payload_digest,'resume_binding');
+    const kind=ackKind(saved.view);
+    need(Number(service.schema_revision)>=70&&flowing(saved.view.state)&&kind,'resume_unavailable');
+    const resume=input.resume;need(resume&&Object.keys(resume).sort().join(',')==='ack_kind,cursor,payload_digest'&&resume.ack_kind===kind&&resume.cursor===saved.view.ack_cursor&&resume.payload_digest===saved.view.ack_payload_digest,'resume_binding');
     const baseline=db.prepare('SELECT snapshot_id,snapshot_cursor,manifest_digest,marker_digest,journal_sequence FROM service_snapshot_baseline WHERE subscription_id=?').raw().get(input.subscription_id),content=snapshots.baseline(saved,false);
     need(baseline&&baseline[0]===saved.view.snapshot_ref.snapshot_id&&baseline[2]===saved.view.snapshot_ref.manifest_digest&&baseline[3]===content.marker_digest&&baseline[4]===content.journal_sequence,'resume_mapping');
     if(resume.cursor===baseline[1])need(resume.payload_digest===baseline[3],'resume_mapping');
@@ -101,7 +108,7 @@ export function subscriptionChannels({db,service,bootId,writer,sweep,read,revisi
    need(input.type==='client.snapshot.applied'&&input.schema_version==='event-channel/0.1.0-draft.1'&&Object.keys(input).sort().join(',')==='binding,schema_version,snapshot,type','input');
    const prior=db.prepare('SELECT snapshot_id,manifest_digest,connection_generation,marker_digest FROM service_snapshot_baseline WHERE subscription_id=?').raw().get(channel.subscription);
    if(prior){need(flowing(saved.view.state)&&prior[0]===input.snapshot.snapshot_id&&prior[1]===input.snapshot.manifest_digest&&prior[2]===input.binding.connection_generation,'conflict');return saved.view;}
-   need(saved.view.state==='snapshot_ready'&&saved.view.purpose==='canonical_trigger','state');const baseline=snapshots.baseline(saved),number=Number(saved.view.revision)+1;
+   need(saved.view.state==='snapshot_ready'&&ackKind(saved.view),'state');const baseline=snapshots.baseline(saved),number=Number(saved.view.revision)+1;
    written(db.prepare('INSERT INTO service_snapshot_baseline VALUES(?,?,?,?,?,?,?,?)').run(channel.subscription,input.snapshot.snapshot_id,input.snapshot.snapshot_cursor,input.snapshot.manifest_digest,baseline.marker_digest,baseline.journal_sequence,input.binding.connection_generation,number));
    reconcile?.reserve(channel.subscription,baseline.journal_sequence);
    reconcile?.follow(channel.subscription,saved.view.binding.connection_generation);
@@ -125,7 +132,7 @@ export function subscriptionChannels({db,service,bootId,writer,sweep,read,revisi
    const channel=entry(handle);writer(sweep);
    return writer(()=>{
     const saved=release(channel),view=saved.view;
-    if(view.purpose!=='canonical_trigger'||!flowing(view.state))return null;
+    if(!ackKind(view)||!flowing(view.state))return null;
     const next=String(BigInt(view.ack_cursor)+1n);
     if(db.prepare('SELECT 1 FROM service_subscription_transmitted WHERE subscription_id=? AND connection_generation=? AND cursor=?')
      .pluck().get(channel.subscription,view.binding.connection_generation,next))return null;
@@ -142,12 +149,14 @@ export function subscriptionChannels({db,service,bootId,writer,sweep,read,revisi
    const channel=entry(handle),key=channel.subscription;
    return !!db.prepare(`SELECT 1 FROM service_event_subscription_head h JOIN service_event_subscription_revision r USING(subscription_id,revision)
     JOIN service_subscription_reconcile w USING(subscription_id)
+    JOIN service_event_subscription subscription USING(subscription_id)
     WHERE h.subscription_id=? AND r.state='live'
      AND NOT EXISTS(SELECT 1 FROM service_subscription_transmitted s WHERE s.subscription_id=h.subscription_id
       AND s.connection_generation=json_extract(r.body_jcs,'$.binding.connection_generation') AND s.cursor=CAST(json_extract(r.body_jcs,'$.ack_cursor') AS INTEGER)+1)
      AND (EXISTS(SELECT 1 FROM service_subscription_delivery d WHERE d.subscription_id=h.subscription_id AND d.cursor>CAST(json_extract(r.body_jcs,'$.ack_cursor') AS INTEGER))
        OR EXISTS(SELECT 1 FROM device_source_notification n JOIN service_event_subscription_pin p ON p.registration_id=n.registration_id
-        WHERE p.subscription_id=h.subscription_id AND n.sequence>coalesce((SELECT max(d.journal_sequence) FROM service_subscription_delivery d
+        WHERE p.subscription_id=h.subscription_id AND (subscription.purpose='canonical_trigger' OR n.entry_kind='entity.upsert')
+         AND n.sequence>coalesce((SELECT max(d.journal_sequence) FROM service_subscription_delivery d
           WHERE d.subscription_id=h.subscription_id),w.start_sequence)))`).pluck().get(key);
   },
   checkDelivery(handle,frame){
@@ -170,8 +179,9 @@ export function subscriptionChannels({db,service,bootId,writer,sweep,read,revisi
    const channel=entry(handle);writer(sweep);
    return writer(()=>{
     const {view}=release(channel);
-    need(input.type==='client.ack'&&input.schema_version==='event-channel/0.1.0-draft.1'&&input.ack_kind==='durable_ingest'&&
-     view.purpose==='canonical_trigger'&&flowing(view.state)&&same(view.binding,input.binding),'ack_binding');
+    const kind=ackKind(view);
+    need(kind&&input.type==='client.ack'&&input.schema_version==='event-channel/0.1.0-draft.1'&&input.ack_kind===kind&&
+     flowing(view.state)&&same(view.binding,input.binding),'ack_binding');
     const sent=db.prepare(`SELECT d.body_digest,d.checkpoint_generation FROM service_subscription_transmitted s
      JOIN service_subscription_delivery d USING(subscription_id,cursor)
      WHERE s.subscription_id=? AND s.connection_generation=? AND s.cursor=?`).raw().get(channel.subscription,view.binding.connection_generation,input.cursor);

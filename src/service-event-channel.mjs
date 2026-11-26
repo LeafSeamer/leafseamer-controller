@@ -3,6 +3,15 @@ import {createHttpAdapter} from './sdk/http.mjs';
 import {contractSelection as selection} from './sdk/selection.mjs';
 export const eventChannelProtocol='leafseamer.contract.'+selection.contract_id+'.'+selection.contract_digest.slice(7);
 const smallResponseDecode=Object.freeze({yieldNow:()=>Promise.resolve()});
+export async function nextSubscriptionDelivery(channels,handle,decoder,server,idle){
+ if(idle&&!channels.hasLiveWork(handle))return null;
+ const frame=channels.nextReconcile(handle);
+ if(!frame)return null;
+ const body=Buffer.from(JSON.stringify(frame));
+ // 小型服务端帧来自当前已核验的持久条目，避免定时器调度消耗原扫描期限。
+ await decoder.decode(body,server,body.length<=16384?smallResponseDecode:undefined);
+ return {body,beforeSend:()=>channels.checkDelivery(handle,frame),afterSend:()=>channels.transmitted(handle,frame)};
+}
 export function serviceEventChannel(store){
  const decoder=createDecoder(selection),http=createHttpAdapter(selection),client=decoder.websocket('controller','internalOpenEvents','client'),server=decoder.websocket('controller','internalOpenEvents','server');
  return Object.freeze({protocol:eventChannelProtocol,
@@ -16,15 +25,9 @@ export function serviceEventChannel(store){
     const result=store.channels.attach(handle,input),values=selected?[result.attached]:[result.ready,result.attached],messages=[];
     for(const value of values){const body=Buffer.from(JSON.stringify(value));await decoder.decode(body,server);messages.push(body);}selected=true;
     return {messages,beforeSend:()=>store.channels.check(handle)};
-   },async next(idle=false){
+   },next(idle=false){
     if(!selected||!store.channels.deliversReconcile)return null;
-    if(idle&&!store.channels.hasLiveWork(handle))return null;
-    const frame=store.channels.nextReconcile(handle);
-    if(!frame)return null;
-    const body=Buffer.from(JSON.stringify(frame));
-    // 小型服务端帧来自当前已核验的持久条目，避免定时器调度消耗原扫描期限。
-    await decoder.decode(body,server,body.length<=16384?smallResponseDecode:undefined);
-    return {body,beforeSend:()=>store.channels.checkDelivery(handle,frame),afterSend:()=>store.channels.transmitted(handle,frame)};
+    return nextSubscriptionDelivery(store.channels,handle,decoder,server,idle);
    },check:()=>selected&&store.channels.poll(handle),close:()=>store.channels.close(handle)};
   }
  });

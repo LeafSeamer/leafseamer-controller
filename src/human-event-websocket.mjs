@@ -1,6 +1,6 @@
 import {TLSSocket} from 'node:tls';
 import {createPeerWebsocketServer} from './peer-event-websocket.mjs';
-import {eventChannelProtocol} from './service-event-channel.mjs';
+import {eventChannelProtocol,nextSubscriptionDelivery} from './service-event-channel.mjs';
 import {createDecoder} from './sdk/runtime/panel-wire/decoder.mjs';
 import {createHttpAdapter} from './sdk/http.mjs';
 import {contractSelection} from './sdk/selection.mjs';
@@ -27,14 +27,22 @@ export function createHumanEventWebsocket({subscriptions,origin,stable}){
    initial:()=>response({type:'contract.ready',channel:grant.original.binding.channel},()=>tickets.checkAlive(grant)),
    async receive(bytes){
     const input=(await decoder.decode(bytes,client)).value;
+    if(attached&&channels.deliversHuman&&(input.type==='client.snapshot.applied'||input.type==='client.ack')){
+     if(input.type==='client.ack')channels.ack(handle,input);else channels.applied(handle,input);
+     return {messages:[],beforeSend:()=>channels.check(handle)};
+    }
     if(input.type!=='client.attach')fail();
     const result=channels.attach(handle,input);
     attached=true;
     return response(result.attached,()=>channels.check(handle));
    },
+   next(idle=false){
+    if(!attached||!channels.deliversHuman)return null;
+    return nextSubscriptionDelivery(channels,handle,decoder,server,idle);
+   },
    check(){
-    if(attached)channels.check(handle);
-    else tickets.checkAlive(grant);
+    if(attached)return channels.check(handle).state==='live'&&channels.deliversHuman;
+    tickets.checkAlive(grant);
     return false;
    },
    close:()=>channels.close(handle)
