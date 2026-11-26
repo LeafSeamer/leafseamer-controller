@@ -7,7 +7,7 @@ export const automationCommandVersion='leafseamer-automation-command/1';
 export const automationCommandRequestLimit=8192;
 export const automationCommandResponseLimit=8192;
 export const automationCommandPaths=Object.freeze({submit:'/internal/automation/commands',lookup:'/internal/automation/commands/lookup',
- reject:'/internal/automation/commands/reject',result:'/internal/automation/commands/result'});
+ reject:'/internal/automation/commands/reject',result:'/internal/automation/commands/result',resource:'/internal/automation/commands/resource'});
 
 export function automationCommandRequest(value,scope){
  fields(value,'action,idempotency_key,target');
@@ -45,6 +45,12 @@ export function automationCommandAdjudication(value,request){
  return value;
 }
 
+function evidenceReference(evidence){
+ fields(evidence,'id,revision,digest');
+ need(typeof evidence.id==='string'&&evidence.id.length>0&&evidence.id.length<=128&&
+  typeof evidence.revision==='string'&&/^[1-9][0-9]{0,19}$/.test(evidence.revision)&&hash(evidence.digest),'automation_command_terminal_evidence');
+}
+
 export function automationCommandTerminal(value,adjudication){
  fields(value,'format,command_ref,record_ref,state_ref,state,completion_achieved');
  const {command_ref,record_ref,state_ref,state,completion_achieved}=value;
@@ -64,12 +70,36 @@ export function automationCommandTerminal(value,adjudication){
   need(completion_achieved==='effect_verified'&&state.effect_status==='verified'&&state.resource_status==='clear'&&
    state.automation_continuation==='eligible'&&state.completion_evidence_refs.length>0&&state.resource_evidence_refs.length>0,'automation_command_terminal_success');
  }else need(completion_achieved===null,'automation_command_terminal');
- for(const evidence of [...state.completion_evidence_refs,...state.resource_evidence_refs]){
-  fields(evidence,'id,revision,digest');
-  need(typeof evidence.id==='string'&&evidence.id.length>0&&evidence.id.length<=128&&
-   typeof evidence.revision==='string'&&/^[1-9][0-9]{0,19}$/.test(evidence.revision)&&hash(evidence.digest),'automation_command_terminal_evidence');
- }
+ for(const evidence of [...state.completion_evidence_refs,...state.resource_evidence_refs])evidenceReference(evidence);
  return value;
+}
+
+function automationCommandResource(value,adjudication,terminal){
+ fields(value,'format,record_ref,state_ref,hold_ref,resource_evidence_refs,resolution_ref,resource_commit_ref,status');
+ const {record_ref,state_ref,hold_ref,resource_evidence_refs,resolution_ref,resource_commit_ref,status}=value;
+ const command=adjudication?.command_ref;
+ fields(record_ref,'kind,scope,object_id,revision,digest');
+ evidenceReference(state_ref);
+ need(value.format==='leafseamer.automation-command-resource/1'&&command&&record_ref.kind==='command'&&
+  record_ref.object_id===command.object_id&&same(record_ref.scope,command.scope)&&hash(record_ref.digest)&&
+  state_ref.id===command.object_id+'_state_'+record_ref.revision&&state_ref.revision===record_ref.revision&&
+  Array.isArray(resource_evidence_refs),'automation_command_resource');
+ for(const reference of [hold_ref,resolution_ref,resource_commit_ref])if(reference!==null)evidenceReference(reference);
+ resource_evidence_refs.forEach(evidenceReference);
+ const released=status==='released',neverAcquired=status==='never_acquired';
+ need(['pending','unresolved','released','never_acquired'].includes(status)&&
+  Boolean(resource_commit_ref)===(released||neverAcquired)&&
+  (released?hold_ref!==null&&resource_evidence_refs.length>0:resource_evidence_refs.length===0)&&
+  (!neverAcquired||hold_ref===null)&&(status==='pending'?terminal===null:terminal!==null)&&
+  (resolution_ref===null||released),'automation_command_resource');
+ if(terminal){
+  need(BigInt(record_ref.revision)>=BigInt(terminal.record_ref.revision),'automation_command_resource');
+  if(record_ref.revision===terminal.record_ref.revision)need(same(record_ref,terminal.record_ref)&&same(state_ref,terminal.state_ref)&&
+   same(resource_evidence_refs,terminal.state.resource_evidence_refs)&&same(resolution_ref,terminal.state.resolution_ref)&&
+   (terminal.state.resource_status==='clear')===(released||neverAcquired)&&
+   (!neverAcquired||terminal.state.effect_status==='not_sent'&&terminal.state.attempt_ids.length===0),'automation_command_resource');
+  else need(released&&resolution_ref!==null&&terminal.state.resource_status==='unresolved','automation_command_resource');
+ }
 }
 
 export function automationCommandReply(value,request,record,challenge,operation){
@@ -77,10 +107,14 @@ export function automationCommandReply(value,request,record,challenge,operation)
  need(value.version===automationCommandVersion&&value.challenge_id===challenge&&value.pair_attempt_id===record.transcript.pair_attempt_id&&
   value.transcript_digest===record.transcript_digest,'automation_command_response');
  const {body}=value;
- if(operation==='result'){
-  fields(body,'adjudication,terminal');
+ if(operation==='result'||operation==='resource'){
+  fields(body,operation==='resource'?'adjudication,terminal,resource':'adjudication,terminal');
   if(body.adjudication!==null)automationCommandAdjudication(body.adjudication,request);
   if(body.terminal!==null)automationCommandTerminal(body.terminal,body.adjudication);
+  if(operation==='resource'){
+   if(body.resource!==null)automationCommandResource(body.resource,body.adjudication,body.terminal);
+   else need(body.terminal===null,'automation_command_resource');
+  }
   return body;
  }
  if(operation!=='lookup')return automationCommandAdjudication(body,request);

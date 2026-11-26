@@ -255,6 +255,28 @@ export function readCommandRecord(db,id){return withExecutionReadView(db,()=>{
  return readLifecycle(db,initial);
  });
 }
+// 调用者在同一事务中先从命令账本核对 saved，包括最终准入和当前生命周期原件。
+export function readCommandResource(db,saved){
+ need(db.inTransaction,'writer');
+ const {record,lifecycle}=saved,{state}=record,id=record.command_id;
+ const hold=lifecycle?.final_admission?.value.hold??null;
+ const stored=db.prepare('SELECT hold_id,device_id,hold_digest FROM command_device_hold WHERE command_id=?').raw().get(id);
+ const hold_ref=hold?reference(hold.hold_id,hold):null;
+ need(hold?same(stored,[hold.hold_id,saved.source.binding.device_id,hold_ref.digest]):!stored,'resource_hold');
+ const {resource_evidence_refs,resolution_ref}=state;
+ const result={format:'leafseamer.automation-command-resource/1',record_ref:{...record.initial_command_ref,revision:record.revision,digest:record.record_digest},
+  state_ref:record.state_ref,hold_ref,resource_evidence_refs,resolution_ref,resource_commit_ref:null};
+ if(state.phase!=='finished')return {...result,status:'pending'};
+ if(state.resource_status!=='clear')return {...result,status:'unresolved'};
+ if(!hold){
+  need(lifecycle?.proof&&state.effect_status==='not_sent'&&record.attempts.length===0&&resource_evidence_refs.length===0,'resource_never_acquired');
+  return {...result,status:'never_acquired',resource_commit_ref:lifecycle.commit_ref};
+ }
+ const schema=Number(db.pragma('user_version',{simple:true})),table=schema>=105?'command_hold_clearance':'command_hold_release';
+ const cleared=db.prepare(`SELECT hold_id,command_id,commit_id FROM ${table} WHERE hold_id=?`).raw().all(hold.hold_id);
+ need(resource_evidence_refs.length>0&&same(cleared,[[hold.hold_id,id,lifecycle.commit_ref.id]]),'resource_clearance');
+ return {...result,status:'released',resource_commit_ref:lifecycle.commit_ref};
+}
 export function readOriginalRecord(db,id){return memoExecutionRead(db,'command-record-initial',id,()=>readInitialRecord(db,id));}
 function readInitialRecord(db,id){
  need(db.inTransaction,'writer');

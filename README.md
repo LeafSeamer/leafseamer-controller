@@ -1001,6 +1001,8 @@ Schema 80 起，拥有 `automation.protect` 权限的配对 Seamer 可在内部�
 
 Controller 用原准备回执确定命令主体和请求命名空间。受理时在同一个事务中封存请求、命令、资格和裁决，命令初始为排队状态。同一执行步骤只保留一次裁决，异内容或更换幂等键会冲突。查无原件表示当前账本尚未记录裁决。首次永久拒收一经提交即挡住迟到的同一请求。排队命令的实际发送仍需逐动作最终准入和结果核对。
 
+配对 Seamer 可通过 `/internal/automation/commands/resource` 查询同一命令的历史终态与当前资源状态。查询要求 `automation.prepare.read`，并核对原配对、准备回执和请求内容。资源状态为 `pending`（命令尚未终结）、`unresolved`（终态仍缺资源核销）、`never_acquired`（确认未取得占用）或 `released`（已核销该命令的设备占用）。命令尚无账本时，资源为 `null`。已释放的响应包含对应占用、核销和证据引用，历史终态保留原样。该接口提供只读证据。
+
 ### 自动模式设备门控
 
 停机后可显式执行 `leafseamer-controller migrate-storage --data-dir <绝对路径> --to-revision 96`。自动模式使用当前受监督内部评估器、批准的设备范围、凭据和认证窗口。受信本机恢复调用使用 `manual_source_ref: null`，仍需人员持有 `device.recover` 和 `device.command` 并通过近期认证。恢复采用后核对基线、拒绝快照和 FENCE 确认。只有原 OPEN 写入和 ACK 已持久采用、当前资格仍成立时才记录设备 Ready。评估器资格撤回或到期时，监督检查关闭出口并恢复保护态。

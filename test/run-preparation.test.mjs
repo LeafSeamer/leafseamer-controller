@@ -340,6 +340,7 @@ test('显式接入 Controller 准备受理，核验同一计划与控制原件�
    },
    lookup:(...args)=>networkStore.automationCommands.lookup(...args),
    result:(...args)=>networkStore.automationCommands.result(...args),
+   resource:(...args)=>networkStore.automationCommands.resource(...args),
    reject:(...args)=>networkStore.automationCommands.reject(...args)
   },runPreparations:{
   lookup:(...args)=>networkStore.lookup(...args),prepareEligibility:(...args)=>networkStore.prepareEligibility(...args),async prepare(key,socket,input){
@@ -786,12 +787,20 @@ test('显式接入 Controller 准备受理，核验同一计划与控制原件�
  db.close();assert.equal((await migrateStorage(f.dir,97)).schema_revision,'97');db=open();
  activeService={...activeService,schema_revision:'97'};networkStore=construct(id());
  const readResult=input=>seamer.transport.readAutomationCommandResult(originBinding,input);
+ const readResource=input=>seamer.transport.readAutomationCommandResource(originBinding,input);
  assert.deepEqual(await readResult(runtimeCandidate.request),{adjudication:qualified,terminal:null});
  assert.deepEqual(await readResult(lateCommand.request),{adjudication:rejected,terminal:null});
  assert.deepEqual(await readResult(withdrawn.request),{adjudication:null,terminal:null});
+ for(const [request,adjudication] of [[runtimeCandidate.request,qualified],[lateCommand.request,rejected],[withdrawn.request,null]]){
+  assert.deepEqual(await readResource(request),{adjudication,terminal:null,resource:null});
+ }
+ await assert.rejects(readResource({...runtimeCandidate.request,idempotency_key:id()}),{code:'peer_pairing_automation_command_conflict'});
  const oldPairingDigest=binding.digest;
  binding.digest=digest('replacement pairing');
- try{await assert.rejects(readResult(runtimeCandidate.request),{code:'peer_pairing_response'});}
+ try{
+  await assert.rejects(readResult(runtimeCandidate.request),{code:'peer_pairing_response'});
+  await assert.rejects(readResource(runtimeCandidate.request),{code:'peer_pairing_response'});
+ }
  finally{binding.digest=oldPairingDigest;}
  assert.equal(db.prepare('SELECT count(*) FROM ca_command_initial').pluck().get(),0);
 });

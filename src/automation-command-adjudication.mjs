@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {canonical,digest,same} from './auth-clock-value.mjs';
 import {pairingNeed as need} from './peer-pairing-value.mjs';
 import {automationCommandAdjudication,automationCommandIdentity,automationCommandRequest,automationCommandTerminal} from './peer-automation-command.mjs';
-import {readCommandRecord,readCommandRevision,storeAutomationCommandRecord} from './command-record-store.mjs';
+import {readCommandRecord,readCommandResource,readCommandRevision,storeAutomationCommandRecord} from './command-record-store.mjs';
 
 const ref=(kind,scope,object_id,body)=>({kind,scope,object_id,revision:'1',digest:digest(body)});
 
@@ -92,6 +92,28 @@ export function automationCommandStore({db,scope,writer,time,authorize,prepare,r
    need(same(authorize(bindingId,socket,request,purpose),owner),'automation_command_authority');return result;
   });
  }
+ function readOutcome(bindingId,socket,input,includeResource){
+  const request=normalize(input);
+  return writer(()=>{
+   const owner=authorize(bindingId,socket,request,'read');
+   const adjudication=original(request,automationCommandIdentity(request,owner.principal),owner.pairing_ref);
+   let terminal=null,resource=null;
+   if(adjudication?.command_ref&&db.prepare('SELECT 1 FROM command_admission_source WHERE command_id=?').pluck().get(adjudication.command_ref.object_id)){
+    const command_ref=adjudication.command_ref,saved=readCommandRecord(db,command_ref.object_id),head=saved.record;
+    need(head.origin==='automation'&&same(head.initial_command_ref,command_ref)&&same(saved.adjudication,adjudication),'automation_command_integrity');
+    if(head.state.phase==='finished'){
+     const revision=head.state.terminal_revision;
+     const record=head.revision===revision?head:readCommandRevision(db,command_ref.object_id,revision).record;
+     terminal=automationCommandTerminal({format:'leafseamer.automation-command-terminal/1',command_ref,
+      record_ref:{...command_ref,revision:record.revision,digest:record.record_digest},state_ref:record.state_ref,state:record.state,
+      completion_achieved:record.completion.achieved},adjudication);
+    }
+    if(includeResource)resource=readCommandResource(db,saved);
+   }
+   need(same(authorize(bindingId,socket,request,'read'),owner),'automation_command_authority');
+   return {adjudication,terminal,...(includeResource&&{resource})};
+  });
+ }
  return Object.freeze({
   async submit(bindingId,socket,input){
    const request=normalize(input),old=lookup(bindingId,socket,request,'submit');
@@ -105,27 +127,8 @@ export function automationCommandStore({db,scope,writer,time,authorize,prepare,r
    const adjudication=lookup(bindingId,socket,normalize(input),'read');
    return {state:adjudication===null?'not_found':'found',adjudication};
   },
-  ...(materialize&&{result(bindingId,socket,input){
-   const request=normalize(input);
-   return writer(()=>{
-    const owner=authorize(bindingId,socket,request,'read');
-    const adjudication=original(request,automationCommandIdentity(request,owner.principal),owner.pairing_ref);
-    let terminal=null;
-    if(adjudication?.command_ref&&db.prepare('SELECT 1 FROM command_admission_source WHERE command_id=?').pluck().get(adjudication.command_ref.object_id)){
-     const command_ref=adjudication.command_ref,saved=readCommandRecord(db,command_ref.object_id),head=saved.record;
-     need(head.origin==='automation'&&same(head.initial_command_ref,command_ref)&&same(saved.adjudication,adjudication),'automation_command_integrity');
-     if(head.state.phase==='finished'){
-      const revision=head.state.terminal_revision;
-      const record=head.revision===revision?head:readCommandRevision(db,command_ref.object_id,revision).record;
-      terminal=automationCommandTerminal({format:'leafseamer.automation-command-terminal/1',command_ref,
-       record_ref:{...command_ref,revision:record.revision,digest:record.record_digest},state_ref:record.state_ref,state:record.state,
-       completion_achieved:record.completion.achieved},adjudication);
-     }
-    }
-    need(same(authorize(bindingId,socket,request,'read'),owner),'automation_command_authority');
-    return {adjudication,terminal};
-   });
-  }}),
+  ...(materialize&&{result:(bindingId,socket,input)=>readOutcome(bindingId,socket,input,false),
+   resource:(bindingId,socket,input)=>readOutcome(bindingId,socket,input,true)}),
   reject(bindingId,socket,input){return decide(bindingId,socket,normalize(input),null,'rejected');}
  });
 }

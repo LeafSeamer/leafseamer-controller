@@ -275,6 +275,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
           },
           lookup(...args){supervision?.assertCurrent();return sessions.runPreparations.automationCommands.lookup(...args);},
           result(...args){supervision?.assertCurrent();return sessions.runPreparations.automationCommands.result(...args);},
+          resource(...args){supervision?.assertCurrent();return sessions.runPreparations.automationCommands.resource(...args);},
           reject(...args){supervision?.assertCurrent();return sessions.runPreparations.automationCommands.reject(...args);}
         }:null,
         runApprovalProtection:sessions.runApprovalEndorsements?.receiveProtection?(...args)=>{

@@ -121,7 +121,7 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
      if(!commandOperation||error?.code!=='peer_pairing_automation_command_conflict')throw error;
      need(same(current(bindingId,req.socket),record),'changed');res.writeHead(409,{'Content-Length':0});res.end();return;
     }
-    const commandRead=commandOperation==='lookup'||commandOperation==='result';
+    const commandRead=commandOperation==='lookup'||commandOperation==='result'||commandOperation==='resource';
     const body=actionRead?observation.body:commandRead?observation:observation.adjudication;
     const reply={version:actionRead&&body.execution?.origin_kind==='schedule'?scheduledActionBindingVersion:version,
      challenge_id:challenge,pair_attempt_id:record.transcript.pair_attempt_id,
@@ -578,6 +578,7 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
   submitAutomationCommand:(bindingId,request)=>remote(bindingId,'automation-commands/submit',structuredClone(request)),
   lookupAutomationCommand:(bindingId,request)=>remote(bindingId,'automation-commands/lookup',structuredClone(request)),
   readAutomationCommandResult:(bindingId,request)=>remote(bindingId,'automation-commands/result',structuredClone(request)),
+  readAutomationCommandResource:(bindingId,request)=>remote(bindingId,'automation-commands/resource',structuredClone(request)),
   rejectAutomationCommand:(bindingId,request)=>remote(bindingId,'automation-commands/reject',structuredClone(request)),
   async openSubscriptionChannel(bindingId,{protocol,onFrame,onClose}){
    need(!closed&&peers&&identity.service_kind==='seamer'&&websocketClients.size<8,'subscription_request');const record=pairings.currentPending(bindingId),peer=peers.find(p=>p.identity.service_id===record.peer_service_id),local=record.transcript.parties.find(p=>p.service_id===identity.service_id),target=record.transcript.parties.find(p=>p.service_id===record.peer_service_id);
