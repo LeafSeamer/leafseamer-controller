@@ -4,12 +4,16 @@ import crypto from 'node:crypto';
 import https from 'node:https';
 import path from 'node:path';
 import {once} from 'node:events';
+import {createRequire} from 'node:module';
 import Database from 'better-sqlite3';
+import WebSocket from 'ws';
 import {setup,inspect} from './fixtures/extension-installation.mjs';
 import {peerCertificates} from './fixtures/peer-certificates.mjs';
 import {fixture as clockFixture} from './auth-clock-fixture.mjs';
 import {migrateStorage} from '../dist/storage.mjs';
 import {createAuthenticationHttp} from '../dist/auth-http.mjs';
+import {createHumanEventWebsocket} from '../dist/human-event-websocket.mjs';
+import {eventChannelProtocol} from '../dist/service-event-channel.mjs';
 import {canonical,digest} from '../dist/auth-clock-value.mjs';
 import {startAuthenticationClock} from '../dist/auth-clock.mjs';
 import {sessionStore} from '../dist/session-store.mjs';
@@ -23,9 +27,12 @@ import {contractSelection as selection} from '../dist/sdk/selection.mjs';
 const id=()=>crypto.randomUUID();
 const login={login:'status.test',password:'Synthetic-status-password-123'};
 
-test('113 到 114 保留非空身份及迁移历史，真实 HTTPS 人员订阅按范围授权和生命周期校验', {timeout:90000}, async t=>{
- let cleanup,db,server,clock;
+test('迁移保留身份，真实 HTTPS 和 WebSocket 人员订阅绑定票据、连接代际及固定页', {timeout:90000}, async t=>{
+ let cleanup,db,server,clock,humanEvents;
+ const sockets=new Set();
  t.after(async()=>{
+  for(const socket of sockets)socket.terminate();
+  await humanEvents?.close();
   if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
   clock?.stop();
   db?.close();
@@ -46,6 +53,12 @@ test('113 到 114 保留非空身份及迁移历史，真实 HTTPS 人员订阅�
  inspect(f.dir,db=>{
   assert.deepEqual(db.prepare('SELECT * FROM identity_receipt').all(),prior.identity);
   assert.deepEqual(db.prepare("SELECT * FROM schema_migration WHERE to_revision!='114' ORDER BY CAST(to_revision AS INTEGER)").all(),prior.migrations);
+  assert.deepEqual(db.pragma('foreign_key_check'),[]);
+ });
+ const migrated=await migrateStorage(f.dir,115);
+ assert.equal(migrated.schema_revision,'115');
+ inspect(f.dir,db=>{
+  assert.deepEqual(db.prepare('SELECT * FROM identity_receipt').all(),prior.identity);
   assert.deepEqual(db.pragma('foreign_key_check'),[]);
  });
  f.reopen();
@@ -75,24 +88,32 @@ test('113 到 114 保留非空身份及迁移历史，真实 HTTPS 人员订阅�
 
  const {ca,leaves:[tls]}=peerCertificates();
  let api;
- server=https.createServer(tls,(req,res)=>{if(!api.handle(req,res)){res.writeHead(404);res.end();}});
+ server=https.createServer(tls,(req,res)=>{
+  if(req.url==='/ticket-test'){res.writeHead(200,{'content-type':'text/html'});res.end('<!doctype html><title>Subscription test</title>');return;}
+  if(!api.handle(req,res)){res.writeHead(404);res.end();}
+ });
  server.listen(0,'127.0.0.1');await once(server,'listening');
  const origin='https://127.0.0.1:'+server.address().port;
  const clockInputs=clockFixture(f.store.authenticationClock.scope,null,{sampleWindowPolicy:'authentication-clock-sample/2'});
  clock=startAuthenticationClock(clockInputs.source,f.store.authenticationClock,clockInputs.provider,{schedule:false});
  const domain={clock_domain_id:'clock_'+'a'.repeat(64),descriptor_digest:'sha256:'+'a'.repeat(64)};
+ let tick=1n;
  const authority=localPermissionStore(db,service);
  const sessions=sessionStore(db,service.service_id,clock,authority,true,{service,bootId},null,
-  {domain:()=>({ref:domain,tick:'1'})},null,null,null,null,null,eventScopes);
+  {domain:()=>({ref:domain,tick:String(tick)})},null,null,null,null,null,eventScopes);
  api=createAuthenticationHttp({serviceId:service.service_id,databaseInstanceId:service.database_instance_id,serviceBootId:bootId,
   origin,sessions,localPairing:(auth,operation,request)=>manageLocalEvents(sessions,auth,operation,request)});
+ humanEvents=createHumanEventWebsocket({origin,subscriptions:sessions.serviceSubscriptions,stable(){}});
+ server.on('upgrade',(req,socket,head)=>{if(!humanEvents.upgrade(req,socket,head))socket.destroy();});
 
  function send(method,route,body,extra={}){
   const content=body===null?null:Buffer.from(canonical(body));
   return new Promise((resolve,reject)=>{
-   const req=https.request(origin+route,{method,ca,agent:false,headers:{Origin:origin,
+   const merged={Origin:origin,
     'X-LeafSeamer-Contract':selection.contract_id,'X-LeafSeamer-Contract-Digest':selection.contract_digest,
-    ...(content&&{'Content-Type':'application/json','Content-Length':content.length}),...extra}},res=>{
+    ...(content&&{'Content-Type':'application/json','Content-Length':content.length}),...extra};
+   const headers=Object.fromEntries(Object.entries(merged).filter(([,value])=>value!==undefined));
+   const req=https.request(origin+route,{method,ca,agent:false,headers},res=>{
     const chunks=[];res.on('data',data=>chunks.push(data));
     res.once('end',()=>{const bytes=Buffer.concat(chunks);resolve({status:res.statusCode,headers:res.headers,body:bytes.length?JSON.parse(bytes):null});});
     res.once('error',reject);
@@ -113,8 +134,8 @@ test('113 到 114 保留非空身份及迁移历史，真实 HTTPS 人员订阅�
  const endpoint='/api/v1/subscriptions';
  const admin=(operation,request)=>send('POST',localPairingPath,{operation,request},{Cookie:person.cookie,'X-CSRF-Token':person.csrf});
  const scoped=await admin('register-status-scope',{request_id:id(),device_ids:[device]});assert.equal(scoped.status,200);
- const context=async person=>{
-  const response=await send('POST','/api/v1/request-contexts',{audience:service.service_id,operations:['createSubscription'],ttl_ms:30000,
+ const context=async (person,operation='createSubscription',ttl_ms=30000)=>{
+  const response=await send('POST','/api/v1/request-contexts',{audience:service.service_id,operations:[operation],ttl_ms,
    max_unique_requests:1,selection},{Authorization:person.bearer});
   assert.equal(response.status,201);
   return response.body.data.context_id;
@@ -143,24 +164,154 @@ test('113 到 114 保留非空身份及迁移历史，真实 HTTPS 人员订阅�
  for(let step=0;step<4;step++)sessions.serviceSubscriptions.sweep();
  const ready=await get();assert.equal(ready.status,200);assert.equal(ready.body.state,'snapshot_ready');
  assert.ok(ready.body.snapshot_ref);
+
+ const ticketInput=async (subscription,ttl)=>({
+  context_id:await context(person,'issueWsTicket',ttl),idempotency_key:id(),subscription_id:subscription.binding.subscription_id,
+  expected_authorization_revision:subscription.binding.authorization_revision,scope_digest:subscription.binding.scope_digest,
+  client_instance_id:subscription.owner.client_instance_id,origin,selection});
+ const issue=(input,actor=person)=>send('POST','/api/v1/ws-tickets',input,{Authorization:actor.bearer,'X-CSRF-Token':actor.csrf});
+ const ticketPath=origin.replace(/^https:/,'wss:')+'/api/v1/events';
+ const protocolsFor=ticket=>[eventChannelProtocol,'leafseamer.ticket.'+ticket];
+ function connect(protocols,requestOrigin=origin){
+  const socket=new WebSocket(ticketPath,protocols,{ca,origin:requestOrigin,handshakeTimeout:3000,perMessageDeflate:false});
+  sockets.add(socket);socket.on('error',()=>{});socket.once('close',()=>sockets.delete(socket));
+  return socket;
+ }
+ function rejectedUpgrade(protocols,requestOrigin=origin){
+  return new Promise((resolve,reject)=>{
+   const socket=connect(protocols,requestOrigin);
+   socket.once('open',()=>{socket.terminate();reject(Error('意外接受 WebSocket 升级'));});
+   socket.once('unexpected-response',(_request,res)=>{
+    res.resume();res.once('end',()=>{resolve(res.statusCode);socket.terminate();});
+   });
+   socket.once('error',error=>reject(Error('WebSocket 握手未返回拒绝响应',{cause:error.code})));
+  });
+ }
+ async function open(issued){
+  const socket=connect(protocolsFor(issued.ticket));
+  const message=once(socket,'message');
+  await once(socket,'open');assert.equal(socket.protocol,eventChannelProtocol);
+  const [bytes]=await message;
+  assert.deepEqual(JSON.parse(bytes),{type:'contract.ready',channel:issued.binding.channel});
+  return socket;
+ }
+ function attachment(subscription,generation,replace_existing=false){
+  return {schema_version:'event-channel/0.1.0-draft.1',type:'client.attach',subscription_id:subscription.binding.subscription_id,
+   owner:subscription.owner,stream_id:subscription.binding.stream_id,stream_epoch:subscription.binding.stream_epoch,
+   scope_digest:subscription.binding.scope_digest,authorization_revision:subscription.binding.authorization_revision,
+   expected_connection_generation:generation,replace_existing,resume:null,connection_attempt_id:id()};
+ }
+ async function attach(socket,input){
+  const replied=once(socket,'message');socket.send(JSON.stringify(input));
+  const [bytes]=await replied;return JSON.parse(bytes);
+ }
+ const manifest=generation=>send('GET',route+'/snapshot?expected_connection_generation='+generation,null,{Authorization:person.bearer});
+ const attempt=attemptId=>send('GET',route+'/connections/'+attemptId,null,{Authorization:person.bearer});
+ assert.equal((await manifest('0')).status,412);
+ const firstInput=await ticketInput(ready.body);
+ assert.equal((await issue(firstInput,other)).status,404);
+ assert.equal((await issue({...firstInput,scope_digest:'b'.repeat(64)})).status,412);
+ const firstTicket=await issue(firstInput);assert.equal(firstTicket.status,201);
+ assert.equal(typeof firstTicket.body.ticket,'string');
+ const firstReplay=await issue(firstInput);assert.equal(firstReplay.status,200);
+ assert.equal(Object.hasOwn(firstReplay.body,'ticket'),false);
+ assert.equal(firstReplay.body.consumed,false);
+ assert.equal(await rejectedUpgrade(protocolsFor(firstTicket.body.ticket),'https://outside.invalid'),400);
+ assert.equal(await rejectedUpgrade(['leafseamer.contract.wrong',protocolsFor(firstTicket.body.ticket)[1]]),400);
+ assert.equal(db.prepare('SELECT count(*) FROM human_event_ticket_consumption').pluck().get(),0);
+ const firstSocket=await open(firstTicket.body);
+ assert.equal((await issue(firstInput)).body.consumed,true);
+ assert.equal(await rejectedUpgrade(protocolsFor(firstTicket.body.ticket)),403);
+ const firstAttempt=attachment(ready.body,'0');
+ const firstAttached=await attach(firstSocket,firstAttempt);
+ assert.equal(firstAttached.type,'server.attached');assert.equal(firstAttached.binding.connection_generation,'1');
+ assert.deepEqual((await attempt(firstAttempt.connection_attempt_id)).body.attached,firstAttached);
+ const firstManifest=await manifest('1');assert.equal(firstManifest.status,200);
+ assert.equal(firstManifest.body.binding.snapshot_id,ready.body.snapshot_ref.snapshot_id);
+ const pageRoute=route+'/snapshots/'+firstManifest.body.binding.snapshot_id+'/pages/0?expected_connection_generation=1';
+ const page=await send('GET',pageRoute,null,{Authorization:person.bearer,Origin:undefined,'Sec-Fetch-Site':'same-origin'});
+ assert.equal(page.status,200);assert.equal(page.body.delivery_binding.connection_generation,'1');
+ assert.equal(page.body.content_digest,firstManifest.body.pages[0].content_digest);
+ assert.equal(page.headers['cache-control'],'no-store');
+ assert.equal((await send('GET',pageRoute,null,{Authorization:other.bearer})).status,404);
+
+ const shortInput=await ticketInput(ready.body,1500),shortTicket=await issue(shortInput);assert.equal(shortTicket.status,201);
+ const saved=db.prepare('SELECT binding_jcs FROM human_event_ticket WHERE ticket_id=?').pluck().get(shortTicket.body.binding.channel.binding_id);
+ tick=BigInt(JSON.parse(saved).deadline_tick);
+ assert.equal(await rejectedUpgrade(protocolsFor(shortTicket.body.ticket)),403);
+ assert.equal((await issue(shortInput)).body.consumed,false);
+ const wrongTicket=await issue(await ticketInput(ready.body));assert.equal(wrongTicket.status,201);
+ const wrongSocket=await open(wrongTicket.body),wrongClosed=once(wrongSocket,'close');
+ wrongSocket.send(JSON.stringify({...attachment(ready.body,'1',true),subscription_id:id()}));await wrongClosed;
+ const secondTicket=await issue(await ticketInput(ready.body));assert.equal(secondTicket.status,201);
+ const secondSocket=await open(secondTicket.body),secondAttempt=attachment(ready.body,'1',true);
+ assert.equal((await attach(secondSocket,secondAttempt)).binding.connection_generation,'2');
+ assert.equal((await attempt(firstAttempt.connection_attempt_id)).body.current,false);
+ assert.equal((await attempt(secondAttempt.connection_attempt_id)).body.current,true);
+ assert.equal((await manifest('1')).status,412);
+ assert.deepEqual((await manifest('2')).body,firstManifest.body);
+ const firstClosed=once(firstSocket,'close');humanEvents.sweep();await firstClosed;
+
+ const secondClosed=once(secondSocket,'close');
+ let browserAttached=false;
+ if(process.env.LEAFSEAMER_GUI_PLAYWRIGHT&&process.env.LEAFSEAMER_GUI_BROWSER){
+  const rendererTicket=await issue(await ticketInput(ready.body));assert.equal(rendererTicket.status,201);
+  const {chromium}=createRequire(import.meta.url)(process.env.LEAFSEAMER_GUI_PLAYWRIGHT);
+  const spki=crypto.createHash('sha256').update(new crypto.X509Certificate(tls.cert).publicKey.export({type:'spki',format:'der'})).digest('base64');
+  const browser=await chromium.launch({executablePath:process.env.LEAFSEAMER_GUI_BROWSER,headless:true,args:['--ignore-certificate-errors-spki-list='+spki]});
+  try{
+   const page=await browser.newPage();
+   assert.equal((await page.goto(origin+'/ticket-test')).status(),200);
+   const result=await page.evaluate(async ({ticketPath,protocols,input,route,headers})=>{
+    const socket=new WebSocket(ticketPath,protocols);
+    const next=()=>new Promise((resolve,reject)=>{
+     const timer=setTimeout(()=>reject(Error('WebSocket 帧超时')),5000);
+     socket.addEventListener('message',event=>{clearTimeout(timer);resolve(JSON.parse(event.data));},{once:true});
+     socket.addEventListener('error',()=>{clearTimeout(timer);reject(Error('WebSocket 连接失败'));},{once:true});
+    });
+    const ready=await next(),response=next();socket.send(JSON.stringify(input));const attached=await response;
+    const generation=attached.binding.connection_generation;
+    const fixed=await fetch(route+'/snapshot?expected_connection_generation='+generation,{headers});
+    if(fixed.status!==200)throw Error('浏览器快照清单状态 '+fixed.status);
+    const manifest=await fixed.json();
+    const page=await fetch(route+'/snapshots/'+manifest.binding.snapshot_id+'/pages/0?expected_connection_generation='+generation,{headers});
+    if(page.status!==200)throw Error('浏览器快照页面状态 '+page.status);
+    socket.close();
+    return {ready,attached,protocol:socket.protocol,page:await page.json()};
+   },{ticketPath,protocols:protocolsFor(rendererTicket.body.ticket),input:attachment(ready.body,'2',true),route,
+    headers:{Authorization:person.bearer,'X-LeafSeamer-Contract':selection.contract_id,'X-LeafSeamer-Contract-Digest':selection.contract_digest}});
+   assert.equal(result.protocol,eventChannelProtocol);
+   assert.deepEqual(result.ready,{type:'contract.ready',channel:rendererTicket.body.binding.channel});
+   assert.equal(result.attached.binding.connection_generation,'3');
+   assert.equal(result.page.delivery_binding.connection_generation,'3');
+   assert.equal(result.page.content_digest,firstManifest.body.pages[0].content_digest);
+   browserAttached=true;t.diagnostic('Edge 原生 WebSocket 与同源快照清单、分页读取通过');
+  }finally{await browser.close();}
+ }
+
  const close=(revision,csrf=person.csrf)=>send('DELETE',route+'?expected_revision='+revision,null,
   {Authorization:person.bearer,'X-CSRF-Token':csrf});
+ const finalRevision=(await get()).body.revision;
  assert.equal((await close('1')).status,409);
- assert.equal((await close(ready.body.revision,'A'.repeat(43))).status,401);
- const closed=await close(ready.body.revision);assert.equal(closed.status,200);assert.equal(closed.body.state,'closed');
- assert.deepEqual((await close(ready.body.revision)).body,closed.body);
+ assert.equal((await close(finalRevision,'A'.repeat(43))).status,401);
+ const closed=await close(finalRevision);assert.equal(closed.status,200);assert.equal(closed.body.state,'closed');
+ assert.deepEqual((await close(finalRevision)).body,closed.body);
+ humanEvents.sweep();await secondClosed;
  assert.deepEqual((await create(request)).body,closed.body);
  assert.equal((await create({...request,idempotency_key:id()})).status,429);
 
  const another={...request,context_id:await context(person),idempotency_key:id()};
  const second=await create(another);assert.equal(second.status,202);
+ const revokedTicket=await issue(await ticketInput(second.body));assert.equal(revokedTicket.status,201);
+ const revokedSocket=await open(revokedTicket.body);
+ assert.equal((await attach(revokedSocket,attachment(second.body,'0'))).binding.connection_generation,'1');
  const disable={...grant,request_id:id(),expected_revision:'1',enabled:false};
  assert.equal((await admin('set-status-scope-reader',disable)).status,200);
- sessions.serviceSubscriptions.sweep();
+ const revokedClosed=once(revokedSocket,'close');sessions.serviceSubscriptions.sweep();humanEvents.sweep();await revokedClosed;
  const denied=await send('GET',endpoint+'/'+second.body.binding.subscription_id,null,{Authorization:person.bearer});
  assert.equal(denied.status,403);
  assert.equal(db.prepare('SELECT used_count FROM request_context WHERE context_id=?').pluck().get(request.context_id),1);
  assert.deepEqual(db.prepare('SELECT state FROM service_event_subscription_revision ORDER BY rowid').pluck().all(),
-  ['building','snapshot_ready','closed','building','revoked']);
+  ['building','snapshot_ready','snapshot_ready','snapshot_ready',...(browserAttached?['snapshot_ready']:[]),'closed','building','building','revoked']);
  assert.deepEqual(db.pragma('foreign_key_check').map(row=>row.table),['device_event_source','device_event_source','device_event_source']);
 });

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import {TLSSocket} from 'node:tls';
 import {createHttpAdapter,WireError} from './sdk/http.mjs';
+import {profile} from './sdk/runtime/panel-wire/decoder.mjs';
 import {contractSelection as selection} from './sdk/index.mjs';
 import {canonical} from './auth-clock-value.mjs';
 import {pairingFields} from './peer-pairing-value.mjs';
@@ -15,6 +16,7 @@ const routes = new Map([
   ['/api/v1/commands', 'POST'], ['/api/v1/commands/lookup', 'POST'], ['/api/v1/commands/reject', 'POST'],
   ['/api/v1/devices', 'GET'],
   ['/api/v1/subscriptions', 'POST'],
+  ['/api/v1/ws-tickets', 'POST'],
 ]);
 const maximumBody = 16384, maximumPending = 16, bodyDeadline = 2000;
 const commandReads=['getCommand','getCommandEvidence','getCommandEvidenceRevision'];
@@ -22,10 +24,14 @@ const commandOperations = ['submitCommand', 'lookupCommandAdmission', 'rejectCom
 const controlWrites=['acquireControl','releaseControl','offerTransfer','acceptTransfer','cancelTransfer'];
 const controlOperations=['getControl','getControlOperation','getTransfer','lookupControlRequest',...controlWrites];
 const deviceCatalogReads = ['getCapabilities','getSceneCatalog'];
-const subscriptionOperations = ['createSubscription','getSubscription','closeSubscription'];
+const snapshotReads=['getSnapshot','getSnapshotPage'];
+const subscriptionReads=['getSubscription','getSubscriptionConnection',...snapshotReads];
+const subscriptionOperations = ['createSubscription','closeSubscription','issueWsTicket',...subscriptionReads];
 const subscriptionItem = /^\/api\/v1\/subscriptions\/[^/]+$/;
+const subscriptionReadPath = /^\/api\/v1\/subscriptions\/[^/]+\/(?:snapshot|connections\/[^/]+|snapshots\/[^/]+\/pages\/[^/]+)$/;
 const subscriptionCodes={400:'invalid_request',401:'authentication_required',403:'forbidden',404:'not_found_or_invisible',
-  409:'conflict',410:'gone',413:'payload_too_large',429:'capacity_exceeded',503:'source_unavailable'};
+  409:'conflict',410:'gone',412:'binding_invalid',413:'payload_too_large',429:'capacity_exceeded',503:'source_unavailable'};
+const snapshotProfile=profile({max_message_bytes:262144,max_depth:48,max_value_nodes:1048576,max_object_members:65536,max_string_utf8_bytes:262144,parse_deadline_ms:5000});
 const readOperations = ['getSession', 'listDevices', ...deviceCatalogReads, 'getControl','getControlOperation','getTransfer',...commandReads];
 const rawPairs = flat => Array.from({length: flat.length / 2}, (_, i) => [flat[2 * i], flat[2 * i + 1]]);
 const credentialPattern = /^v1\.([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([A-Za-z0-9_-]{43})$/;
@@ -114,8 +120,9 @@ function subscriptionFailure(error) {
   const code=error?.code??'';
   if (error?.name==='ClockError'||code==='event_scope_unavailable') return 503;
   if (['token_invalid','token_expired','token_time_invalid','session_invalid','session_expired'].includes(code)) return 401;
-  if (['subscription_conflict','subscription_slot_busy','subscription_revision','subscription_changed'].includes(code)) return 409;
-  if (['subscription_gone','subscription_expired','request_context_closed','request_context_expired','event_scope_inactive'].includes(code)) return 410;
+  if (['subscription_conflict','subscription_slot_busy','subscription_revision','subscription_changed','subscription_state'].includes(code)) return 409;
+  if (['subscription_gone','subscription_expired','subscription_ticket_expired','request_context_closed','request_context_expired','event_scope_inactive','snapshot_deadline'].includes(code)) return 410;
+  if (['subscription_generation','subscription_binding','subscription_connection'].includes(code)) return 412;
   if (code==='subscription_not_found') return 404;
   if (code==='subscription_capacity') return 429;
   if (code==='subscription_input') return 400;
@@ -133,6 +140,12 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
     if (site.protocol !== 'https:' || site.origin !== origin || site.username || site.password || site.pathname !== '/' || site.search || site.hash) throw new Error('authentication_origin');
   }
   let pending = 0;
+  function browserOrigin(req){
+    const pathname=req.url?.split('?')[0];
+    return req.headers.origin===undefined&&site&&req.method==='GET'&&
+      (subscriptionItem.test(pathname)||subscriptionReadPath.test(pathname))&&req.headers.host===site.host&&
+      req.headers['sec-fetch-site']==='same-origin'&&req.socket instanceof TLSSocket&&req.socket.encrypted===true?origin:undefined;
+  }
   function empty(res, status, headers = {}) {
     if (!res.destroyed && !res.headersSent) { res.writeHead(status, {...headers, 'Cache-Control': 'no-store', Connection: 'close', 'Content-Length': '0'}); res.end(); }
   }
@@ -156,7 +169,8 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
     // 任何响应字段或选择失配均在发送响应头前失败，不能交付半个可信结果。
     // 本地生成且受SDK大小上限约束的响应在微任务内完成校验，避免让出的定时器片被同步writer占满。
     // 保留原解析截止、节点/字节预算及发送前当前性复核；外部请求仍用默认公平分片。
-    await adapter.decodeResponse(body, adapter.prepareResponse(request, String(status), headers),{yieldNow:()=>Promise.resolve()});
+    await adapter.decodeResponse(body, adapter.prepareResponse(request, String(status), headers),{
+      yieldNow:()=>Promise.resolve(),...(snapshotReads.includes(request.operation_id)&&{profile:snapshotProfile})});
     beforeSend();
     if (!res.destroyed && !res.headersSent) { res.writeHead(status, Object.fromEntries(headers)); res.end(body); }
   }
@@ -165,7 +179,7 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
     const operation = request.operation_id;
     try {
       if (!(req.socket instanceof TLSSocket) || req.socket.encrypted !== true || !['TLSv1.2', 'TLSv1.3'].includes(req.socket.getProtocol())) reject('http_tls');
-      if (req.headers.host !== site.host || (!readOperations.includes(operation) || req.headers.origin !== undefined) && req.headers.origin !== origin ||
+      if (req.headers.host !== site.host || (!readOperations.includes(operation) || req.headers.origin !== undefined) && (req.headers.origin??browserOrigin(req)) !== origin ||
           req.headers['sec-fetch-site'] === 'cross-site') reject('http_origin');
       if (operation === 'login' || operation === 'refreshSession') {
         const old = operation === 'refreshSession' ? cookieInput(req) : null;
@@ -203,14 +217,33 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
         const data = view();
         await reply(res, request, 200, null, {data, beforeSend() { if (canonical(view()) !== canonical(data)) reject(deviceCatalogReads.includes(operation) ? 'device_capabilities_changed' : 'device_registry_integrity'); }});
       } else if(subscriptionOperations.includes(operation)){
-        const subscriptions=sessions.serviceSubscriptions?.human;
-        if(!subscriptions)reject('subscription_unavailable');
+        const subscriptions=sessions.serviceSubscriptions;
+        if(!subscriptions?.human)reject('subscription_unavailable');
+        const account=subscriptions.human;
         const proof=tokenInput(req),csrf=req.headers['x-csrf-token'];
-        const result=operation==='createSubscription'?subscriptions.create(proof,csrf,body):
-          subscriptions.access(proof,request.parameters.path.subscription_id,operation==='closeSubscription'?{expected_revision:request.parameters.query.expected_revision,csrf}:null);
+        const key=request.parameters.path.subscription_id,query=request.parameters.query;
+        if(operation==='issueWsTicket'){
+          if(!subscriptions.tickets)reject('subscription_unavailable');
+          const result=subscriptions.tickets.issue(proof,csrf,body,origin),issued=result.status===201;
+          await reply(res,request,result.status,null,{data:result.view,beforeSend(){
+            subscriptions.tickets.confirm(proof,issued?result.view.binding:result.view,issued);
+          }});
+          return;
+        }
+        if(snapshotReads.includes(operation)||operation==='getSubscriptionConnection'){
+          if(!account.readSnapshot)reject('subscription_unavailable');
+          const p=request.parameters.path;
+          const read=()=>operation==='getSubscriptionConnection'?account.readAttempt(proof,key,p.attempt_id):
+            account.readSnapshot(proof,key,query.expected_connection_generation,operation==='getSnapshotPage'?{snapshot_id:p.snapshot_id,page_index:p.page_index}:null);
+          const data=read();
+          await reply(res,request,200,null,{data,beforeSend(){if(canonical(read())!==canonical(data))reject('subscription_changed');}});
+          return;
+        }
+        const result=operation==='createSubscription'?account.create(proof,csrf,body):
+          account.access(proof,key,operation==='closeSubscription'?{expected_revision:query.expected_revision,csrf}:null);
         const data=result.view;
         await reply(res,request,result.status,null,{data,beforeSend(){
-          if(canonical(subscriptions.access(proof,data.binding.subscription_id).view)!==canonical(data))reject('subscription_changed');
+          if(canonical(account.access(proof,data.binding.subscription_id).view)!==canonical(data))reject('subscription_changed');
         }});
       } else if(controlOperations.includes(operation)){
         const proof=tokenInput(req),parameters=request.parameters.path;
@@ -260,7 +293,11 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
   }
   async function serve(req, res) {
     let request;
-    try { request = adapter.prepareRequest('controller', req.method, req.url, rawPairs(req.rawHeaders)); }
+    try {
+      const headers=rawPairs(req.rawHeaders),derivedOrigin=browserOrigin(req);
+      if(derivedOrigin!==undefined)headers.push(['origin',derivedOrigin]);
+      request = adapter.prepareRequest('controller', req.method, req.url, headers);
+    }
     catch { empty(res, 400); return; }
     if (pending >= maximumPending) { await reply(res, request, 429, 'CAPACITY_EXCEEDED'); return; }
     if (req.headers['transfer-encoding'] !== undefined && req.headers['transfer-encoding'] !== 'chunked') { empty(res, 400); return; }
@@ -346,7 +383,7 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
       void serveLocalManagement(req, res, true).catch(() => empty(res, 503)); return true;
     }
     const pathname = req.url?.split('?')[0];
-    const method = routes.get(pathname) ?? (subscriptionItem.test(pathname)?'GET, DELETE':/^\/api\/v1\/commands\/[^/]+(?:\/evidence(?:\/[^/]+\/revisions\/[^/]+)?)?$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/(?:control|capabilities|scene-catalog)$/.test(pathname)||/^\/api\/v1\/control-operations\/[^/]+$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+$/.test(pathname)?'GET':
+    const method = routes.get(pathname) ?? (subscriptionItem.test(pathname)?'GET, DELETE':subscriptionReadPath.test(pathname)||/^\/api\/v1\/commands\/[^/]+(?:\/evidence(?:\/[^/]+\/revisions\/[^/]+)?)?$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/(?:control|capabilities|scene-catalog)$/.test(pathname)||/^\/api\/v1\/control-operations\/[^/]+$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+$/.test(pathname)?'GET':
       /^\/api\/v1\/devices\/[^/]+\/control\/(acquire|release|transfers)$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+\/(accept|cancel)$/.test(pathname)||pathname==='/api/v1/control-requests/lookup'?'POST':null);
     if (!method) return false;
     if (!method.split(', ').includes(req.method)) { empty(res, 405, {Allow: method}); return true; }

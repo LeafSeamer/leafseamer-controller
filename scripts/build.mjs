@@ -19,6 +19,7 @@ names.push('obs-restart-launch.sql', 'obs-cut-reconciliation.sql', 'linux-worker
 names.push('historical-control-retirement.mjs');
 names.push('execution-time-fence.sql', 'execution-time-fence.mjs', 'command-reference-guard.sql');
 names.push('human-subscription.sql', 'human-subscription-authorization.mjs');
+names.push('human-subscription-ticket.sql', 'human-subscription-ticket.mjs', 'human-event-websocket.mjs');
 const files = await Promise.all(names.map(async name => [name, await fs.readFile(path.join(root, 'src', name))]));
 for(const name of ['device-event-source.sql','device-event-source.mjs','device-source-time.sql','device-event-qualification.mjs','simulator-event-review.json'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 for (const name of ['time-provider-runtime.sql', 'time-provider-link.mjs', 'linux-reference-provider.mjs', 'linux-reference-capture.mjs', 'time-provider-polls.sql', 'time-provider-polls.mjs',

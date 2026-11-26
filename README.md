@@ -968,7 +968,11 @@ Schema 67将固定设备来源的SDK投影及有序通知接入来源writer。�
 
 Schema 114 接通 Controller 的人员订阅生命周期。先用本机 `set-status-scope-reader` 提交 `{request_id,scope_ref,principal_id,expected_revision,enabled}`，为已登记状态范围明确授予或撤销某位人员的读取资格。首次登记用修订 `"0"`，后续变更采用当前修订。该操作沿用本机近期认证和 `auth.manage`。
 
-同源 HTTPS 客户端以 `status.read` 和 `request.create` 定向令牌创建操作为 `createSubscription` 的请求上下文。随后用原上下文和 CSRF 提交 `POST /api/v1/subscriptions`。同会话、客户端、上下文和幂等键重投可查询原订阅。当前会话可 `GET /api/v1/subscriptions/{subscription_id}` 查询，或带 CSRF 和 `expected_revision` 执行 `DELETE` 关闭。订阅授权、来源固定范围和使用的上下文预算随创建事务提交。快照就绪后视图返回固定引用，页面下载须等当前连接附着。人员通道票据、公开分页释放、增量交付和浏览器采用仍待实现。
+同源 HTTPS 客户端以 `status.read` 和 `request.create` 定向令牌创建操作为 `createSubscription` 的请求上下文。随后用原上下文和 CSRF 提交 `POST /api/v1/subscriptions`。同会话、客户端、上下文和幂等键重投可查询原订阅。当前会话可 `GET /api/v1/subscriptions/{subscription_id}` 查询，或带 CSRF 和 `expected_revision` 执行 `DELETE` 关闭。订阅授权、来源固定范围和使用的上下文预算随创建事务提交。
+
+Schema 115 接通人员票据、连接附着和固定快照读取。为 `issueWsTicket` 创建请求上下文后，使用同一人员令牌及 CSRF 提交 `POST /api/v1/ws-tickets`，绑定当前订阅、授权修订、已登记客户端、范围摘要和 HTTPS Origin。201 首次交付票据，重复请求返回 200 和非秘密绑定。消费在升级响应前持久提交。票据在原上下文、令牌、订阅期限及单调时钟的共同窗口内有效，签发窗口上限为 30 秒。
+
+`/api/v1/events` 升级时提供契约和 `leafseamer.ticket.<ticket>` 两个子协议。服务器回显契约，发送 `contract.ready` 后处理 `client.attach`。替换仍活跃的连接须指定当前代际和 `replace_existing`。当前会话可查询连接尝试，并以当前附着代际读取 `/snapshot` 和 `/snapshots/{snapshot_id}/pages/{page_index}`。快照读回复核原连接、人员令牌、范围和期限。同源浏览器 GET 使用由 TLS 主机和浏览器 Fetch Metadata 确认的来源。增量交付和工作台重同步仍待实现。
 
 Schema 68显式增加固定来源范围的持久快照。后台从building订阅预留8MiB、原运行时钟域及5秒构建截止和内部日志pin；独立只读事务取得全部来源投影后，释放读连接，在有界内存完成页面封存，再由writer重核授权、原期限、时钟域及预留并原子保存manifest、所有页面原字节、基线摘要、内部日志映射和snapshot_ready修订。任一缺写整笔回滚；进程中断留下的预留失效，不从新状态补页。读取及封存是本进程内阶段，只有完整发布结果持久可见。
 

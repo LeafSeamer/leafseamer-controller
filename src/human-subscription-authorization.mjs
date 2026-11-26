@@ -7,7 +7,7 @@ const ownerFields=value=>({issuer_id:value.issuer_id,issuer_epoch:value.issuer_e
 const owner=(proof,client_instance_id)=>({kind:'human',...ownerFields(proof),client_instance_id});
 const limit=65536;
 
-export function humanSubscriptionAuthority({db,service,time,authority,eventScopes,authorizeToken,tokenWithCsrf,contextCurrent}){
+export function humanSubscriptionAuthority({db,service,time,authority,eventScopes,authorizeToken,currentRecordedToken,tokenWithCsrf,contextCurrent}){
  const reader=db.prepare('SELECT body_jcs,body_digest FROM status_scope_reader WHERE scope_id=? AND principal_id=? ORDER BY revision DESC LIMIT 1').raw();
  const byRequest=db.prepare('SELECT body_jcs,body_digest FROM status_scope_reader WHERE request_id=?').raw();
  function unpack(row){
@@ -48,8 +48,13 @@ export function humanSubscriptionAuthority({db,service,time,authority,eventScope
    return current({owner:owner(proof,request.client_instance_id),scope_ref,policy_digest:grant.digest,
     reader_digest:activeReader(scope_ref,proof.principal_id)});
   },
-  consumeContext(token,context_id){
-   const context=contextCurrent(token,context_id,'createSubscription');
+  tokenCurrent(token_id,expectedOwner){
+   const proof=currentRecordedToken(token_id,service.service_id);
+   need(!proof.denied&&proof.permissions.includes('status.read')&&same(owner(proof,expectedOwner.client_instance_id),expectedOwner),'revoked');
+   return proof;
+  },
+  consumeContext(token,context_id,operation){
+   const context=contextCurrent(token,context_id,operation);
    if(context.denied)return context;
    const updated=db.prepare("UPDATE request_context SET used_count=used_count+1 WHERE context_id=? AND state='active' AND used_count<max_unique_requests").run(context_id);
    need(updated.changes===1,'capacity');return context;

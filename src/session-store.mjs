@@ -160,7 +160,7 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
     attachEncodingSource(commandEncodingSource({db,service:contextBinding.service,currentRecordedToken,devices,executionCurrent,coreSource:controlBarrier,automationExecution,clockReference}));
   let manualCurrent,evaluatorCurrent,evidenceCurrent;
   const humanAuthority=Number(contextBinding?.service.schema_revision)>=114&&eventScopes&&authority?.current?
-    humanSubscriptionAuthority({db,service:contextBinding.service,time,authority,eventScopes,authorizeToken,tokenWithCsrf,contextCurrent}):null;
+    humanSubscriptionAuthority({db,service:contextBinding.service,time,authority,eventScopes,authorizeToken,currentRecordedToken,tokenWithCsrf,contextCurrent}):null;
   const serviceIdentities=Number(contextBinding?.service.schema_revision)>=36&&authority?.current?
     serviceIdentityStore({db,service:contextBinding.service,bootId:contextBinding.bootId,writer,time,authenticated,authority,coreSource:controlBarrier,attachEvaluatorCurrent:current=>{evaluatorCurrent=current;},pairings:()=>peerPairings,eventScopes,deviceAutomationCurrent,authorizeEndorsement,
      authorizeArmInitiator,automationExecution,humanAuthority,pairingSample:()=>clock.pairingSample(),durationSample:()=>{if(typeof clock.durationSample!=='function')fail('session_clock_duration_unavailable');return clock.durationSample();}}):{};

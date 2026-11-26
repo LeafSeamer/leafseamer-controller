@@ -7,6 +7,7 @@ import {startClockMonitor} from './clock-monitor.mjs';
 import {startAuthenticationClock} from './auth-clock.mjs';
 import {inspectLinuxClockEvidence, waitForLinuxAuthentication} from './linux-clock-evidence.mjs';
 import {createAuthenticationHttp} from './auth-http.mjs';
+import {createHumanEventWebsocket} from './human-event-websocket.mjs';
 import {localPairingPath} from './local-pairing-admin.mjs';
 import {createLocalExtensionManagement,localExtensionPath} from './local-extension-management.mjs';
 import {loadGuiAssets} from './gui-assets.mjs';
@@ -116,7 +117,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     }
   }
   let server, localPairingServer, referenceTimePolls = null, referenceSchedule = null, referencePublication = null, referenceWatcher = null, peerTransport = null;
-  let endorsementRevocationDelivery = null, runProtectionDelivery = null, humanSubscriptionMonitor = null, closing = false;
+  let endorsementRevocationDelivery = null, runProtectionDelivery = null, humanSubscriptionMonitor = null, humanEvents = null, closing = false;
   const closeHttp = listener => !listener?.listening ? Promise.resolve() : new Promise((resolve, reject) => {
     listener.close(error => error ? reject(error) : resolve()); listener.closeAllConnections();
   });
@@ -130,7 +131,7 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     try { referencePublication?.invalidate?.('shutdown'); }
     catch(error) { referenceFailure=error; }
     const results = await Promise.allSettled([scheduleStopped,closeHttp(server),closeHttp(localPairingServer), endorsementRevocationDelivery?.close(),
-      runProtectionDelivery?.close(), peerTransport?.close()]);
+      runProtectionDelivery?.close(), peerTransport?.close(),humanEvents?.close()]);
     for (const stop of [() => clock?.stop(), () => authentication?.stop(), () => storage.close(), () => timeProviderLink?.close(),
       () => linuxProvider?.socket.destroy(), () => supervision?.close()]) {
       try { stop(); } catch (reason) { results.push({status: 'rejected', reason}); }
@@ -227,6 +228,13 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     res.end(req.method === 'HEAD' ? undefined : bytes);
     };
     server = tls ? https.createServer({...options, key: tls.key, cert: tls.cert, minVersion: 'TLSv1.2', maxVersion: 'TLSv1.3'}, listener) : http.createServer(options, listener);
+    if(tls&&sessions?.serviceSubscriptions?.tickets){
+      humanEvents=createHumanEventWebsocket({subscriptions:sessions.serviceSubscriptions,origin:tls.origin,stable(){
+        if(closing)throw Error('controller_closing');
+        assertRuntimeCurrent();
+      }});
+      server.on('upgrade',(req,socket,head)=>{if(!humanEvents.upgrade(req,socket,head))socket.destroy();});
+    }
   } catch (error) { await cleanup().catch(() => {}); throw error; }
   server.maxRequestsPerSocket = 100;
   server.on('clientError', (_error, socket) => { if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); });
@@ -370,9 +378,9 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   }
   supervision?.onLost(() => closeFor('supervisor_lost'));
   timeProviderLink?.onLost(() => closeFor('provider_lost'));
-  if(!closing&&!peerTransport&&sessions?.serviceSubscriptions?.human){
+  if(!closing&&(humanEvents||!peerTransport&&sessions?.serviceSubscriptions?.human)){
     humanSubscriptionMonitor=setInterval(()=>{
-      try{assertRuntimeCurrent();sessions.serviceSubscriptions.sweep();}
+      try{assertRuntimeCurrent();if(!peerTransport)sessions.serviceSubscriptions.sweep();humanEvents?.sweep();}
       catch{closeFor('subscription_authority_unavailable');}
     },250);
     humanSubscriptionMonitor.unref();

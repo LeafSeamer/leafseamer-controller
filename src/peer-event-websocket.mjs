@@ -9,6 +9,12 @@ export function createPeerWebsocketServer({protocol}){
    let app;try{stable();app=open();}catch{ws.terminate();return;}let queued=0,chain=Promise.resolve(),ended=false,idleQueued=false;const timer=setTimeout(()=>ws.terminate(),5000);timer.unref();
    const stop=()=>{if(ended)return;ended=true;clearTimeout(timer);active.delete(connection);try{app.close();}catch{}};
    const fail=()=>{ws.terminate();stop();};
+   function sendResponse(result){
+    for(const body of result.messages){
+     guard(!ended&&ws.readyState===WebSocket.OPEN&&ws.bufferedAmount+body.length<=limit&&body.length<=limit);
+     stable();result.beforeSend();ws.send(body,{binary:false});
+    }
+   }
    async function pump(idle=false){
     guard(!ended);stable();
     const delivery=await app.next?.(idle);
@@ -27,8 +33,9 @@ export function createPeerWebsocketServer({protocol}){
     idleQueued=true;
     chain=chain.then(()=>pump(true)).catch(fail).finally(()=>{idleQueued=false;});
    }};active.add(connection);ws.on('error',fail);ws.on('close',stop);
+   if(app.initial)chain=chain.then(async()=>sendResponse(await app.initial())).catch(fail);
    ws.on('message',(bytes,binary)=>{if(binary||++queued>4){fail();return;}chain=chain.then(async()=>{guard(!ended);stable();const result=await app.receive(Buffer.from(bytes));
-    for(const body of result.messages){guard(!ended&&ws.readyState===WebSocket.OPEN&&ws.bufferedAmount+body.length<=limit&&body.length<=limit);stable();result.beforeSend();ws.send(body,{binary:false});}
+    sendResponse(result);
     clearTimeout(timer);
     await pump();
    }).catch(fail).finally(()=>{queued--;});});

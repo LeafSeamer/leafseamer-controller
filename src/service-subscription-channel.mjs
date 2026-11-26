@@ -9,13 +9,25 @@ const written=result=>need(result.changes===1,'storage');
 const activeStates=['building','snapshot_ready','catching_up','live'];
 const flowing=state=>state==='catching_up'||state==='live';
 const deliveryMode=view=>view.state==='live'?'live':'reconcile';
-export function subscriptionChannels({db,service,bootId,writer,sweep,read,revision,check,snapshots,durationSample,scopeCurrent}){
+export function subscriptionChannels({db,service,bootId,writer,sweep,read,revision,check,snapshots,checkHuman,durationSample,scopeCurrent}){
  const channels=new WeakMap(),live=new Map();
  const reconcile=Number(service.schema_revision)>=71?subscriptionReconcile(db):null;
  function entry(handle){const channel=channels.get(handle);need(channel&&live.has(channel.id),'connection');return channel;}
  function head(key){return db.prepare('SELECT a.attempt_id,a.connection_id,a.generation,a.response_jcs FROM service_subscription_attempt a JOIN service_subscription_connection h USING(subscription_id,attempt_id) WHERE a.subscription_id=?').raw().get(key);}
- function current(row){return !!row&&live.has(row[1])&&!db.prepare('SELECT 1 FROM service_subscription_disconnect WHERE connection_id=?').pluck().get(row[1]);}
- function authorized(channel,saved,active=true){need(saved.view.owner.kind==='service','not_found');const proof=check(channel.binding,channel.socket,saved.creation.request);need(!proof.denied&&same(proof.owner,saved.view.owner),'not_found');if(active)need(activeStates.includes(saved.view.state),'state');return proof;}
+ function current(row){
+  const channel=row&&live.get(row[1]);
+  return !!channel&&!(channel.human&&channel.socket.destroyed)&&!db.prepare('SELECT 1 FROM service_subscription_disconnect WHERE connection_id=?').pluck().get(row[1]);
+ }
+ function authorized(channel,saved,active=true){
+  if(channel.human){need(!channel.socket.destroyed&&saved.view.owner.kind==='human','connection');checkHuman(channel.human,saved);return;}
+  need(saved.view.owner.kind==='service','not_found');
+  const proof=check(channel.binding,channel.socket,saved.creation.request);
+  need(!proof.denied&&same(proof.owner,saved.view.owner),'not_found');if(active)need(activeStates.includes(saved.view.state),'state');return proof;
+ }
+ function open(channel){
+  need([...live.values()].filter(value=>!!value.human===!!channel.human).length<16&&!live.has(channel.id),'capacity');
+  const handle=Object.freeze({});channels.set(handle,channel);live.set(channel.id,channel);return handle;
+ }
  function attached(saved){return {schema_version:'event-channel/0.1.0-draft.1',type:'server.attached',binding:saved.view.binding,state:saved.view.state,snapshot_ref:saved.view.snapshot_ref,ack_cursor:saved.view.ack_cursor,ack_payload_digest:saved.view.ack_payload_digest};}
  function release(channel){need(channel.subscription,'connection');const saved=read(channel.subscription);authorized(channel,saved);const row=head(channel.subscription);need(current(row)&&row[1]===channel.id&&row[2]===saved.view.binding.connection_generation,'generation');return saved;}
  function deliveryFrame(view,value){
@@ -47,7 +59,8 @@ export function subscriptionChannels({db,service,bootId,writer,sweep,read,revisi
    const registration=scopeCurrent(saved.creation.authorization.scope_ref).registration,snapshot=snapshots.lease(saved),clock=durationSample();
    const value=snapshotContext({saved,input,bootId,registration,snapshot,clock});return original?checkSnapshotContext(original,value):value;
   });},
-  open(binding,socket){const handle=Object.freeze({}),channel={id:crypto.randomUUID(),binding,socket,subscription:null};need(live.size<16,'capacity');channels.set(handle,channel);live.set(channel.id,channel);return handle;},
+  open(binding,socket){return open({id:crypto.randomUUID(),binding,socket,subscription:null});},
+  openHuman(grant,socket){need(checkHuman,'connection');return open({id:grant.original.binding.channel.binding_id,human:grant,socket,subscription:null});},
   attach(handle,input){const channel=entry(handle);writer(sweep);return writer(()=>{const saved=read(input.subscription_id);authorized(channel,saved);const binding=saved.view.binding;
    need(same(input.owner,saved.view.owner)&&['stream_id','stream_epoch','scope_digest','authorization_revision'].every(key=>input[key]===binding[key]),'binding');
    if(input.resume===null)need(['building','snapshot_ready'].includes(saved.view.state),'resume_unavailable');
@@ -70,7 +83,8 @@ export function subscriptionChannels({db,service,bootId,writer,sweep,read,revisi
    else{
     need(!channel.subscription,'conflict');
     need(input.expected_connection_generation===binding.connection_generation&&(!current(prior)||input.replace_existing),'conflict');
-    need(db.prepare('SELECT count(*) FROM service_subscription_attempt').pluck().get()<16384&&db.prepare('SELECT count(*) FROM service_subscription_attempt WHERE subscription_id=?').pluck().get(input.subscription_id)<1024,'capacity');
+    need(db.prepare('SELECT count(*) FROM service_subscription_attempt JOIN service_event_subscription USING(subscription_id) WHERE purpose=?').pluck().get(saved.view.purpose)<16384&&
+     db.prepare('SELECT count(*) FROM service_subscription_attempt WHERE subscription_id=?').pluck().get(input.subscription_id)<1024,'capacity');
     const generation=String(BigInt(binding.connection_generation)+1n);need(BigInt(generation)<=18446744073709551615n,'capacity');
     const view={...saved.view,state:input.resume===null?saved.view.state:'catching_up',revision:String(Number(saved.view.revision)+1),binding:{...binding,connection_generation:generation}};response=attached({view});
     written(db.prepare('INSERT INTO service_subscription_attempt VALUES(?,?,?,?,?,?,?,?)').run(input.subscription_id,input.connection_attempt_id,channel.id,generation,digest(input),canonical(response),Number(view.revision),bootId));
@@ -79,7 +93,8 @@ export function subscriptionChannels({db,service,bootId,writer,sweep,read,revisi
     if(input.resume!==null)reconcile?.follow(input.subscription_id,generation);
    }
    authorized(channel,read(input.subscription_id));channel.subscription=input.subscription_id;
-   return {ready:{type:'contract.ready',channel:{binding_id:channel.id,selection,publisher_service_id:service.service_id,publisher_database_instance_id:service.database_instance_id,service_boot_id:bootId,owner:saved.view.owner,subscription_id:null,transport:'service_mtls'}},attached:response};
+   const channelView=channel.human?.original.binding.channel??{binding_id:channel.id,selection,publisher_service_id:service.service_id,publisher_database_instance_id:service.database_instance_id,service_boot_id:bootId,owner:saved.view.owner,subscription_id:null,transport:'service_mtls'};
+   return {ready:{type:'contract.ready',channel:channelView},attached:response};
   });},
   applied(handle,input){need(Number(service.schema_revision)>=70,'baseline_unavailable');const channel=entry(handle);writer(sweep);return writer(()=>{
    const saved=release(channel);need(same(input.binding,saved.view.binding)&&same(input.snapshot,saved.view.snapshot_ref),'binding');
@@ -110,7 +125,7 @@ export function subscriptionChannels({db,service,bootId,writer,sweep,read,revisi
    const channel=entry(handle);writer(sweep);
    return writer(()=>{
     const saved=release(channel),view=saved.view;
-    if(!flowing(view.state))return null;
+    if(view.purpose!=='canonical_trigger'||!flowing(view.state))return null;
     const next=String(BigInt(view.ack_cursor)+1n);
     if(db.prepare('SELECT 1 FROM service_subscription_transmitted WHERE subscription_id=? AND connection_generation=? AND cursor=?')
      .pluck().get(channel.subscription,view.binding.connection_generation,next))return null;
@@ -156,7 +171,7 @@ export function subscriptionChannels({db,service,bootId,writer,sweep,read,revisi
    return writer(()=>{
     const {view}=release(channel);
     need(input.type==='client.ack'&&input.schema_version==='event-channel/0.1.0-draft.1'&&input.ack_kind==='durable_ingest'&&
-     flowing(view.state)&&same(view.binding,input.binding),'ack_binding');
+     view.purpose==='canonical_trigger'&&flowing(view.state)&&same(view.binding,input.binding),'ack_binding');
     const sent=db.prepare(`SELECT d.body_digest,d.checkpoint_generation FROM service_subscription_transmitted s
      JOIN service_subscription_delivery d USING(subscription_id,cursor)
      WHERE s.subscription_id=? AND s.connection_generation=? AND s.cursor=?`).raw().get(channel.subscription,view.binding.connection_generation,input.cursor);
@@ -177,13 +192,28 @@ export function subscriptionChannels({db,service,bootId,writer,sweep,read,revisi
     return next;
    });
   },
-  check(handle){const channel=entry(handle);writer(sweep);return writer(()=>release(channel).view);},
+  check(handle){const channel=entry(handle);if(!channel.human)writer(sweep);return writer(()=>release(channel).view);},
   // 仅用于紧随全局失效扫描的连接回收，不是内容释放门。
   poll(handle){const channel=entry(handle);return writer(()=>{need(channel.subscription,'connection');const saved=read(channel.subscription),row=head(channel.subscription);need(activeStates.includes(saved.view.state)&&current(row)&&row[1]===channel.id,'generation');return saved.view.state==='live';});},
   close(handle){const channel=channels.get(handle);if(!channel||!live.delete(channel.id))return;
    if(channel.subscription)writer(()=>{if(db.prepare('SELECT 1 FROM service_subscription_attempt WHERE connection_id=?').pluck().get(channel.id)&&!db.prepare('SELECT 1 FROM service_subscription_disconnect WHERE connection_id=?').pluck().get(channel.id))written(db.prepare('INSERT INTO service_subscription_disconnect VALUES(?)').run(channel.id));});
   },
   attempt(binding,socket,key,attemptId){writer(sweep);return writer(()=>{const saved=read(key);authorized({binding,socket},saved,false);const row=db.prepare('SELECT connection_id,response_jcs FROM service_subscription_attempt WHERE subscription_id=? AND attempt_id=?').raw().get(key,attemptId);need(row,'not_found');const latest=head(key);return {subscription_id:key,connection_attempt_id:attemptId,attached:JSON.parse(row[1]),current:activeStates.includes(saved.view.state)&&current(latest)&&latest[0]===attemptId};});},
+  humanAttempt(saved,attemptId){
+   const key=saved.view.binding.subscription_id,latest=head(key);
+   const row=db.prepare('SELECT response_jcs FROM service_subscription_attempt WHERE subscription_id=? AND attempt_id=?').pluck().get(key,attemptId);need(row,'not_found');
+   let accepted=false;
+   if(activeStates.includes(saved.view.state)&&current(latest)&&latest[0]===attemptId){
+    try{authorized(live.get(latest[1]),saved);accepted=true;}
+    catch(error){if(!(error instanceof IdentityError)&&error.name!=='ClockError')throw error;}
+   }
+   return {subscription_id:key,connection_attempt_id:attemptId,attached:JSON.parse(row),current:accepted};
+  },
+  humanSnapshot(saved,generation,page=null){
+   const latest=head(saved.view.binding.subscription_id);
+   need(generation!=='0'&&current(latest)&&latest[2]===generation&&saved.view.binding.connection_generation===generation,'generation');
+   authorized(live.get(latest[1]),saved);need(saved.view.state==='snapshot_ready','state');return snapshots.content(saved,page);
+  },
   snapshot(binding,socket,key,generation,page=null){writer(sweep);return writer(()=>{const saved=read(key);authorized({binding,socket},saved);const latest=head(key);need(generation!=='0'&&generation===saved.view.binding.connection_generation&&current(latest)&&latest[2]===generation,'generation');need(saved.view.state==='snapshot_ready','state');return snapshots.content(saved,page);});}
  });
 }

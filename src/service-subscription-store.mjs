@@ -6,6 +6,7 @@ import {serviceSnapshotStore} from './service-snapshot-store.mjs';
 import {subscriptionChannels} from './service-subscription-channel.mjs';
 import {withExecutionReadView} from './execution-read-view.mjs';
 import {readDeviceSourceTime} from './device-event-source.mjs';
+import {humanSubscriptionTickets} from './human-subscription-ticket.mjs';
 const activeStates=['building','snapshot_ready','catching_up','live'];
 const need=(ok,reason)=>{if(!ok)throw new IdentityError('subscription_'+reason);};
 const fields=(value,keys)=>need(value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join(',')===keys.split(',').sort().join(','),'input');
@@ -71,6 +72,14 @@ export function serviceSubscriptionStore({db,service,bootId,writer,time,authoriz
   revision(view,'created');return view;
  }
  function expectedRevision(value){need(typeof value==='string'&&/^[1-9][0-9]{0,4}$/.test(value)&&Number(value)<=65536,'revision');}
+ const tickets=humanAuthority&&Number(service.schema_revision)>=115?
+  humanSubscriptionTickets({db,service,bootId,writer,read,time,domain,authority:humanAuthority,checkCurrent}):null;
+ function verifyHumanOwner(token,key,csrf,write){
+  const proof=humanAuthority.authenticate(token,csrf,write);if(proof.denied)return proof;
+  const saved=read(key),owner=saved.view.owner;
+  need(owner.kind==='human'&&same(humanAuthority.owner(proof,owner.client_instance_id),owner),'not_found');
+  sourceCheck(()=>humanAuthority.current(saved.creation.authorization));return saved;
+ }
  const human=humanAuthority&&Object.freeze({
   create(token,csrf,input){
    fields(input,'context_id,idempotency_key,client_instance_id,purpose,scope');
@@ -83,7 +92,7 @@ export function serviceSubscriptionStore({db,service,bootId,writer,time,authoriz
     if(old){sourceCheck(()=>humanAuthority.current(old.creation.authorization));return {status:200,view:old.view};}
     const proof=sourceCheck(()=>humanAuthority.createProof(actor,request)),slotKey=digest([actor.session_id,request.scope.scope_id]);
     capacity(request.purpose,slotKey);
-    const context=humanAuthority.consumeContext(token,request.context_id);if(context.denied)return context;
+    const context=humanAuthority.consumeContext(token,request.context_id,'createSubscription');if(context.denied)return context;
     const view=createRevision({request,requestId,proof,ownerKey,slotKey,auth:proof.authorization,authorizationRevision:actor.policy_revision});
     const last=humanAuthority.authenticate(token,csrf,true);
     need(!last.denied&&same(humanAuthority.owner(last,request.client_instance_id),owner)&&last.policy_revision===actor.policy_revision,'authorization_changed');
@@ -93,17 +102,28 @@ export function serviceSubscriptionStore({db,service,bootId,writer,time,authoriz
   access(token,key,close=null){
    id(key);if(close!==null){fields(close,'expected_revision,csrf');expectedRevision(close.expected_revision);}
    return denied(writer(()=>{
-    sweep();const proof=humanAuthority.authenticate(token,close?.csrf,close!==null);if(proof.denied)return proof;
-    const saved=read(key),owner=saved.view.owner;
-    need(owner.kind==='human'&&same(humanAuthority.owner(proof,owner.client_instance_id),owner),'not_found');
-    sourceCheck(()=>humanAuthority.current(saved.creation.authorization));
+    sweep();const saved=verifyHumanOwner(token,key,close?.csrf,close!==null);if(saved.denied)return saved;
     if(close===null)return {status:200,view:saved.view};
     if(saved.view.state==='closed'&&[saved.view.revision,String(Number(saved.view.revision)-1)].includes(close.expected_revision))return {status:200,view:saved.view};
     need(activeStates.includes(saved.view.state),'gone');
     need(saved.view.revision===close.expected_revision,'revision');
     return {status:200,view:terminate(saved,'closed')};
    }));
-  }
+  },
+  ...(tickets&&{
+   readSnapshot(token,key,generation,page){
+    return denied(writer(()=>{
+     const saved=verifyHumanOwner(token,key);if(saved.denied)return saved;
+     return {view:channels.humanSnapshot(saved,generation,page)};
+    })).view;
+   },
+   readAttempt(token,key,attempt){
+    return denied(writer(()=>{
+     const saved=verifyHumanOwner(token,key);if(saved.denied)return saved;
+     return {view:channels.humanAttempt(saved,attempt)};
+    })).view;
+   }
+  })
  });
  function permitsSource(binding,socket,evidence){
   const keys=db.prepare(`SELECT p.subscription_id FROM service_event_subscription_pin p
@@ -122,9 +142,10 @@ export function serviceSubscriptionStore({db,service,bootId,writer,time,authoriz
   }
   return false;
  }
- const channels=Number(service.schema_revision)>=69?subscriptionChannels({db,service,bootId,writer,sweep,read,revision,check,snapshots,durationSample,scopeCurrent:typeof scopeCurrent==='function'?ref=>sourceCheck(()=>scopeCurrent(ref)):null}):null;
+ const channels=Number(service.schema_revision)>=69?subscriptionChannels({db,service,bootId,writer,sweep,read,revision,check,snapshots,checkHuman:tickets?.check,
+  durationSample,scopeCurrent:typeof scopeCurrent==='function'?ref=>sourceCheck(()=>scopeCurrent(ref)):null}):null;
  return Object.freeze({
-  channels,human,
+  channels,human,tickets,
   sourceTime(binding,socket,reference){
    if(Number(service.schema_revision)<94)return null;
    return writer(()=>{
