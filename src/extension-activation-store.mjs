@@ -10,16 +10,25 @@ const exact=(value,keys)=>value&&Object.keys(value).sort().join(',')===keys.spli
 const id=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\s\S])/.test(value);
 const frozen=value=>{if(value&&typeof value==='object'){Object.values(value).forEach(frozen);Object.freeze(value);}return value;};
 const actor=proof=>({principal_id:proof.principal_id,session_id:proof.session_id,credential_id:proof.credential_id,issuer_id:proof.issuer_id,issuer_epoch:proof.issuer_epoch});
-const read=cacheVerifiedDocument((text,digest)=>{const value=JSON.parse(text);need(canonicalize(value)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===digest,'integrity');return value;});
+const read=cacheVerifiedDocument((text,digest)=>{const value=JSON.parse(text);need(canonicalize(value)===text&&'sha256:'+crypto.createHash('sha256').update(text).digest('hex')===digest,'integrity');return value;},{immutable:true});
 
 // 只受理当前人员确认的计划并占用资源；accepted不等于active_closed或启动授权。
 export function extensionActivationStore({db,service,bootId,available,reference,launch,plans}){
  let pending=0;
+ const schema=Number(service.schema_revision);
+ const activationForInstallation=db.prepare(`SELECT operation_id,service_boot_id,body_jcs,body_digest,graph_jcs,graph_digest,slot_id,slot_revision
+  FROM extension_activation WHERE installation_id=?`).raw();
+ const currentSlot=db.prepare(`SELECT r.body_jcs,r.body_digest FROM extension_slot_head h
+  JOIN extension_slot_revision r USING(slot_id,revision) WHERE h.slot_id=? AND h.revision=?`).raw();
+ const ownedResources=db.prepare(`SELECT o.resource_ref_jcs FROM extension_resource_owner o
+  JOIN extension_resource_owner_head h USING(owner_id,resource_id) WHERE o.operation_id=? ORDER BY o.resource_id COLLATE BINARY`).pluck();
+ const preparedLaunch=db.prepare('SELECT intent_digest,service_boot_id FROM worker_launch_preparation WHERE activation_operation_id=? AND launch_id=?').raw();
+ const previousLaunch=db.prepare('SELECT 1 FROM worker_launch_preparation WHERE activation_operation_id=? LIMIT 1').pluck();
  function prior(fixed){
   const row=db.prepare('SELECT input_jcs,input_digest,operation_id FROM extension_activation WHERE credential_id=? AND request_id=?').raw().get(fixed.actor.credential_id,fixed.request_id);
   if(!row)return null;need(same(read(row[0],row[1]),fixed),'conflict');return result(row[2]);
  }
- function result(operation){const row=db.prepare('SELECT result_jcs,result_digest FROM extension_operation WHERE operation_id=?').raw().get(operation);need(row,'integrity');return frozen(read(row[0],row[1]));}
+ function result(operation){const row=db.prepare('SELECT result_jcs,result_digest FROM extension_operation WHERE operation_id=?').raw().get(operation);need(row,'integrity');return read(row[0],row[1]);}
  function selection(request,kind){
   const value=plans.validateForAcceptance(request.dependency_plan_ref),{plan}=value;
   need(plan.selection.kind===kind&&plan.slot_ref.object_id===request.slot_id&&plan.slot_ref.revision===request.expected_slot_revision&&
@@ -31,17 +40,16 @@ export function extensionActivationStore({db,service,bootId,available,reference,
  }
  function forLaunch(intent){
   need(db.inTransaction,'writer_required');const binding=intent.extension_binding;
-  const row=db.prepare('SELECT operation_id,service_boot_id,body_jcs,body_digest,graph_jcs,graph_digest,slot_id,slot_revision FROM extension_activation WHERE installation_id=?').raw().get(binding.installation_ref.object_id);
-  const schema=Number(service.schema_revision);
+  const row=activationForInstallation.get(binding.installation_ref.object_id);
   need(row&&(row[1]===bootId||schema>=107),'required');const body=read(row[2],row[3]),graph=read(row[4],row[5]);
   need(same(body.approval_ref,binding.approval_ref)&&same(body.target_installation_ref,binding.installation_ref),'binding');
-  const slot=db.prepare('SELECT r.body_jcs,r.body_digest FROM extension_slot_head h JOIN extension_slot_revision r USING(slot_id,revision) WHERE h.slot_id=? AND h.revision=?').raw().get(row[6],row[7]);
+  const slot=currentSlot.get(row[6],row[7]);
   need(slot,'slot_changed');const current=read(slot[0],slot[1]);need(current.desired_state==='enabled'&&same(current.pending_operation_ref,body.operation_ref),'slot_changed');
-  const held=db.prepare('SELECT o.resource_ref_jcs FROM extension_resource_owner o JOIN extension_resource_owner_head h USING(owner_id,resource_id) WHERE o.operation_id=? ORDER BY o.resource_id COLLATE BINARY').pluck().all(row[0]);
+  const held=ownedResources.all(row[0]);
   const expected=[...graph.resources].sort((a,b)=>a.object_id<b.object_id?-1:1);need(same(held.map(value=>JSON.parse(value)),expected),'owner_changed');
-  const existing=db.prepare('SELECT intent_digest,service_boot_id FROM worker_launch_preparation WHERE activation_operation_id=? AND launch_id=?').raw().get(row[0],intent.launch_id);
+  const existing=preparedLaunch.get(row[0],intent.launch_id);
   if(existing){need(existing[0]===hash(intent)&&existing[1]===bootId,'launch_used');return {id:row[0],replacement:null};}
-  const used=db.prepare('SELECT 1 FROM worker_launch_preparation WHERE activation_operation_id=? LIMIT 1').pluck().get(row[0]);
+  const used=previousLaunch.get(row[0]);
   if(!used){need(row[1]===bootId,'required');return {id:row[0],replacement:null};}
   need(schema>=106,'launch_used');
   return {id:row[0],replacement:selectObsLaunchReplacement(db,row[0],intent,bootId,schema>=107)};
@@ -53,7 +61,7 @@ export function extensionActivationStore({db,service,bootId,available,reference,
   need(row&&row[2]===bootId,'required');
   const body=read(row[0],row[1]);
   need(body.phase==='accepted'&&same(body.operation_ref,reference),'operation_reference');
-  return body;
+  return structuredClone(body);
  }
  return Object.freeze({forLaunch,accepted,management(authorize){return Object.freeze({
   async accept(token,kind,input){
