@@ -116,13 +116,14 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
     }
   }
   let server, localPairingServer, referenceTimePolls = null, referenceSchedule = null, referencePublication = null, referenceWatcher = null, peerTransport = null;
-  let endorsementRevocationDelivery = null, runProtectionDelivery = null, closing = false;
+  let endorsementRevocationDelivery = null, runProtectionDelivery = null, humanSubscriptionMonitor = null, closing = false;
   const closeHttp = listener => !listener?.listening ? Promise.resolve() : new Promise((resolve, reject) => {
     listener.close(error => error ? reject(error) : resolve()); listener.closeAllConnections();
   });
   const cleanup = async () => {
     closing = true;
     clearInterval(referenceWatcher);
+    clearInterval(humanSubscriptionMonitor);
     const scheduleStopped=referenceSchedule?.close();
     if(referenceSchedule) timeProviderLink.quiesce();
     let referenceFailure;
@@ -369,6 +370,13 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
   }
   supervision?.onLost(() => closeFor('supervisor_lost'));
   timeProviderLink?.onLost(() => closeFor('provider_lost'));
+  if(!closing&&!peerTransport&&sessions?.serviceSubscriptions?.human){
+    humanSubscriptionMonitor=setInterval(()=>{
+      try{assertRuntimeCurrent();sessions.serviceSubscriptions.sweep();}
+      catch{closeFor('subscription_authority_unavailable');}
+    },250);
+    humanSubscriptionMonitor.unref();
+  }
   if(!closing && (referencePublication?.invalidate || (supervision && storage.reconcileReferenceProtection))){
     let timeProtection=null;
     referenceWatcher=setInterval(()=>{

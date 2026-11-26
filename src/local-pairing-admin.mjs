@@ -75,7 +75,7 @@ async function runLocalAdmin({origin, caFile, input}, {route,operations,prefix})
     try { value = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(response.bytes)); }
     catch { throw new LocalPairingError(prefix+(response.status === 200 ? '_response' : '_rejected')); }
     if (response.status !== 200) {
-      const errors=route===localPairingPath?/^(?:peer_pairing|local_pairing|remote_authorization|event_scope|service_identity|service_consumer|service_token|run_endorsement)_[a-z_]{1,60}$/:
+      const errors=route===localPairingPath?/^(?:peer_pairing|local_pairing|remote_authorization|event_scope|service_identity|service_consumer|service_token|run_endorsement|subscription)_[a-z_]{1,60}$/:
         /^(?:local_extension|extension|worker_launch|worker_authorization)_[a-z_]{1,65}$/;
       throw new LocalPairingError(typeof value?.error === 'string' && errors.test(value.error)?value.error:prefix+'_rejected');
     }

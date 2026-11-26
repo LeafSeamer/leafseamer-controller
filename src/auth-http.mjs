@@ -14,6 +14,7 @@ const routes = new Map([
   ['/api/v1/request-contexts', 'POST'],
   ['/api/v1/commands', 'POST'], ['/api/v1/commands/lookup', 'POST'], ['/api/v1/commands/reject', 'POST'],
   ['/api/v1/devices', 'GET'],
+  ['/api/v1/subscriptions', 'POST'],
 ]);
 const maximumBody = 16384, maximumPending = 16, bodyDeadline = 2000;
 const commandReads=['getCommand','getCommandEvidence','getCommandEvidenceRevision'];
@@ -21,6 +22,10 @@ const commandOperations = ['submitCommand', 'lookupCommandAdmission', 'rejectCom
 const controlWrites=['acquireControl','releaseControl','offerTransfer','acceptTransfer','cancelTransfer'];
 const controlOperations=['getControl','getControlOperation','getTransfer','lookupControlRequest',...controlWrites];
 const deviceCatalogReads = ['getCapabilities','getSceneCatalog'];
+const subscriptionOperations = ['createSubscription','getSubscription','closeSubscription'];
+const subscriptionItem = /^\/api\/v1\/subscriptions\/[^/]+$/;
+const subscriptionCodes={400:'invalid_request',401:'authentication_required',403:'forbidden',404:'not_found_or_invisible',
+  409:'conflict',410:'gone',413:'payload_too_large',429:'capacity_exceeded',503:'source_unavailable'};
 const readOperations = ['getSession', 'listDevices', ...deviceCatalogReads, 'getControl','getControlOperation','getTransfer',...commandReads];
 const rawPairs = flat => Array.from({length: flat.length / 2}, (_, i) => [flat[2 * i], flat[2 * i + 1]]);
 const credentialPattern = /^v1\.([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([A-Za-z0-9_-]{43})$/;
@@ -105,6 +110,20 @@ function failure(error) {
   return [503, 'CRITICAL_STORAGE_UNAVAILABLE'];
 }
 
+function subscriptionFailure(error) {
+  const code=error?.code??'';
+  if (error?.name==='ClockError'||code==='event_scope_unavailable') return 503;
+  if (['token_invalid','token_expired','token_time_invalid','session_invalid','session_expired'].includes(code)) return 401;
+  if (['subscription_conflict','subscription_slot_busy','subscription_revision','subscription_changed'].includes(code)) return 409;
+  if (['subscription_gone','subscription_expired','request_context_closed','request_context_expired','event_scope_inactive'].includes(code)) return 410;
+  if (code==='subscription_not_found') return 404;
+  if (code==='subscription_capacity') return 429;
+  if (code==='subscription_input') return 400;
+  if (['subscription_forbidden','subscription_revoked','subscription_authorization_changed','event_scope_missing','event_scope_scope',
+    'http_tls','http_origin','request_context_denied','request_context_permission','local_authorization_denied','local_authorization_parent'].includes(code)) return 403;
+  return 503;
+}
+
 // origin与sessions只能由可信本地启动装配。代理身份头不能开启认证入口。
 export function createAuthenticationHttp({serviceId, databaseInstanceId, serviceBootId, sessions = null, origin = null, onFailure = null, localPairing = null, localExtension = null}) {
   const adapter = createHttpAdapter(selection);
@@ -125,7 +144,9 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
     // 命令裁决契约使用具名原结果及独立Error，不能套用身份信封。
     const commandError = {400: 'invalid', 401: 'unauthenticated', 403: 'forbidden', 409: 'conflict', 413: 'invalid', 422: 'invalid', 429: 'capacity', 503: 'unavailable'};
     const readError={400:'invalid',401:'unauthenticated',403:'forbidden',404:'not_found',413:'payload_too_large',422:'invalid_semantics',429:'capacity',503:'unavailable'};
-    const body = Buffer.from(JSON.stringify(commandReads.includes(request.operation_id)?
+    const subscription = subscriptionOperations.includes(request.operation_id);
+    const body = Buffer.from(JSON.stringify(subscription ?
+      (code ? {code:subscriptionCodes[status],request_id:requestId,retry_action:status===409?'read_current':'do_not_retry'} : data) : commandReads.includes(request.operation_id)?
       (code?{code:readError[status]??'unavailable',request_id:requestId,retry_action:'read_current'}:data):controlOperations.includes(request.operation_id) ?
       (code ? {code, message: code.toLowerCase(), retry_instruction: 'query_original'} : data) : commandOperations.includes(request.operation_id) ?
       (code ? {code: commandError[status] ?? 'unavailable', request_id: requestId} : data) : envelope));
@@ -181,6 +202,16 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
           sessions[operation](proof, request.parameters.path.device_id);
         const data = view();
         await reply(res, request, 200, null, {data, beforeSend() { if (canonical(view()) !== canonical(data)) reject(deviceCatalogReads.includes(operation) ? 'device_capabilities_changed' : 'device_registry_integrity'); }});
+      } else if(subscriptionOperations.includes(operation)){
+        const subscriptions=sessions.serviceSubscriptions?.human;
+        if(!subscriptions)reject('subscription_unavailable');
+        const proof=tokenInput(req),csrf=req.headers['x-csrf-token'];
+        const result=operation==='createSubscription'?subscriptions.create(proof,csrf,body):
+          subscriptions.access(proof,request.parameters.path.subscription_id,operation==='closeSubscription'?{expected_revision:request.parameters.query.expected_revision,csrf}:null);
+        const data=result.view;
+        await reply(res,request,result.status,null,{data,beforeSend(){
+          if(canonical(subscriptions.access(proof,data.binding.subscription_id).view)!==canonical(data))reject('subscription_changed');
+        }});
       } else if(controlOperations.includes(operation)){
         const proof=tokenInput(req),parameters=request.parameters.path;
         if(!readOperations.includes(operation)){
@@ -222,6 +253,7 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
     } catch (error) {
       // 可信本机装配只接收分类，不传递凭据、请求正文或异常全文；观察失败不改变HTTP结果。
       try{onFailure?.({operation_id:operation,error_name:error?.name??'Error',code:error instanceof WireError?error.reason:error?.code??'http_internal'});}catch{}
+      if(subscriptionOperations.includes(operation)){await reply(res,request,subscriptionFailure(error),'subscription_error');return;}
       const [status, code] = failure(error);
       await reply(res, request, status, code, {extraHeaders: status === 401 && operation !== 'getSession' ? [clearCookie] : []});
     }
@@ -296,6 +328,8 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
         const status = /_management(?:_changed)?$/.test(error.code) ? 403 :
           ['peer_pairing_input', 'remote_authorization_request'].includes(error.code) ? 422 : 409;
         respond(status, {error: error.code});
+      } else if (!extension&&/^subscription_[a-z_]{1,50}$/.test(error.code)) {
+        respond(subscriptionFailure(error),{error:error.code});
       } else if (!extension&&/^(?:event_scope|service_identity|service_consumer|service_token|run_endorsement)_[a-z_]{1,60}$/.test(error.code)) {
         const status=/_management(?:_denied|_changed)?$/.test(error.code)||['run_endorsement_permission','run_endorsement_recent'].includes(error.code)?403:
           /_(?:input|request)$/.test(error.code)?422:/_capacity$/.test(error.code)?429:
@@ -312,10 +346,10 @@ export function createAuthenticationHttp({serviceId, databaseInstanceId, service
       void serveLocalManagement(req, res, true).catch(() => empty(res, 503)); return true;
     }
     const pathname = req.url?.split('?')[0];
-    const method = routes.get(pathname) ?? (/^\/api\/v1\/commands\/[^/]+(?:\/evidence(?:\/[^/]+\/revisions\/[^/]+)?)?$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/(?:control|capabilities|scene-catalog)$/.test(pathname)||/^\/api\/v1\/control-operations\/[^/]+$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+$/.test(pathname)?'GET':
+    const method = routes.get(pathname) ?? (subscriptionItem.test(pathname)?'GET, DELETE':/^\/api\/v1\/commands\/[^/]+(?:\/evidence(?:\/[^/]+\/revisions\/[^/]+)?)?$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/(?:control|capabilities|scene-catalog)$/.test(pathname)||/^\/api\/v1\/control-operations\/[^/]+$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+$/.test(pathname)?'GET':
       /^\/api\/v1\/devices\/[^/]+\/control\/(acquire|release|transfers)$/.test(pathname)||/^\/api\/v1\/devices\/[^/]+\/control\/transfers\/[^/]+\/(accept|cancel)$/.test(pathname)||pathname==='/api/v1/control-requests/lookup'?'POST':null);
     if (!method) return false;
-    if (req.method !== method) { empty(res, 405, {Allow: method}); return true; }
+    if (!method.split(', ').includes(req.method)) { empty(res, 405, {Allow: method}); return true; }
     void serve(req, res).catch(() => empty(res, 503)); return true;
   }});
 }

@@ -19,7 +19,7 @@ const written=r=>need(r.changes===1,'storage');
 const unpack=(text,hash)=>{const v=checked(JSON.parse(text));need(canonicalize(v)===text&&v.digest===hash,'integrity');return v;};
 const deliver=v=>{if(v.denied)throw new IdentityError(v.denied);return v;};
 // 核心内部人员管理入口。服务主体不建立人员会话，凭据激活不授予设备执行许可。
-export function serviceIdentityStore({db,service,bootId,writer,time,authenticated,authority,coreSource=null,attachEvaluatorCurrent,pairings=()=>null,eventScopes=null,durationSample=null,deviceAutomationCurrent=null,pairingSample=null,authorizeEndorsement=null,authorizeArmInitiator=null,automationExecution=null}){
+export function serviceIdentityStore({db,service,bootId,writer,time,authenticated,authority,coreSource=null,attachEvaluatorCurrent,pairings=()=>null,eventScopes=null,durationSample=null,deviceAutomationCurrent=null,pairingSample=null,authorizeEndorsement=null,authorizeArmInitiator=null,automationExecution=null,humanAuthority=null}){
  const invalidVerifier=crypto.randomBytes(32),attempts=new Map();let globalStart=0n,globalCount=0;
  function management(input,permission,work){return deliver(writer(()=>{
   const now=time(),found=authenticated(input,now);if(found.denied)return found;
@@ -249,6 +249,7 @@ export function serviceIdentityStore({db,service,bootId,writer,time,authenticate
     return management(input,'auth.manage',()=>eventScopes.revoke(request.scope_ref));
    }
   }),
+  ...(humanAuthority&&{setStatusScopeReader:(input,request)=>management(input,'auth.manage',actor=>humanAuthority.setReader(actor,request))}),
   approveSubscriptionServicePrincipal:(input,request)=>approvePrincipal(input,request,'subscription'),
   approveAutomationServicePrincipal:(input,request)=>approvePrincipal(input,request,'automation'),
   currentAutomationServiceApproval:(bindingId,socket,request)=>writer(()=>currentAutomationApproval(bindingId,socket,request)),
@@ -257,7 +258,8 @@ export function serviceIdentityStore({db,service,bootId,writer,time,authenticate
   currentServiceConsumerInTransaction:currentConsumer,
   authorizeServiceSubscription:(bindingId,socket,request)=>deliver(writer(()=>authorizeSubscription(bindingId,socket,request))),
   authorizeServiceSubscriptionInTransaction:authorizeSubscription,
-  serviceSubscriptions:Number(service.schema_revision)>=66?serviceSubscriptionStore({db,service,bootId,writer,time,authorize:authorizeSubscription,currentAuthorization:currentSubscription,domain:()=>coreSource.domain(),sourceCut:ref=>eventScopes.snapshotCut(ref),durationSample,scopeCurrent:ref=>eventScopes.currentInTransaction(ref)}):null,
+  serviceSubscriptions:Number(service.schema_revision)>=66?serviceSubscriptionStore({db,service,bootId,writer,time,authorize:authorizeSubscription,currentAuthorization:currentSubscription,
+   humanAuthority,domain:()=>coreSource.domain(),sourceCut:ref=>eventScopes.snapshotCut(ref),durationSample,scopeCurrent:ref=>eventScopes.currentInTransaction(ref)}):null,
   ...(Number(service.schema_revision)>=38?deviceEvaluatorSource({db,service,writer,time,management,principal,approval,credential,allowed,expired,authenticateCredential,coreSource,attachCurrent:attachEvaluatorCurrent}):{}),
   ...serviceTokens,
   createServicePrincipal(input,request){fields(request,'request_id,display_name,purpose');

@@ -8,6 +8,7 @@ import {commandAdmissionStore} from './command-admission-store.mjs';
 import {commandLifecycle} from './command-lifecycle.mjs';
 import {automationCommandExecutionSource,commandEncodingSource} from './command-encoding-source.mjs';
 import {deviceRegistryReader} from './device-registry-store.mjs';
+import {humanSubscriptionAuthority} from './human-subscription-authorization.mjs';
 import {deviceControlStore} from './device-control-store.mjs';
 import {manualExecutionAuthority} from './device-manual-authority.mjs';
 import {serviceIdentityStore} from './service-identity-store.mjs';
@@ -158,9 +159,11 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
   if(Number(contextBinding?.service.schema_revision)>=51&&attachEncodingSource&&controlBarrier&&executionCurrent)
     attachEncodingSource(commandEncodingSource({db,service:contextBinding.service,currentRecordedToken,devices,executionCurrent,coreSource:controlBarrier,automationExecution,clockReference}));
   let manualCurrent,evaluatorCurrent,evidenceCurrent;
+  const humanAuthority=Number(contextBinding?.service.schema_revision)>=114&&eventScopes&&authority?.current?
+    humanSubscriptionAuthority({db,service:contextBinding.service,time,authority,eventScopes,authorizeToken,tokenWithCsrf,contextCurrent}):null;
   const serviceIdentities=Number(contextBinding?.service.schema_revision)>=36&&authority?.current?
     serviceIdentityStore({db,service:contextBinding.service,bootId:contextBinding.bootId,writer,time,authenticated,authority,coreSource:controlBarrier,attachEvaluatorCurrent:current=>{evaluatorCurrent=current;},pairings:()=>peerPairings,eventScopes,deviceAutomationCurrent,authorizeEndorsement,
-     authorizeArmInitiator,automationExecution,pairingSample:()=>clock.pairingSample(),durationSample:()=>{if(typeof clock.durationSample!=='function')fail('session_clock_duration_unavailable');return clock.durationSample();}}):{};
+     authorizeArmInitiator,automationExecution,humanAuthority,pairingSample:()=>clock.pairingSample(),durationSample:()=>{if(typeof clock.durationSample!=='function')fail('session_clock_duration_unavailable');return clock.durationSample();}}):{};
   const commandStates=commandLifecycle({db,service:contextBinding?.service,bootId:contextBinding?.bootId,writer,domain:()=>controlBarrier?.domain()??null});
   const commands = commandAdmissionStore({db, binding: contextBinding, writer, time, authorizeToken, rows,contextCurrent,devices,executionCurrent,
     domain:()=>controlBarrier.domain(),assertCurrentProjection:()=>commandStates.assertAvailable(),queueCommand,referenceAcceptance});

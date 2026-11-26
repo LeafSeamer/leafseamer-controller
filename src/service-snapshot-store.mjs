@@ -11,8 +11,9 @@ export function serviceSnapshotStore({db,bootId,writer,time,domain,sourceCut,rea
  function domainNow(){need(typeof domain==='function','domain_unavailable');const current=domain();need(current&&typeof current.tick==='string'&&/^(0|[1-9][0-9]{0,19})$/.test(current.tick)&&current.ref,'domain');return current;}
  function invalidate(key,reason){const old=db.prepare('SELECT 1 FROM service_snapshot_end WHERE snapshot_id=?').pluck().get(key);if(!old)written(db.prepare('INSERT INTO service_snapshot_end VALUES(?,?,?,NULL)').run(key,'invalidated',reason));}
  function reserve(key){const saved=read(key);need(saved.view.state==='building','state');checkCurrent(saved);const current=domainNow();
-  const owner=digest(saved.view.owner),active=db.prepare('SELECT owner_key,reserved_bytes FROM service_snapshot_build WHERE snapshot_id NOT IN(SELECT snapshot_id FROM service_snapshot_end)').raw().all();
-  const used=db.prepare('SELECT coalesce(sum(stored_bytes),0) FROM service_snapshot_manifest').pluck().get();
+  const owner=digest(saved.view.owner),purpose=saved.view.purpose;
+  const active=db.prepare('SELECT b.owner_key,b.reserved_bytes FROM service_snapshot_build b JOIN service_event_subscription s USING(subscription_id) WHERE s.purpose=? AND b.snapshot_id NOT IN(SELECT snapshot_id FROM service_snapshot_end)').raw().all(purpose);
+  const used=db.prepare('SELECT coalesce(sum(stored_bytes),0) FROM service_snapshot_manifest JOIN service_event_subscription USING(subscription_id) WHERE purpose=?').pluck().get(purpose);
   if(active.length>=4||active.some(row=>row[0]===owner)||used+active.reduce((n,row)=>n+row[1],0)+snapshotBudget.total>67108864)return null;
   const snapshotId=crypto.randomUUID(),pin=String(db.prepare('SELECT coalesce(max(sequence),0) FROM device_source_notification').pluck().get()),deadline=String(BigInt(current.tick)+snapshotBudget.build);
   written(db.prepare('INSERT INTO service_snapshot_build VALUES(?,?,?,?,?,?,?,?,?)').run(snapshotId,key,owner,bootId,canonical(current.ref),current.tick,deadline,pin,snapshotBudget.total));
@@ -67,7 +68,7 @@ export function serviceSnapshotStore({db,bootId,writer,time,domain,sourceCut,rea
   },
   // 每次调度只推进一个阶段；阶段之间释放writer与读取连接，保留原预留截止。
   buildPending(){if(busy)return;busy=true;let build=pending?.build,key=build?.key;try{
-   if(!pending){key=writer(()=>db.prepare("SELECT s.subscription_id FROM service_event_subscription s JOIN service_event_subscription_head h USING(subscription_id) JOIN service_event_subscription_revision r USING(subscription_id,revision) WHERE r.state='building' AND NOT EXISTS(SELECT 1 FROM service_snapshot_build b WHERE b.subscription_id=s.subscription_id) ORDER BY s.rowid LIMIT 1").pluck().get());if(!key)return;
+   if(!pending){key=writer(()=>db.prepare("SELECT s.subscription_id FROM service_event_subscription s JOIN service_event_subscription_head h USING(subscription_id) JOIN service_event_subscription_revision r USING(subscription_id,revision) WHERE r.state='building' AND NOT EXISTS(SELECT 1 FROM service_snapshot_build b WHERE b.subscription_id=s.subscription_id) ORDER BY s.purpose,s.rowid LIMIT 1").pluck().get());if(!key)return;
     build=writer(()=>reserve(key));if(build)pending={build,phase:'read'};return;}
    if(pending.phase==='read'){writer(()=>gate(build));pending.cut=sourceCut(build.saved.creation.authorization.scope_ref);pending.phase='seal';return;}
    if(pending.phase==='seal'){pending.sealed=seal(build,pending.cut);pending.phase='publish';return;}

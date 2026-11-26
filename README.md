@@ -964,7 +964,11 @@ Schema 67将固定设备来源的SDK投影及有序通知接入来源writer。�
 
 可信核心可调用 `workerLaunches.eventScopes.snapshotCut(scopeRef)`：先核当前固定范围，在独立只读SQLite事务内取得通知水位、完整来源投影及对应watermark，结束读事务后再次核验当前范围。读取不跨HTTP分页持有数据库锁。投影保留连续前沿、最高已见序号和真实缺口；启动后为baseline_required，尚未生成baseline采用证明。明确丢弃区间保留known缺口，失联保留unknown缺口；快照读取和重投不会消除它们。迁移保留旧来源及订阅原件，不补造过去的投影历史，未具备投影原件的旧来源拒绝进入新快照切点。持久manifest／页面由下述68版实现；当前连接代际释放由下述69版实现；接收端原子采用由Seamer Schema 4提供。
 
-人员状态范围复用这一读切点及 product9 的 manifest 和投影页面。封存要求范围、用途、所有者类别和发布库一致。人员公开订阅的签发、连接附着和增量释放仍待接线。
+人员状态范围复用这一读切点及 product9 的 manifest 和投影页面。封存要求范围、用途、所有者类别和发布库一致。
+
+Schema 114 接通 Controller 的人员订阅生命周期。先用本机 `set-status-scope-reader` 提交 `{request_id,scope_ref,principal_id,expected_revision,enabled}`，为已登记状态范围明确授予或撤销某位人员的读取资格。首次登记用修订 `"0"`，后续变更采用当前修订。该操作沿用本机近期认证和 `auth.manage`。
+
+同源 HTTPS 客户端以 `status.read` 和 `request.create` 定向令牌创建操作为 `createSubscription` 的请求上下文。随后用原上下文和 CSRF 提交 `POST /api/v1/subscriptions`。同会话、客户端、上下文和幂等键重投可查询原订阅。当前会话可 `GET /api/v1/subscriptions/{subscription_id}` 查询，或带 CSRF 和 `expected_revision` 执行 `DELETE` 关闭。订阅授权、来源固定范围和使用的上下文预算随创建事务提交。快照就绪后视图返回固定引用，页面下载须等当前连接附着。人员通道票据、公开分页释放、增量交付和浏览器采用仍待实现。
 
 Schema 68显式增加固定来源范围的持久快照。后台从building订阅预留8MiB、原运行时钟域及5秒构建截止和内部日志pin；独立只读事务取得全部来源投影后，释放读连接，在有界内存完成页面封存，再由writer重核授权、原期限、时钟域及预留并原子保存manifest、所有页面原字节、基线摘要、内部日志映射和snapshot_ready修订。任一缺写整笔回滚；进程中断留下的预留失效，不从新状态补页。读取及封存是本进程内阶段，只有完整发布结果持久可见。
 

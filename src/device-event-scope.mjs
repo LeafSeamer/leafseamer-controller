@@ -68,6 +68,12 @@ export function deviceEventScopeStore({db,service,bootId,currentSource}){
    });
   },
   current:reference=>transaction(()=>current(reference)),currentInTransaction:current,
+  matchStatusInTransaction(scope){
+   available();const row=db.prepare('SELECT body_jcs,body_digest FROM device_subscription_scope WHERE scope_id=?').raw().get(scope.scope_id);
+   need(row,'missing');const registered=unpack(...row);
+   need(registered.purpose==='status_projection'&&registered.profile.owner_kinds.includes('human')&&same(registered.scope,scope),'scope');
+   return current(eventScopeReference(registered));
+  },
   snapshotCut(reference){
    need(!db.inTransaction&&Number(service.schema_revision)>=67,'snapshot_reader');
    const selected=transaction(()=>current(reference));
