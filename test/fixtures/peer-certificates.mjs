@@ -1,6 +1,41 @@
 import {spawnSync} from 'node:child_process';
-// 仅测试内存材料；不写系统信任库、服务秘密目录或正式发行配置。
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+function linuxPeerCertificates(){
+ const directory=fs.mkdtempSync(path.join(os.tmpdir(),'leafseamer-peer-certificates-'));
+ try{
+  const config=path.join(directory,'openssl.cnf');
+  fs.writeFileSync(config,'[req]\ndistinguished_name=subject\n[subject]\n');
+  fs.writeFileSync(path.join(directory,'leaf.ext'),[
+   'basicConstraints=critical,CA:FALSE','keyUsage=critical,digitalSignature',
+   'extendedKeyUsage=serverAuth,clientAuth','subjectAltName=DNS:localhost,IP:127.0.0.1',''
+  ].join('\n'));
+  function openssl(...args){
+   const result=spawnSync('openssl',args,{cwd:directory,encoding:'utf8',timeout:5000,env:{...process.env,OPENSSL_CONF:config}});
+   if(result.status!==0)throw new Error('pairing_test_certificate_generation',{cause:result.error??result.stderr});
+  }
+  function key(file){openssl('genpkey','-algorithm','EC','-pkeyopt','ec_paramgen_curve:P-256','-out',file);}
+  key('ca.key');
+  openssl('req','-new','-x509','-key','ca.key','-subj','/CN=Pairing test CA','-days','2',
+   '-addext','basicConstraints=critical,CA:TRUE,pathlen:0','-addext','keyUsage=critical,keyCertSign','-out','ca.pem');
+  const read=file=>fs.readFileSync(path.join(directory,file),'utf8');
+  const leaves=[];
+  for(let index=1;index<=3;index++){
+   key('leaf.key');
+   openssl('req','-new','-key','leaf.key','-subj','/CN=localhost','-out','leaf.csr');
+   openssl('x509','-req','-in','leaf.csr','-CA','ca.pem','-CAkey','ca.key','-set_serial',String(index),
+    '-days','1','-extfile','leaf.ext','-out','leaf.pem');
+   leaves.push({cert:read('leaf.pem'),key:read('leaf.key')});
+  }
+  return {ca:read('ca.pem'),leaves};
+ }finally{fs.rmSync(directory,{recursive:true,force:true});}
+}
+
+// 仅生成测试证书，不使用系统信任库或服务密钥目录。
 export function peerCertificates(){
+ if(process.platform==='linux')return linuxPeerCertificates();
  const script=`$ErrorActionPreference='Stop'
  $curve=[System.Security.Cryptography.ECCurve+NamedCurves]::nistP256
  $caKey=[System.Security.Cryptography.ECDsa]::Create($curve)
