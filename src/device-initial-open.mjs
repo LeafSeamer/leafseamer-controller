@@ -16,11 +16,12 @@ const freeze=v=>{if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Obj
 const signed=(value,key)=>({...value,[key]:digest(value)});
 const reference=(value,id,key)=>({id:value[id],revision:value.revision,digest:value[key]});
 const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/.test(v);
-const decode=cacheVerifiedDocument((text,hash)=>{const v=checked(JSON.parse(text));need(canonicalize(v)===text&&v.digest===hash,'integrity');return v;});
+const decode=cacheVerifiedDocument((text,hash)=>{const v=checked(JSON.parse(text));need(canonicalize(v)===text&&v.digest===hash,'integrity');return v;},{immutable:true});
 
 // 首次手动开放的持久前态与计划；没有出站seq、写尝试、ACK或Ready，不授予发送权。
 // 两安全状态从真实初始资源与FENCE确认初始化，不用任意revision=0或占位Ref代表风险已清除。
 export function deviceInitialOpen({db,writer,resourceCurrent,resourceRead,domain,attach,readClockReference=null}){
+ let selectOriginal;
  function referenceMode(binding){
   const selected=readHandshake(db,binding.ipc_session_id)?.receipt.selected_features??[];
   const reference=deviceExecutionCapabilities.reference.filter(feature=>selected.includes(feature));
@@ -93,11 +94,12 @@ export function deviceInitialOpen({db,writer,resourceCurrent,resourceRead,domain
  }
  function read(reference){return withExecutionReadView(db,()=>memoExecutionRead(db,'initial-open',reference,()=>readOriginal(reference)));}
  function readOriginal(reference){
-  need(db.inTransaction,'writer');const row=db.prepare(`SELECT o.body_jcs,o.body_digest,o.request_id,o.request_digest,o.request_jcs,
+  need(db.inTransaction,'writer');selectOriginal??=db.prepare(`SELECT o.body_jcs,o.body_digest,o.request_id,o.request_digest,o.request_jcs,
    o.binding_id,o.resource_source_id,o.evidence_id,o.fence_id,o.gate_token,o.commit_id,c.body_jcs,c.body_digest,c.audit_jcs
-   FROM device_initial_open o JOIN device_initial_open_commit c USING(opening_id,commit_id) WHERE o.opening_id=?`).raw().get(reference?.id);
+   FROM device_initial_open o JOIN device_initial_open_commit c USING(opening_id,commit_id) WHERE o.opening_id=?`).raw();
+  const row=selectOriginal.get(reference?.id);
   need(row,'missing');const value=decode(row[0],row[1]),commit=decode(row[11],row[12]),request=JSON.parse(row[4]);
-  need(same(ref(value),reference)&&request.request_id===row[2]&&canonicalize(request)===row[4]&&digest(request)===row[3]&&
+  need(same(ref(value),reference)&&request.request_id===row[2]&&canonicalize(request)===row[4]&&'sha256:'+crypto.createHash('sha256').update(row[4]).digest('hex')===row[3]&&
    same(request.expected_resource_ref,value.resource_source_ref)&&same(commit.request,request)&&same(commit.opening_ref,reference)&&
    commit.id===row[10]&&commit.format==='initial-device-open-commit/1'&&
    row[13]===canonicalize({kind:'initial_device_open_prepared',opening_ref:reference,commit_ref:ref(commit)}),'integrity');
