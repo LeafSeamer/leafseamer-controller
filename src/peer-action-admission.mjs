@@ -39,20 +39,63 @@ function scheduleOrigin(value,execution,executionRef,stepId,planRequest,plan){
  return selected;
 }
 
-export function actionAdmissionBinding(value,request,prepared){
- const scheduled=value?.execution?.origin_kind==='schedule';
- fields(value,scheduled?'execution,step_plan,step_ready,parameters,eligible_before_ns,schedule':'execution,step_plan,step_ready,parameters,eligible_before_ns');
+function recoveryOrigin(value,execution,planRequest,plan,body,receipt,pairingRef){
+ fields(value,'binding,source_parameters,source_step_plan,start');
+ const {binding,start,source_step_plan:source,source_parameters}=value;
+ const {scope,execution_id,arm_generation,definition_version,reservation_ref,binding_ref,start_ref,origin_digest,grant_basis}=execution;
+ const operation=planRequest.operation_ref;
+ reference(reservation_ref,'execution',scope,execution_id);
+ reference(binding_ref,'recovery_execution_binding',scope,execution_id);
+ reference(start_ref,'recovery_start',scope,operation.object_id);
+ need(execution.format==='leafseamer.recovery-action-execution/1'&&definition_version===planRequest.definition_version&&
+  execution_id===planRequest.execution_id&&origin_digest===start_ref.digest&&digest(start)===start_ref.digest&&
+  digest(binding)===binding_ref.digest,'action_recovery_execution');
+ need(binding.format==='leafseamer.recovery-execution-binding/1'&&start.format==='leafseamer.recovery-start/1'&&
+  same(start.binding_ref,binding_ref)&&same(start.operation_ref,operation)&&same(binding.operation_ref,operation)&&
+  same(start.execution_ref,reservation_ref)&&same(binding.execution_ref,reservation_ref)&&
+  same(binding.approval_ref,planRequest.approval_ref)&&same(start.approval_ref,binding.approval_ref)&&
+  start.arm_generation===arm_generation&&binding.arm_generation===arm_generation&&start.previous_run_revision===binding.run_revision&&
+  integer(start.run_revision)===integer(binding.run_revision)+1n&&start.state==='start_recorded'&&
+  start.dispatch_eligible===false&&binding.dispatch_eligible===false&&
+  start.service_boot_id===execution.service_boot_id&&binding.service_boot_id===execution.service_boot_id,'action_recovery_start');
+ need(Array.isArray(binding.grants)&&same(binding.grants,grant_basis.map(({eligible_before_ns,...member})=>member))&&
+  binding.grants.some(item=>same(item.grant_ref,receipt.grant_ref)&&same(item.endorsement_ref,receipt.grant.endorsement_ref)&&same(item.pairing_ref,pairingRef)),
+  'action_recovery_grant');
+ const steps=Array.isArray(start.steps)?start.steps.filter(item=>item.step_id===plan.step_id):[];
+ const item=steps[0],originalBinding=source?.payload?.binding;
+ need(steps.length===1&&item.decision==='execute_new'&&same(item.grant_ref,receipt.grant_ref)&&
+  source?.step_id===plan.step_id&&source.execution_id===item.source_execution_id&&source.execution_id!==execution_id&&
+  source.payload?.kind==='action'&&same(originalBinding?.grant_ref,planRequest.baseline_grant_ref)&&digest(source)===item.plan_digest&&
+  same(plan,{...source,execution_id,payload:{...source.payload,binding:{...originalBinding,grant_ref:receipt.grant_ref}}}),
+  'action_recovery_step');
+ if(source_parameters===null){
+  need(digest(source.payload)===item.parameters_digest,'action_recovery_parameters');
+ }else{
+  fields(source_parameters,'ref,body');
+  const original=source_parameters.body;
+  reference(source_parameters.ref,'action_parameters',scope,plan.step_id);
+  need(original?.format==='leafseamer.action-parameters/1'&&original.execution_ref?.object_id===source.execution_id&&
+   same(original.execution_ref.scope,scope)&&original.step_id===plan.step_id&&original.step_plan_digest===item.plan_digest&&
+   digest(original)===source_parameters.ref.digest&&source_parameters.ref.digest===item.parameters_digest&&
+   same(original.grant_ref,originalBinding.grant_ref)&&
+   same(original.parameters,body.parameters)&&same(original.parameter_schema_ref,body.parameter_schema_ref),'action_recovery_parameters');
+ }
+}
+
+export function actionAdmissionBinding(value,request,prepared,pairingRef=null){
+ const scheduled=value?.execution?.origin_kind==='schedule',recovery=request.execution_ref.revision==='2';
+ fields(value,'execution,step_plan,step_ready,parameters,eligible_before_ns'+(recovery?',recovery':scheduled?',schedule':''));
  const {execution,step_plan:plan,step_ready:ready,parameters,eligible_before_ns}=value;
  const {execution_ref,step_id,parameters_ref,preparation}=request,{origin_scope,controller_scope}=preparation.lookup;
  const {request:planRequest,applied_receipt:receipt}=prepared,{grant}=receipt;
  need(execution&&Array.isArray(execution.steps)&&Array.isArray(execution.grant_basis),'action_execution');
  const {execution_id,run_id,arm_generation,steps,grant_basis}=execution;
  const originDigest=scheduled?execution.admission_ref?.digest:execution.origin_digest;
- need((scheduled?execution.format==='leafseamer.scheduled-execution/1':
+ need((recovery?execution.origin_kind==='recovery':scheduled?execution.format==='leafseamer.scheduled-execution/1':
   execution.format==='leafseamer.trigger-execution/1'&&execution.runtime_revision==='3'&&execution.origin_kind==='trigger')&&
   same(execution.scope,origin_scope)&&hash(originDigest)&&digest(execution)===execution_ref.digest&&execution_id===execution_ref.object_id&&
   same(execution.artifact_ref,planRequest.artifact_ref)&&run_id===grant.run_id&&arm_generation===grant.arm_generation&&
-  planRequest.mode==='arm'&&planRequest.execution_id===null,
+  (recovery?planRequest.mode==='recovery'&&planRequest.execution_id===execution_id:planRequest.mode==='arm'&&planRequest.execution_id===null),
   'action_execution');
  const listed=steps.find(step=>step.step_id===step_id),targetGrant=grant_basis.find(item=>same(item.grant_ref,receipt.grant_ref));
  need(listed&&targetGrant&&same(targetGrant.lookup,preparation.lookup)&&same(targetGrant.receipt_ref,preparation.receipt_ref),'action_grant');
@@ -75,6 +118,7 @@ export function actionAdmissionBinding(value,request,prepared){
   eligible>0n&&eligible<=integer(body.eligible_before_ns)&&eligible<=integer(execution.approved_before_ns)&&
   eligible<=integer(targetGrant.eligible_before_ns),'action_parameters');
  assertEndorsementParameters(endorsementScope(grant.device_actions,grant.parameter_constraints),binding.target.device_action,body.parameters);
+ if(recovery)recoveryOrigin(value.recovery,execution,planRequest,plan,body,receipt,pairingRef);
  return {execution_ref,step_id,parameters_ref,origin_scope,controller_scope,run_id,arm_generation,
   definition_version:grant.definition_version,principal:grant.principal,grant_ref:receipt.grant_ref,
   target:binding.target.device_action,parameters:body.parameters,parameter_schema_ref:body.parameter_schema_ref,

@@ -860,6 +860,72 @@ test('显式接入 Controller 准备受理，核验同一计划与控制原件�
  networkStore.bindActionReader(controller.transport.prepareRunActionBinding);
  await assert.rejects(networkStore.prepareActionAdmission(bindingId,'paired TLS',
   {...runtimeCandidate.request.action,preparation:recoveryProof}),{code:'peer_pairing_preparation_ineligible'});
+ function recoveryAction({decision='execute_new',operation=recovery.operation_ref,originalParameters=true,parametersValue=13,
+  movePlan=false,oldGrant=recovery.baseline_grant_ref,pairingDigest=binding.digest}={}){
+  const {execution_id,run_id,arm_generation,artifact_ref,definition_version}=recovery;
+  const source_execution_id=id(),source_execution_ref=ref('execution',origin_scope,source_execution_id,'original execution');
+  const source_step_plan={...structuredClone(step_plan),execution_id:source_execution_id};
+  source_step_plan.payload.binding.grant_ref=oldGrant;
+  const sourceBody={...structuredClone(frozen),execution_ref:source_execution_ref,step_plan_digest:digest(source_step_plan),grant_ref:oldGrant};
+  const source_parameters=originalParameters?{ref:ref('action_parameters',origin_scope,step_id,sourceBody),body:sourceBody}:null;
+  const reservation_ref=ref('execution',origin_scope,execution_id,'reserved execution');
+  const members=[{...recoveryProof,pairing_ref:{id:binding.binding_id,revision:binding.revision,digest:pairingDigest},endorsement_ref:recoveredReceipt.grant.endorsement_ref}];
+  const definition={format:'leafseamer.recovery-execution-binding/1',operation_ref:operation,execution_ref:reservation_ref,
+   approval_ref:recovery.approval_ref,arm_generation,run_revision:'8',grants:members,dispatch_eligible:false,service_boot_id:id()};
+  const binding_ref=ref('recovery_execution_binding',origin_scope,execution_id,definition);
+  const startRecord={format:'leafseamer.recovery-start/1',state:'start_recorded',operation_ref:operation,execution_ref:reservation_ref,binding_ref,
+   approval_ref:recovery.approval_ref,arm_generation,previous_run_revision:'8',run_revision:'9',dispatch_eligible:false,service_boot_id:definition.service_boot_id,
+   steps:[{step_id,source_execution_id,plan_digest:digest(source_step_plan),decision,grant_ref:recoveryProof.grant_ref,
+    parameters_digest:source_parameters?.ref.digest??digest(source_step_plan.payload)}]};
+  const start_ref=ref('recovery_start',origin_scope,operation.object_id,startRecord);
+  const plan={...structuredClone(source_step_plan),execution_id};
+  plan.payload.binding.grant_ref=recoveryProof.grant_ref;
+  if(movePlan)plan.payload.binding.action_binding_ref={...plan.payload.binding.action_binding_ref,digest:digest('different binding')};
+  const sealed={format:'leafseamer.recovery-action-execution/1',origin_kind:'recovery',execution_id,run_id,arm_generation,artifact_ref,definition_version,
+   scope:origin_scope,reservation_ref,binding_ref,start_ref,service_boot_id:definition.service_boot_id,origin_digest:start_ref.digest,
+   steps:[{step_id,plan_digest:digest(plan)}],grant_basis:members.map(member=>({...member,eligible_before_ns:String(end)})),approved_before_ns:String(end)};
+  const execution_ref={...ref('execution',origin_scope,execution_id,sealed),revision:'2'};
+  const bodyReady={...ready,ready_id:id(),execution_ref,step_plan_digest:digest(plan)};
+  const step_ready={ref:ref('step_ready',origin_scope,bodyReady.ready_id,bodyReady),body:bodyReady};
+  const body={...frozen,execution_ref,step_ready_ref:step_ready.ref,step_plan_digest:digest(plan),origin_digest:start_ref.digest,
+   grant_ref:recoveryProof.grant_ref,parameters:{value:parametersValue},parameters_digest:digest({value:parametersValue})};
+  const parameters_ref=ref('action_parameters',origin_scope,step_id,body);
+  return {request:{action:{preparation:recoveryProof,execution_ref,step_id,parameters_ref},
+   target:recovery.grant_intent.device_actions[0],idempotency_key:id()},source:{
+   execution:sealed,step_plan:plan,step_ready,parameters:{ref:parameters_ref,body},eligible_before_ns:String(end),
+   recovery:{binding:definition,start:startRecord,source_step_plan,source_parameters}}};
+ }
+ const resumed=recoveryAction();
+ currentAction=resumed.source;
+ const admitRecovery=action=>networkStore.prepareActionAdmission(bindingId,'paired TLS',action);
+ const qualification=await admitRecovery(resumed.request.action);
+ assert.deepEqual(qualification.original.execution_ref,resumed.request.action.execution_ref);
+ assert.deepEqual(qualification.original.parameters,{value:13});
+ assert.deepEqual(qualification.original.grant_ref,recoveryProof.grant_ref);
+ assert.deepEqual(writer(qualification.assertCurrentInTransaction),qualification.original);
+ assert.equal(await readWithHeaders(version,Buffer.from(canonical(resumed.request.action))),403);
+ const foreign={...resumed.request,action:{...resumed.request.action,execution_ref:{...resumed.request.action.execution_ref,object_id:id()}}};
+ await assert.rejects(admitRecovery(foreign.action),{code:'peer_pairing_preparation_ineligible'});
+ await assert.rejects(lookupCommand(foreign),{code:'peer_pairing_response'});
+ await assert.rejects(rejectCommand(foreign),{code:'peer_pairing_response'});
+ for(const [options,code] of [
+  [{decision:'retain_success'},'action_recovery_step'],
+  [{operation:{...recovery.operation_ref,digest:digest('different recovery operation')}},'action_recovery_start'],
+  [{parametersValue:17},'action_recovery_parameters'],
+  [{pairingDigest:digest('different paired connection')},'action_recovery_grant'],
+  [{oldGrant:recoveryProof.grant_ref},'action_recovery_step'],
+  [{movePlan:true},'action_recovery_step']
+ ]){
+  const candidate=recoveryAction(options);currentAction=candidate.source;
+  await assert.rejects(admitRecovery(candidate.request.action),{code:'peer_pairing_'+code});
+ }
+ const unprepared=recoveryAction({originalParameters:false});
+ currentAction=unprepared.source;
+ assert.deepEqual((await admitRecovery(unprepared.request.action)).original.parameters,{value:13});
+ approvalCurrent=false;
+ assert.throws(()=>writer(qualification.assertCurrentInTransaction),/approval withdrawn/);
+ approvalCurrent=true;
+ assert.throws(()=>writer(qualification.assertCurrentInTransaction),{code:'peer_pairing_action_unavailable'});
  assert.deepEqual(writer(()=>currentControlSource(db,device).current),control);
  db.close();db=open();networkStore=construct(id());
  assert.deepEqual(await lookupRecovery(),recoveredPreparation);

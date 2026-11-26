@@ -19,7 +19,7 @@ import {armPlanReference,recoveryPlanReference,armPlanReadRequest,armPlanReadRep
 import {armPreparationEligibilityRequest,armPreparationEligibilityReply,armPreparationLookup,armPreparationReply,preparationProtocol,preparationRequestLimit,preparationResponseLimit,
  recoveryPreparationProtocol,runEligibilityObservationMs,runEligibilityObservationNs} from './peer-run-preparation.mjs';
 import {actionAdmissionRequest,actionBindingPath,actionBindingReply,actionBindingRequestLimit,actionBindingResponseLimit,
- actionBindingVersion,scheduledActionBindingVersion} from './peer-action-binding.mjs';
+ actionBindingVersion,scheduledActionBindingVersion,recoveryActionBindingVersion} from './peer-action-binding.mjs';
 import {automationCommandPaths,automationCommandReply,automationCommandRequest,automationCommandRequestLimit,automationCommandResponseLimit,automationCommandVersion} from './peer-automation-command.mjs';
 import {approvalProtectionNotice,runApprovalProtectionReply,runApprovalProtectionVersion,runApprovalProtectionObservation,
  runApprovalProtectionObservationVersion,endorsementRevocationNotice,endorsementRevocationReceipt} from './peer-run-approval-protection.mjs';
@@ -100,7 +100,8 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
    const actionRead=req.url===actionBindingPath;
    const commandOperation=Object.keys(automationCommandPaths).find(operation=>req.url===automationCommandPaths[operation]);
    if(actionRead||commandOperation){
-    const version=actionRead?actionBindingVersion:automationCommandVersion;
+    const recoveryAction=actionRead&&req.headers['x-leafseamer-action-binding-version']===recoveryActionBindingVersion;
+    const version=actionRead?(recoveryAction?recoveryActionBindingVersion:actionBindingVersion):automationCommandVersion;
     const versionHeader=actionRead?'x-leafseamer-action-binding-version':'x-leafseamer-automation-command-version';
     const handler=actionRead?runActionBinding:automationCommands?.[commandOperation];
     need(req.method==='POST'&&identity.service_kind===(actionRead?'seamer':'controller')&&typeof handler==='function'&&
@@ -120,6 +121,7 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
     need(size===length&&same(current(bindingId,req.socket),record),'changed');
     const encoded=Buffer.concat(chunks),parsed=decodeDeviceBindings(encoded,limit);
     const input=actionRead?actionAdmissionRequest(parsed,peerScope(peer)):automationCommandRequest(parsed,peerScope(identity));
+    if(actionRead)need(recoveryAction===(input.execution_ref.revision==='2'),'action_reference');
     need(Buffer.from(canonical(input)).equals(encoded)&&same((actionRead?input:input.action).preparation.lookup.origin_scope,
      peerScope(actionRead?identity:peer)),'action_reference');
     let observation;
@@ -388,7 +390,7 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
   const actionRead=operation==='action-bindings';
   const commandOperation=operation.startsWith('automation-commands/')?operation.slice('automation-commands/'.length):null;
   const actionProtocol=actionRead||commandOperation;
-  const actionVersion=actionRead?actionBindingVersion:automationCommandVersion;
+  const actionVersion=actionRead?(body.execution_ref?.revision==='2'?recoveryActionBindingVersion:actionBindingVersion):automationCommandVersion;
   const actionVersionHeader=actionRead?'x-leafseamer-action-binding-version':'x-leafseamer-automation-command-version';
   const challenge=preparation||actionProtocol||observation?crypto.randomUUID():null;
   if(actionProtocol){

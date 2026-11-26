@@ -230,7 +230,7 @@ export function runPreparationStore({db,service,bootId,writer,time,pairingSample
      const now=time(),last=pairingSample(),tick=BigInt(last.tick_ns);
      need(now.lower>=before&&now.upper<deadline&&BigInt(last.lower_ns)>=before&&BigInt(last.upper_ns)<deadline&&
       same(last.runtime_domain_ref,start.runtime_domain_ref)&&tick>=started&&tick<observationDeadline,'preparation_expired');
-     return {record:current.record,eligible_before_ns:String(deadline),not_before_ns:String(before)};
+     return {record:current.record,eligible_before_ns:String(deadline),not_before_ns:String(before),pairing_ref:pairingReference(current.pair)};
     }catch(error){valid=false;throw error;}
    }
    return verifyInTransaction;
@@ -254,15 +254,24 @@ export function runPreparationStore({db,service,bootId,writer,time,pairingSample
   });
   return {body:verify(),beforeSend:verify};
  }
+ function assertActionPreparation(action,record){
+  const original=record?.request,recovery=action.execution_ref.revision==='2';
+  need(original&&original.mode===(recovery?'recovery':'arm')&&
+   (!recovery||action.execution_ref.object_id===original.execution_id),'preparation_ineligible');
+ }
  async function prepareActionAdmission(bindingId,socket,input){
   need(readAction&&pendingActions<4,'action_unavailable');
   const request=actionAdmissionRequest(structuredClone(input),scope);
-  const {origin_scope}=request.preparation.lookup;
-  const initial=writer(()=>paired(bindingId,socket,origin_scope,true));
+  const {origin_scope,preparation_id,request_digest}=request.preparation.lookup,recovery=request.execution_ref.revision==='2';
+  const initial=writer(()=>{
+   const record=paired(bindingId,socket,origin_scope,true);
+   assertActionPreparation(request,find(origin_scope,preparation_id,request_digest));
+   return record;
+  });
   pendingActions++;
   try{
    const [grantResult,actionResult]=await Promise.allSettled([
-    prepareGrantObservation(bindingId,socket,request.preparation,true),
+    prepareGrantObservation(bindingId,socket,request.preparation,true,recovery),
     Promise.resolve().then(()=>readAction(bindingId,structuredClone(request)))
    ]);
    if(grantResult.status==='rejected')throw grantResult.reason;
@@ -273,10 +282,10 @@ export function runPreparationStore({db,service,bootId,writer,time,pairingSample
    function assertCurrentInTransaction(){
     need(db.inTransaction&&valid,'action_unavailable');
     try{
-     const {record,eligible_before_ns,not_before_ns}=grant();
+     const {record,eligible_before_ns,not_before_ns,pairing_ref}=grant();
      need(same(actionPair(bindingId,socket,origin_scope),initial)&&observed.assertCurrentInTransaction()===true,'action_source_changed');
      if(record!==verifiedRecord){
-      verifiedBinding=actionAdmissionBinding(original,request,record);
+      verifiedBinding=actionAdmissionBinding(original,request,record,pairing_ref);
       verifiedRecord=record;
      }
      const binding=verifiedBinding;
@@ -311,6 +320,7 @@ export function runPreparationStore({db,service,bootId,writer,time,pairingSample
    const receipt=found?.applied_receipt;
    need(receipt&&same(receipt.grant_ref,grant_ref)&&same(reference('preparation_receipt',scope,receipt.receipt_id,receipt),receipt_ref)&&
     receipt.grant.device_actions.some(action=>same(action,request.target)),'automation_command_authority');
+   assertActionPreparation(request.action,found);
    return {pairing_ref:pairingReference(pair),principal:receipt.grant.principal};
   }}):null;
  return Object.freeze({prepare,prepareEligibility,prepareActionAdmission,automationCommands,protectionTargets,lookup(bindingId,socket,input,{recovery=false}={}){
