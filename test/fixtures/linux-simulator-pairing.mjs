@@ -13,6 +13,7 @@ import {readInstalledLinuxReferenceCapture} from '../../dist/linux-reference-cap
 import {openTimeProviderLink} from '../../dist/time-provider-link.mjs';
 import {openReferenceCaptureRuntime} from '../../dist/reference-capture-runtime.mjs';
 import {readTrustedPairingProfile} from '../../dist/trusted-pairing-profile.mjs';
+import {startRunProtectionDelivery} from '../../dist/run-approval-protection-completion.mjs';
 
 function argument(flag){
   const index=process.argv.indexOf(flag);
@@ -59,7 +60,7 @@ export async function admitSimulatorReference(t,{store,runtime,clock,withdrawal=
   }};
 }
 
-export async function startSimulatorPairing(t,{store,sessions,real,profile,assertCurrent,reference=null,openTarget=null}){
+export async function startSimulatorPairing(t,{store,sessions,real,profile,assertCurrent,reference=null,openTarget=null,reconcileScheduledWrite=false}){
   let targetOpening;
   const commands=openTarget?sessions.runPreparations.automationCommands:null;
   assert.ok(!openTarget||commands);
@@ -76,6 +77,7 @@ export async function startSimulatorPairing(t,{store,sessions,real,profile,asser
     automationApproval(...args){assertCurrent();return sessions.currentAutomationServiceApproval(...args);},
     runEndorsement(...args){assertCurrent();return sessions.runApprovalEndorsements.readForPeer(...args);},
     runControlObservation(...args){assertCurrent();return sessions.runApprovalEndorsements.readControlsForPeer(...args);},
+    runApprovalProtection(...args){assertCurrent();return sessions.runApprovalEndorsements.receiveProtection(...args);},
     runPreparations:{
       async prepare(...args){
         assertCurrent();
@@ -124,6 +126,7 @@ export async function startSimulatorPairing(t,{store,sessions,real,profile,asser
       },
       lookup(...args){assertCurrent();return commands.lookup(...args);},
       result(...args){assertCurrent();return commands.result(...args);},
+      resource(...args){assertCurrent();return commands.resource(...args);},
       reject(...args){assertCurrent();return commands.reject(...args);}
     }:null,
     async introspection(request){
@@ -135,9 +138,15 @@ export async function startSimulatorPairing(t,{store,sessions,real,profile,asser
   transport.bindPeers(peers);
   sessions.runEndorsementPolicies.bindProposalReader(transport.readRunApprovalProposal);
   sessions.runApprovalEndorsements.bindApprovalReader(transport.readRunApproval);
-  sessions.runApprovalEndorsements.bindInitiatorReader(transport.readRunInitiator);
-  sessions.runPreparations.bindPlanReader(transport.prepareRunArmPlan);
+  sessions.runApprovalEndorsements.bindInitiatorReader((bindingId,ref)=>ref.kind==='recovery_operation'?
+    transport.readRunRecoveryInitiator(bindingId,ref):transport.readRunInitiator(bindingId,ref));
+  sessions.runPreparations.bindPlanReader((bindingId,ref)=>ref.kind==='recovery_plan'?
+    transport.prepareRunRecoveryPlan(bindingId,ref):transport.prepareRunArmPlan(bindingId,ref));
   if(commands)sessions.runPreparations.bindActionReader(transport.prepareRunActionBinding);
+  if(reconcileScheduledWrite){
+    const delivery=startRunProtectionDelivery({endorsements:sessions.runApprovalEndorsements,workerLaunches:store.workerLaunches,assertCurrent});
+    t.after(()=>delivery?.close());
+  }
   const {host,port,tls}=readProtectedIngressProfile(argument('--ingress-profile'));
   const ingress=createAuthenticationHttp({...authenticationScope,origin:tls.origin});
   const listener=https.createServer({cert:tls.cert,key:tls.key,minVersion:'TLSv1.2'},(req,res)=>{

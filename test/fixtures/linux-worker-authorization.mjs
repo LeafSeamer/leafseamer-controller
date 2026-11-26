@@ -137,7 +137,7 @@ try{
   const reference=await installedReference?.start(a.real,referenceBinding);
   let openTarget;
   if(pairing)pairing.manage=await startSimulatorPairing(fixture,{store,sessions:a.sessions,real:a.real,profile:pairing.profile,
-    assertCurrent:runtime.assertLive,reference,openTarget:scheduled?()=>openTarget():null});
+    assertCurrent:runtime.assertLive,reference,openTarget:scheduled?()=>openTarget():null,reconcileScheduledWrite:input.paired.reconcileScheduledWrite});
   const management=compose?await localManagement(store,a,supervision.assertCurrent,pairing&&{tls:pairing.profile.tls,manage:pairing.manage}):null;
   async function manage(operation,request){
     const result=await management.request(operation,request);
