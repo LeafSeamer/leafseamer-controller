@@ -617,11 +617,25 @@ test('显式接入 Controller 准备受理，核验同一计划与控制原件�
  activeService={...activeService,schema_revision:'80'};
  networkStore=construct();networkStore.bindPlanReader(controller.transport.prepareRunArmPlan);protection=protectionStore();
  const readOptIn=notice=>seamer.transport.deliverRunApprovalProtection(originBinding,notice,{completion:true});
+ const observeProtection=notice=>seamer.transport.observeRunApprovalProtection(originBinding,notice);
+ async function assertObservation(notice,state,completion=null){
+  const value=await observeProtection(notice);
+  assert.deepEqual(value,{format:'leafseamer.run-approval-protection-observation/1',challenge_id:value.challenge_id,
+   request_digest:digest(notice),state,completion});
+  return value;
+ }
  const plan={origin_scope,run_id:unarmedRunId,deny_through_generation:null,device_ids:[device,additionalDevice].sort()};
  assert.ok(protection.scanRunProtection({after:null,limit:16}).items.includes(deniedUnarmed.receipt_id));
  assert.deepEqual(protection.runProtectionPlan(deniedUnarmed.receipt_id),plan);
  assert.equal(protection.runProtectionPlan(deniedLost.receipt_id).deny_through_generation,'1');
  assert.deepEqual(await readOptIn(unarmedNotice),deniedUnarmed);
+ await assertObservation(unarmedNotice,'pending');
+ await assertObservation(lostNotice,'pending');
+ const beforeObservation=rows(db,'run_approval_rejection');
+ await assertObservation(revocation(choose()),'not_found');
+ assert.deepEqual(rows(db,'run_approval_rejection'),beforeObservation);
+ await assert.rejects(observeProtection({...unarmedNotice,revocation_operation_ref:{...unarmedNotice.revocation_operation_ref,object_id:id()}}),
+  {code:'peer_pairing_response'});
  await assert.rejects(submit(unarmed),{code:'peer_pairing_response'});
  const fenceTables=['run_generation_denial','execution_run_fence_frame'],beforeCompletion=fenceTables.map(table=>rows(db,table));
  const completed=protection.completeRunProtection(deniedUnarmed.receipt_id);
@@ -632,12 +646,15 @@ test('显式接入 Controller 准备受理，核验同一计划与控制原件�
  const evidence={format:'leafseamer.run-approval-protection-no-preparation/1',plan,rejection_digest:plain[1],
   targets:plan.device_ids.map(device_id=>({device_id,state:'never_prepared'}))};
  assert.equal(finalReceipt.proof_digest,digest(evidence));
+ const observed=await assertObservation(unarmedNotice,'verified',finalReceipt);
  assert.deepEqual(fenceTables.map(table=>rows(db,table)),beforeCompletion);
  assert.deepEqual(readUnarmed(),plain);
  assert.ok(!protection.scanRunProtection({after:null,limit:16}).items.includes(deniedUnarmed.receipt_id));
  db.close();db=open();
  networkStore=construct();networkStore.bindPlanReader(controller.transport.prepareRunArmPlan);protection=protectionStore();
  assert.deepEqual(await readOptIn(unarmedNotice),finalReceipt);
+ const reopenedObservation=await assertObservation(unarmedNotice,'verified',finalReceipt);
+ assert.notEqual(reopenedObservation.challenge_id,observed.challenge_id);
  assert.deepEqual(await revoke(unarmedNotice),deniedUnarmed);
  assert.deepEqual(protection.completeRunProtection(deniedUnarmed.receipt_id),{state:'acknowledged',receipt:finalReceipt});
  await assert.rejects(submit(unarmed),{code:'peer_pairing_response'});

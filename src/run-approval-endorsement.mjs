@@ -8,7 +8,7 @@ import {approvalProtectionNotice,approvalProtectionReceipt,endorsementRevocation
 import {endorsementReference} from './peer-run-approval-endorsement.mjs';
 import {currentControlSource} from './device-control-source.mjs';
 import {adoptRunGenerationDenial,readRunProtectionWork,scanRunProtectionWork} from './run-generation-denial.mjs';
-import {commitRunProtectionCompletion,readRunProtectionCompletion} from './run-approval-protection-completion.mjs';
+import {commitRunProtectionCompletion,observeRunProtectionCompletion,readRunProtectionCompletion} from './run-approval-protection-completion.mjs';
 import {runArmOperationReference} from './peer-run-initiator.mjs';
 import {runEligibilityObservationNs} from './peer-run-preparation.mjs';
 
@@ -273,8 +273,9 @@ export function runApprovalEndorsementStore({db,service,writer,time,authorize,re
   need(uuid(receiptId),'protection_request');
   return writer(()=>{const work=readRunProtectionWork(db,scope,receiptId);return commitRunProtectionCompletion(db,work,protectionPlan(work));});
  }
- async function receiveProtection(bindingId,socket,input,{completion=false}={}){
+ async function receiveProtection(bindingId,socket,input,{completion=false,observation=null}={}){
   need(readApproval&&pendingProtection<4,'protection_unavailable');
+  need(observation===null||canComplete&&protectionTargets&&uuid(observation)&&!completion,'protection_unavailable');
   const notice=approvalProtectionNotice(structuredClone(input)),hash=digest(notice),origin=notice.origin_scope;
   const hasTargets=notice.arm_generations.length>0;
   need(!hasTargets||protectionTargets,'protection_unavailable');
@@ -298,8 +299,17 @@ export function runApprovalEndorsementStore({db,service,writer,time,authorize,re
     receipt=body.receipt;
    }else need(!hasTargets,'integrity');
    need(receipt.receipt_id===id,'integrity');approvalProtectionReceipt(receipt,notice);
+   if(observation!==null){
+    const work=readRunProtectionWork(db,scope,receipt.receipt_id);
+    return observeRunProtectionCompletion(db,work,protectionPlan(work));
+   }
    return canComplete&&completion?readRunProtectionCompletion(db,notice,receipt,bodyHash)??receipt:receipt;
   }
+  if(observation!==null)return writer(()=>{
+   const record=authorized(),observed=prior()??{state:'not_found',completion:null};
+   need(same(authorized(),record),'protection_scope');
+   return {format:'leafseamer.run-approval-protection-observation/1',challenge_id:observation,request_digest:hash,...observed};
+  });
   const prepared=writer(()=>{const record=authorized();return {record,existing:prior()};});
   if(prepared.existing)return prepared.existing;
   const start=pairingSample(),started=BigInt(start.tick_ns);

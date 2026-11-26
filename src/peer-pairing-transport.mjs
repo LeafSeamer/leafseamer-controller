@@ -21,7 +21,8 @@ import {armPreparationEligibilityRequest,armPreparationEligibilityReply,armPrepa
 import {actionAdmissionRequest,actionBindingPath,actionBindingReply,actionBindingRequestLimit,actionBindingResponseLimit,
  actionBindingVersion,scheduledActionBindingVersion} from './peer-action-binding.mjs';
 import {automationCommandPaths,automationCommandReply,automationCommandRequest,automationCommandRequestLimit,automationCommandResponseLimit,automationCommandVersion} from './peer-automation-command.mjs';
-import {approvalProtectionNotice,runApprovalProtectionReply,runApprovalProtectionVersion,endorsementRevocationNotice,endorsementRevocationReceipt} from './peer-run-approval-protection.mjs';
+import {approvalProtectionNotice,runApprovalProtectionReply,runApprovalProtectionVersion,runApprovalProtectionObservation,
+ runApprovalProtectionObservationVersion,endorsementRevocationNotice,endorsementRevocationReceipt} from './peer-run-approval-protection.mjs';
 const day=86400000000000n,sha=bytes=>'sha256:'+crypto.createHash('sha256').update(bytes).digest('hex');
 const runRecordReads={
  'approval-proposals':{owner:'seamer',reader:'controller',name:'run-approval-proposal',header:'x-leafseamer-proposal-digest',
@@ -295,7 +296,10 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
     const reverse=protection[3]!==undefined,handler=reverse?runEndorsementRevocation:runApprovalProtection;
     const decode=reverse?endorsementRevocationNotice:approvalProtectionNotice,verify=reverse?endorsementRevocationReceipt:runApprovalProtectionReply;
     const version=req.headers['x-leafseamer-protection-version'],completion=!reverse&&version===runApprovalProtectionVersion;
-    need(version===undefined||completion,'version');
+    const observing=!reverse&&version===runApprovalProtectionObservationVersion;
+    need(version===undefined||completion||observing,'version');
+    const observation=observing?req.headers['x-leafseamer-challenge']:null;
+    if(observing)pairingUuid(observation);
     need(req.method==='POST'&&identity.service_kind===(reverse?'seamer':'controller')&&typeof handler==='function'&&
      req.headers.authorization===undefined&&req.headers.cookie===undefined&&req.headers.origin===undefined,'route');
     const bindingId=req.headers['x-leafseamer-pairing'];
@@ -306,9 +310,11 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
     const chunks=[];let size=0;for await(const chunk of req){size+=chunk.length;need(size<=16384,'capacity');chunks.push(chunk);}
     const notice=decode(decodeDeviceBindings(Buffer.concat(chunks),16384)),requested=reverse?notice.endorsement_ref.object_id:notice.approval_ref.object_id;
     need(requested===(protection[3]??protection[2])&&same(authorized(),record),'changed');
-    const receipt=verify(await handler(bindingId,req.socket,notice,{completion}),notice,{completion});
+    const value=await handler(bindingId,req.socket,notice,observing?{observation}:{completion});
+    const receipt=observing?runApprovalProtectionObservation(value,notice,observation):verify(value,notice,{completion});
     const bytes=Buffer.from(canonical(receipt));need(bytes.length<=16384&&same(authorized(),record),'changed');
-    res.writeHead(202,{'Content-Type':'application/json','Content-Length':bytes.length});res.end(bytes);return;
+    res.writeHead(observing?200:202,{'Content-Type':'application/json','Content-Length':bytes.length,
+     ...(observing&&{'X-LeafSeamer-Protection-Version':version})});res.end(bytes);return;
    }
    const denial=/^\/internal\/pairings\/([0-9a-f-]{36})\/session-denials$/.exec(req.url);
    if(denial){
@@ -364,8 +370,8 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
   need(!closed&&peers,'configuration_missing');const record=pairings.currentPending(bindingId),peer=peers.find(p=>p.identity.service_id===record.peer_service_id);need(peer,'peer');
   const target=record.transcript.parties.find(p=>p.service_id===peer.identity.service_id),bytes=body===null?null:Buffer.from(canonical(body));
   const approvalRead=operation==='automation-service-approval';
-  const completion=operation==='run-approval-protection-completion',reverse=operation==='run-endorsement-revocation',
-   protection=completion||operation==='run-approval-protection'||reverse;
+  const completion=operation==='run-approval-protection-completion',observation=operation==='run-approval-protection-observation',
+   reverse=operation==='run-endorsement-revocation',protection=completion||observation||operation==='run-approval-protection'||reverse;
   const lookup=operation==='preparations/lookup',eligibility=operation==='preparations/eligibility';
   const readPreparation=lookup||eligibility,preparation=readPreparation||operation==='preparations';
   const actionRead=operation==='action-bindings';
@@ -373,7 +379,7 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
   const actionProtocol=actionRead||commandOperation;
   const actionVersion=actionRead?actionBindingVersion:automationCommandVersion;
   const actionVersionHeader=actionRead?'x-leafseamer-action-binding-version':'x-leafseamer-automation-command-version';
-  const challenge=preparation||actionProtocol?crypto.randomUUID():null;
+  const challenge=preparation||actionProtocol||observation?crypto.randomUUID():null;
   if(actionProtocol){
    const local=record.transcript.parties.find(p=>p.service_id===identity.service_id);
    need(record.state==='activated'&&identity.service_kind===(actionRead?'controller':'seamer')&&
@@ -417,6 +423,7 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
    const headers=bytes?{'Content-Type':'application/json','Content-Length':bytes.length}:{};
    if(protection)headers['X-LeafSeamer-Pairing']=target.binding_id;
    if(completion)headers['X-LeafSeamer-Protection-Version']=runApprovalProtectionVersion;
+   if(observation)Object.assign(headers,{'X-LeafSeamer-Protection-Version':runApprovalProtectionObservationVersion,'X-LeafSeamer-Challenge':challenge});
    if(preparation)Object.assign(headers,{'X-LeafSeamer-Pairing':target.binding_id,'X-LeafSeamer-Challenge':challenge,
     'X-LeafSeamer-Preparation-Version':preparationProtocol});
    if(actionProtocol)Object.assign(headers,{'X-LeafSeamer-Pairing':target.binding_id,'X-LeafSeamer-Challenge':challenge,
@@ -432,10 +439,11 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
       need(response.headers[actionVersionHeader]===actionVersion,'response');
      }
      if(preparation){need(same(current(bindingId,response.socket),record),'changed');need(response.statusCode!==409,'preparation_conflict');}
-     need((response.statusCode===(protection?202:200)||preparation&&!readPreparation&&response.statusCode===202||
+     need((response.statusCode===(protection&&!observation?202:200)||preparation&&!readPreparation&&response.statusCode===202||
       commandOperation==='submit'&&response.statusCode===202)&&response.headers['content-type']==='application/json'&&
       (!(approvalRead||protection||preparation||actionProtocol)||response.headers['cache-control']==='no-store')&&
-      (!preparation||response.headers['x-leafseamer-preparation-version']===preparationProtocol),'response');
+      (!preparation||response.headers['x-leafseamer-preparation-version']===preparationProtocol)&&
+      (!observation||response.headers['x-leafseamer-protection-version']===runApprovalProtectionObservationVersion),'response');
     }catch(error){response.destroy();reject(error);return;}
     const socket=response.socket,chunks=[],limit=actionRead?actionBindingResponseLimit:commandOperation?automationCommandResponseLimit:
      preparation?preparationResponseLimit:16384;let size=0;
@@ -457,7 +465,10 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
       const result=eligibility?armPreparationEligibilityReply(value,body,record,challenge):armPreparationReply(value,body,record,challenge,lookup);
       resolve(readPreparation?result:{created:response.statusCode===202,record:result});return;
      }
-     if(protection){need(same(current(bindingId,socket),record),'changed');resolve((reverse?endorsementRevocationReceipt:runApprovalProtectionReply)(value,body,{completion}));return;}
+     if(protection){
+      need(same(current(bindingId,socket),record),'changed');
+      resolve(observation?runApprovalProtectionObservation(value,body,challenge):(reverse?endorsementRevocationReceipt:runApprovalProtectionReply)(value,body,{completion}));return;
+     }
      if(operation==='session-denials'){need(same(pairings.currentPending(bindingId),record),'changed');sessionDenialReceipt(value,body);}
      else need(value.pair_attempt_id===record.transcript.pair_attempt_id&&value.transcript_digest===record.transcript_digest,'response_binding');
      if(operation==='status')need(value.format==='leafseamer.peer-pairing-status/1'&&value.binding_ref?.id===target.binding_id&&Array.isArray(value.proofs)&&value.proofs.length<=2,'response_binding');
@@ -548,6 +559,7 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
   deliverSessionDenial:(bindingId,notice)=>remote(bindingId,'session-denials',notice),
   deliverRunApprovalProtection:(bindingId,notice,{completion=false}={})=>
    remote(bindingId,completion?'run-approval-protection-completion':'run-approval-protection',structuredClone(notice)),
+  observeRunApprovalProtection:(bindingId,notice)=>remote(bindingId,'run-approval-protection-observation',structuredClone(notice)),
   deliverRunEndorsementRevocation:(bindingId,notice)=>remote(bindingId,'run-endorsement-revocation',structuredClone(notice)),
   submitRunPreparation:(bindingId,request)=>remote(bindingId,'preparations',structuredClone(request)),
   lookupRunPreparation:(bindingId,request)=>remote(bindingId,'preparations/lookup',structuredClone(request)),

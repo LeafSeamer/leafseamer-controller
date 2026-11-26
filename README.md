@@ -989,6 +989,12 @@ Schema 70显式增加快照基线确认，保留旧身份、迁移、订阅、�
 
 Schema 71 支持持久增量追赶。停机后可显式运行 `leafseamer-controller migrate-storage --data-dir <绝对路径> --to-revision 71`。迁移保留旧行和原基线确认。新确认与追赶区间同事务提交，区间从快照内部日志位置之后开始，止于确认时的日志头。Controller 每批准备最多 16 个获准来源条目，按连续游标逐帧通过配对 WebSocket 发送。传输回调成功后记录当前代际的发送事实，收到匹配的 durable_ingest ACK 才提交确认水位。区间内条目全部确认后，最后一个游标交付 `server.sync.ready`，空区间也交付检查点。重连从已确认水位继续，重放复用原游标和正文摘要。接收端需采用 Schema 5。每个连接代际固定自己的追赶终点。确认本代检查点后订阅进入 live，空闲连接随获准日志追加主动发送。重连先交付断线期间的历史；新代确认自己的检查点后，后续新条目标为 live。
 
+### 配对运行保护复核
+
+Schema 80 起，拥有 `automation.protect` 权限的配对 Seamer 可在内部撤销路径上核对当前保护。`POST /internal/automation/run-approvals/{approval_id}/revoke` 携带原撤销通知，设置 `X-LeafSeamer-Protection-Version: run-approval-protection-observation/1` 和一次性的 `X-LeafSeamer-Challenge`。请求由配对双向 TLS 认证。响应返回同一挑战、原请求摘要和核对结果。
+
+`not_found` 和 `pending` 分别表示当前未找到原拒绝或还没有完成回执。已有回执时，Controller 重新核对拒绝代次和完整设备出口清单，或检查原批准下仍无准备。只有重算的证据与原回执一致时才返回 `verified`。如有未覆盖出口或证据变化，则返回 `indeterminate` 并附原完成回执。该查询只反映本次读取，设备资源释放与人员恢复仍需各自的证据和授权。
+
 ### 配对自动化命令裁决
 
 停机后使用 `leafseamer-controller migrate-storage --data-dir <绝对路径> --to-revision 95` 启用自动化命令裁决账本。配对 Seamer 使用内部 `/internal/automation/commands`、`/internal/automation/commands/lookup` 和 `/internal/automation/commands/reject`，分别提交、查原和永久拒收。提交额外要求 `automation.prepare`，拒收要求 `automation.protect`。

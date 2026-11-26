@@ -51,6 +51,17 @@ export function approvalProtectionReceipt(value,notice){
 }
 
 export const runApprovalProtectionVersion='run-approval-protection/1';
+export const runApprovalProtectionObservationVersion='run-approval-protection-observation/1';
+export function runApprovalProtectionObservation(value,notice,challenge){
+ fields(value,'challenge_id,completion,format,request_digest,state');
+ uuid(challenge);
+ need(value.format==='leafseamer.run-approval-protection-observation/1'&&value.challenge_id===challenge&&
+  value.request_digest===digest(notice),'approval_protection_observation');
+ if(value.state==='verified'||value.state==='indeterminate'){
+  need(runApprovalProtectionReply(value.completion,notice,{completion:true}).protection_state==='applied','approval_protection_observation');
+ }else need(['not_found','pending'].includes(value.state)&&value.completion===null,'approval_protection_observation');
+ return value;
+}
 export function runApprovalProtectionReply(value,notice,{completion=false}={}){
  if(!completion||value?.format!=='leafseamer.run-approval-protection/1')return approvalProtectionReceipt(value,notice);
  fields(value,'deny_through_generation,device_ids,format,proof_digest,protection_state,receipt_id,rejection,run_id');

@@ -32,11 +32,8 @@ export function readRunProtectionCompletion(db,notice,rejection,checksum){
  }
  return body;
 }
-export function commitRunProtectionCompletion(db,work,plan){
- need(db.inTransaction,'writer');
- const {notice,receipt:rejection,checksum,generations,local_targets}=work;
- const old=readRunProtectionCompletion(db,notice,rejection,checksum);
- if(old)return {state:'acknowledged',receipt:old};
+function currentProof(db,work,plan){
+ const {notice,checksum,generations,local_targets}=work;
  need(same(notice.origin_scope,plan.origin_scope),'source');
  let format,targets;
  if(plan.deny_through_generation===null){
@@ -45,15 +42,32 @@ export function commitRunProtectionCompletion(db,work,plan){
   // Grants and preparation commits require a preparation row. The rejection and its insert trigger block future rows for this approval.
   const prepared=db.prepare(`SELECT 1 FROM run_preparation WHERE origin_service_id=? AND origin_database_instance_id=? AND approval_id=? LIMIT 1`)
    .pluck().get(authority_service_id,database_instance_id,notice.approval_ref.object_id);
-  if(prepared)return {state:'pending',receipt:null};
+  if(prepared)return null;
   format=unpreparedEvidence;targets=unpreparedTargets(plan.device_ids);
  }else{
-  need(generations.size===1&&generations.get(plan.run_id)===plan.deny_through_generation.padStart(20,'0')&&
-   runGenerationDenied(db,plan.origin_scope,plan.run_id,plan.deny_through_generation),'source');
+  need(generations.size===1&&generations.get(plan.run_id)===plan.deny_through_generation.padStart(20,'0'),'source');
+  if(!runGenerationDenied(db,plan.origin_scope,plan.run_id,plan.deny_through_generation))return null;
   format=fenceEvidence;targets=plan.device_ids.map(deviceId=>readRunProtectionExits(db,deviceId,plan));
-  if(!targets.every(target=>target.state==='acknowledged'))return {state:'pending',receipt:null};
+  if(!targets.every(target=>target.state==='acknowledged'))return null;
  }
- const proof={format,rejection_digest:checksum,plan,targets};
+ return {format,rejection_digest:checksum,plan,targets};
+}
+
+export function observeRunProtectionCompletion(db,work,plan){
+ const {notice,receipt:rejection,checksum}=work;
+ const completion=readRunProtectionCompletion(db,notice,rejection,checksum);
+ if(!completion)return {state:'pending',completion:null};
+ const proof=currentProof(db,work,plan);
+ return {state:proof&&digest(proof)===completion.proof_digest?'verified':'indeterminate',completion};
+}
+
+export function commitRunProtectionCompletion(db,work,plan){
+ need(db.inTransaction,'writer');
+ const {notice,receipt:rejection,checksum}=work;
+ const old=readRunProtectionCompletion(db,notice,rejection,checksum);
+ if(old)return {state:'acknowledged',receipt:old};
+ const proof=currentProof(db,work,plan);
+ if(!proof)return {state:'pending',receipt:null};
  const receipt=runApprovalProtectionReply({format:'leafseamer.run-approval-protection/1',protection_state:'applied',
   receipt_id:crypto.randomUUID(),rejection,run_id:plan.run_id,deny_through_generation:plan.deny_through_generation,
   device_ids:plan.device_ids,proof_digest:digest(proof)},notice,{completion:true});
