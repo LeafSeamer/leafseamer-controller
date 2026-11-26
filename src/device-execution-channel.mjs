@@ -6,7 +6,8 @@ import {createDecoder,profile} from './sdk/runtime/panel-wire/decoder.mjs';
 const codec=createDeviceExecutionCodec(contractSelection),limit=262144,bufferLimit=4*(limit+4);
 const localCommandLimit=16384;
 const localDecoder=createDecoder(contractSelection),localDispatch=localDecoder.worker(deviceExecutionVersion,'c2w','DISPATCH'),
- localGuard=localDecoder.worker(deviceExecutionVersion,'c2w','GUARD_INSTALL');
+ localGuard=localDecoder.worker(deviceExecutionVersion,'c2w','GUARD_INSTALL'),
+ localEncoding=localDecoder.worker(deviceExecutionVersion,'c2w','ENCODE_PACKET');
 const localCommandOptions=Object.freeze({profile:profile({max_message_bytes:localCommandLimit,max_depth:48,max_value_nodes:65536,
  max_object_members:4096,max_key_utf8_bytes:256,max_string_utf8_bytes:localCommandLimit,parse_deadline_ms:2000}),
  yieldNow:()=>Promise.resolve()});
@@ -31,9 +32,10 @@ export function executionSocket(memberBoot,side){
  return net.createConnection('\\\\.\\pipe\\LeafSeamer.Execution.'+memberBoot+'.'+side);
 }
 export function decodeExecutionPayload(bytes,direction){return decodePayload(bytes,direction);}
-// Controller本地生成的小型Guard和派发帧使用同一严格解析器。入站帧和较大帧沿用协作调度。
+// Controller本地生成的小型命令帧使用同一严格解析器。入站帧和较大帧沿用协作调度。
 export function decodeLocalCommandDispatch(bytes){return decodePayload(bytes,'c2w',localDispatch,'execution_dispatch_frame');}
 export function decodeLocalCommandGuard(bytes){return decodePayload(bytes,'c2w',localGuard,'execution_guard_frame');}
+export function decodeLocalCommandEncoding(bytes){return decodePayload(bytes,'c2w',localEncoding,'execution_encoding_frame');}
 async function decodePayload(bytes,direction,local=null,wrongType=null){
  need(bytes instanceof Uint8Array&&bytes.byteLength>0&&bytes.byteLength<=limit,'execution_frame_size');
  const copy=Buffer.from(bytes);

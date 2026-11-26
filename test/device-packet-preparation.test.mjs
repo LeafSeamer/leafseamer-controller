@@ -9,7 +9,7 @@ import {deviceTransmissionWriter} from '../dist/device-transmission-writer.mjs';
 import {deviceExecutionGate} from '../dist/device-execution-gate.mjs';
 import {authorizationRevoked} from '../dist/device-authorization-fence.mjs';
 import {createDeviceModule} from '../dist/simulator-control-module.mjs';
-import {decodeExecutionPayload} from '../dist/device-execution-channel.mjs';
+import {decodeExecutionPayload,decodeLocalCommandEncoding} from '../dist/device-execution-channel.mjs';
 import {openObsCutWriterSession,ObsCutEntryRejected} from '../dist/obs-discovery.mjs';
 import {encodeObsCutPacket,readObsCutPacket,obsCutPrimitive,obsCutPacketBytes} from '../dist/obs-cut-packet.mjs';
 import {deviceExecutionVersion} from '../dist/sdk/device-execution.mjs';
@@ -136,6 +136,15 @@ async function sending(options={}){
 }
 
 function closing(f,id='close') {return f.envelope('CLOSE_GATE',id+'_message',{close_id:id,reason:'protection',scope:'device'});}
+test('本地编码校验和执行通道对定时编码请求得到同一结果',async()=>{
+ const f=await fixture({dispatch:scheduled});
+ const bytes=raw(f.encode('local',42,automationOrigin()));
+ const standard=await decodeExecutionPayload(bytes,'c2w');
+ await decodeExecutionPayload(raw(f.encode('other',17,automationOrigin())),'c2w');
+ const local=await decodeLocalCommandEncoding(bytes);
+ assert.notStrictEqual(local.frame,standard.frame);
+ assert.deepEqual(local,standard);
+});
 test('准备拒绝立即禁止取包，报告送达只登记原报告且不能抹掉屏障账本',async()=>{
  const f=await sending();await f.writer.installGuard(raw(f.install));const report=await f.writer.dispatch(raw(f.dispatch));
  const receipt=f.envelope('REPORT_STORED','stored',{report_id:report.body.report_id,record_revision:'1'});
