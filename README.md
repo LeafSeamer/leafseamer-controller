@@ -1005,7 +1005,7 @@ Controller 在 Schema 78 起支持通过配对双向 TLS 提交、查回和复�
 
 恢复动作使用 `POST /internal/automation/action-bindings` 和 `X-LeafSeamer-Action-Binding-Version: leafseamer-action-binding/3`。请求的 `execution_ref` 为同一新执行的第 2 修订，引用封存的动作执行正文。该正文引用第 1 修订的执行预留、最终执行绑定和开始记录，并保留原制品和新代次。普通触发和排期继续使用第 1 修订及各自的响应版本。
 
-恢复响应同时交付原绑定、开始记录、旧步骤计划及已封存的旧参数原件（如有）。Controller 使用本库准备回执限定执行 ID、自身 RunGrant 和背书，按摘要核对原件，并仅允许开始记录中的 `execute_new` 步骤。已有封存参数必须保持相同，动作仍须符合当前授权范围。核验通过后，自动化命令受理和设备发送继续受当前批准、拒绝代次、设备 Ready 和最终写入门控约束。
+恢复响应同时交付原绑定、开始记录、旧步骤计划及已封存的旧参数原件（如有）。Controller 使用本库准备回执限定执行 ID、自身 RunGrant 和背书，从当前配对的 transcript 核对 Seamer 侧绑定 ID，并仅允许开始记录中的 `execute_new` 步骤。已有封存参数必须保持相同，动作仍须符合当前授权范围。核验通过后，自动化命令受理和设备发送继续受当前批准、拒绝代次、设备 Ready 和最终写入门控约束。
 
 ### 配对自动化命令裁决
 

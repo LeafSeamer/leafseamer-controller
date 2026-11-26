@@ -39,7 +39,7 @@ function scheduleOrigin(value,execution,executionRef,stepId,planRequest,plan){
  return selected;
 }
 
-function recoveryOrigin(value,execution,planRequest,plan,body,receipt,pairingRef){
+function recoveryOrigin(value,execution,planRequest,plan,body,receipt,peerBindingId){
  fields(value,'binding,source_parameters,source_step_plan,start');
  const {binding,start,source_step_plan:source,source_parameters}=value;
  const {scope,execution_id,arm_generation,definition_version,reservation_ref,binding_ref,start_ref,origin_digest,grant_basis}=execution;
@@ -58,9 +58,12 @@ function recoveryOrigin(value,execution,planRequest,plan,body,receipt,pairingRef
   integer(start.run_revision)===integer(binding.run_revision)+1n&&start.state==='start_recorded'&&
   start.dispatch_eligible===false&&binding.dispatch_eligible===false&&
   start.service_boot_id===execution.service_boot_id&&binding.service_boot_id===execution.service_boot_id,'action_recovery_start');
- need(Array.isArray(binding.grants)&&same(binding.grants,grant_basis.map(({eligible_before_ns,...member})=>member))&&
-  binding.grants.some(item=>same(item.grant_ref,receipt.grant_ref)&&same(item.endorsement_ref,receipt.grant.endorsement_ref)&&same(item.pairing_ref,pairingRef)),
-  'action_recovery_grant');
+ const member=binding.grants?.find(item=>same(item.grant_ref,receipt.grant_ref));
+ need(member&&same(binding.grants,grant_basis.map(({eligible_before_ns,...item})=>item))&&
+  same(member.endorsement_ref,receipt.grant.endorsement_ref),'action_recovery_grant');
+ // 接收端核验自己的配对原件。绑定正文保存的是 Seamer 侧配对引用。
+ fields(member.pairing_ref,'id,revision,digest');
+ need(member.pairing_ref.id===peerBindingId&&integer(member.pairing_ref.revision)>0n&&hash(member.pairing_ref.digest),'action_recovery_grant');
  const steps=Array.isArray(start.steps)?start.steps.filter(item=>item.step_id===plan.step_id):[];
  const item=steps[0],originalBinding=source?.payload?.binding;
  need(steps.length===1&&item.decision==='execute_new'&&same(item.grant_ref,receipt.grant_ref)&&
@@ -82,7 +85,7 @@ function recoveryOrigin(value,execution,planRequest,plan,body,receipt,pairingRef
  }
 }
 
-export function actionAdmissionBinding(value,request,prepared,pairingRef=null){
+export function actionAdmissionBinding(value,request,prepared,peerBindingId=null){
  const scheduled=value?.execution?.origin_kind==='schedule',recovery=request.execution_ref.revision==='2';
  fields(value,'execution,step_plan,step_ready,parameters,eligible_before_ns'+(recovery?',recovery':scheduled?',schedule':''));
  const {execution,step_plan:plan,step_ready:ready,parameters,eligible_before_ns}=value;
@@ -118,7 +121,7 @@ export function actionAdmissionBinding(value,request,prepared,pairingRef=null){
   eligible>0n&&eligible<=integer(body.eligible_before_ns)&&eligible<=integer(execution.approved_before_ns)&&
   eligible<=integer(targetGrant.eligible_before_ns),'action_parameters');
  assertEndorsementParameters(endorsementScope(grant.device_actions,grant.parameter_constraints),binding.target.device_action,body.parameters);
- if(recovery)recoveryOrigin(value.recovery,execution,planRequest,plan,body,receipt,pairingRef);
+ if(recovery)recoveryOrigin(value.recovery,execution,planRequest,plan,body,receipt,peerBindingId);
  return {execution_ref,step_id,parameters_ref,origin_scope,controller_scope,run_id,arm_generation,
   definition_version:grant.definition_version,principal:grant.principal,grant_ref:receipt.grant_ref,
   target:binding.target.device_action,parameters:body.parameters,parameter_schema_ref:body.parameter_schema_ref,

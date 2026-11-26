@@ -230,7 +230,8 @@ export function runPreparationStore({db,service,bootId,writer,time,pairingSample
      const now=time(),last=pairingSample(),tick=BigInt(last.tick_ns);
      need(now.lower>=before&&now.upper<deadline&&BigInt(last.lower_ns)>=before&&BigInt(last.upper_ns)<deadline&&
       same(last.runtime_domain_ref,start.runtime_domain_ref)&&tick>=started&&tick<observationDeadline,'preparation_expired');
-     return {record:current.record,eligible_before_ns:String(deadline),not_before_ns:String(before),pairing_ref:pairingReference(current.pair)};
+     const peer_binding_id=recovery?current.pair.transcript.parties.find(item=>same(peerScope(item),origin_scope))?.binding_id:null;
+     return {record:current.record,eligible_before_ns:String(deadline),not_before_ns:String(before),peer_binding_id};
     }catch(error){valid=false;throw error;}
    }
    return verifyInTransaction;
@@ -282,10 +283,10 @@ export function runPreparationStore({db,service,bootId,writer,time,pairingSample
    function assertCurrentInTransaction(){
     need(db.inTransaction&&valid,'action_unavailable');
     try{
-     const {record,eligible_before_ns,not_before_ns,pairing_ref}=grant();
+     const {record,eligible_before_ns,not_before_ns,peer_binding_id}=grant();
      need(same(actionPair(bindingId,socket,origin_scope),initial)&&observed.assertCurrentInTransaction()===true,'action_source_changed');
      if(record!==verifiedRecord){
-      verifiedBinding=actionAdmissionBinding(original,request,record,pairing_ref);
+      verifiedBinding=actionAdmissionBinding(original,request,record,peer_binding_id);
       verifiedRecord=record;
      }
      const binding=verifiedBinding;

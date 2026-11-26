@@ -861,7 +861,7 @@ test('显式接入 Controller 准备受理，核验同一计划与控制原件�
  await assert.rejects(networkStore.prepareActionAdmission(bindingId,'paired TLS',
   {...runtimeCandidate.request.action,preparation:recoveryProof}),{code:'peer_pairing_preparation_ineligible'});
  function recoveryAction({decision='execute_new',operation=recovery.operation_ref,originalParameters=true,parametersValue=13,
-  movePlan=false,oldGrant=recovery.baseline_grant_ref,pairingDigest=binding.digest}={}){
+  movePlan=false,oldGrant=recovery.baseline_grant_ref,peerBinding=originBinding}={}){
   const {execution_id,run_id,arm_generation,artifact_ref,definition_version}=recovery;
   const source_execution_id=id(),source_execution_ref=ref('execution',origin_scope,source_execution_id,'original execution');
   const source_step_plan={...structuredClone(step_plan),execution_id:source_execution_id};
@@ -869,7 +869,7 @@ test('显式接入 Controller 准备受理，核验同一计划与控制原件�
   const sourceBody={...structuredClone(frozen),execution_ref:source_execution_ref,step_plan_digest:digest(source_step_plan),grant_ref:oldGrant};
   const source_parameters=originalParameters?{ref:ref('action_parameters',origin_scope,step_id,sourceBody),body:sourceBody}:null;
   const reservation_ref=ref('execution',origin_scope,execution_id,'reserved execution');
-  const members=[{...recoveryProof,pairing_ref:{id:binding.binding_id,revision:binding.revision,digest:pairingDigest},endorsement_ref:recoveredReceipt.grant.endorsement_ref}];
+  const members=[{...recoveryProof,pairing_ref:{id:peerBinding,revision:'4',digest:digest('Seamer local pairing')},endorsement_ref:recoveredReceipt.grant.endorsement_ref}];
   const definition={format:'leafseamer.recovery-execution-binding/1',operation_ref:operation,execution_ref:reservation_ref,
    approval_ref:recovery.approval_ref,arm_generation,run_revision:'8',grants:members,dispatch_eligible:false,service_boot_id:id()};
   const binding_ref=ref('recovery_execution_binding',origin_scope,execution_id,definition);
@@ -912,7 +912,7 @@ test('显式接入 Controller 准备受理，核验同一计划与控制原件�
   [{decision:'retain_success'},'action_recovery_step'],
   [{operation:{...recovery.operation_ref,digest:digest('different recovery operation')}},'action_recovery_start'],
   [{parametersValue:17},'action_recovery_parameters'],
-  [{pairingDigest:digest('different paired connection')},'action_recovery_grant'],
+  [{peerBinding:id()},'action_recovery_grant'],
   [{oldGrant:recoveryProof.grant_ref},'action_recovery_step'],
   [{movePlan:true},'action_recovery_step']
  ]){
