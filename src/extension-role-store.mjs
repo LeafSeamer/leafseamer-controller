@@ -11,7 +11,7 @@ const exact=(v,keys)=>v&&Object.keys(v).sort().join(',')===keys.split(',').sort(
 const id=v=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\s\S])/.test(v);
 const rows=sqliteRows;
 const frozen=value=>{if(value&&typeof value==='object'){Object.values(value).forEach(frozen);Object.freeze(value);}return value;};
-const readDocument=cacheVerifiedDocument((body,digest)=>{const value=JSON.parse(body);need(canonicalize(value)===body&&'sha256:'+crypto.createHash('sha256').update(body).digest('hex')===digest,'integrity');return value;});
+const readDocument=cacheVerifiedDocument((body,digest)=>{const value=JSON.parse(body);need(canonicalize(value)===body&&'sha256:'+crypto.createHash('sha256').update(body).digest('hex')===digest,'integrity');return value;},{immutable:true});
 export function extensionRoleStore({db,service,available,reference,source,attachCurrent}){
  const read=(body,digest)=>memoExecutionRead(db,'extension-document',[body,digest],()=>readDocument(body,digest));
  let active=0;const scope={authority:'controller',authority_service_id:service.service_id,database_instance_id:service.database_instance_id};
@@ -40,12 +40,17 @@ export function extensionRoleStore({db,service,available,reference,source,attach
  function project(installation,configRef,bindings){return resolveRolePermissions({manifest:installation.manifest,inventory:installation.inventory,
   configuration_ref:configRef,bindings,scope,current:currentObject});}
  function currentResolution(installationRef){
-  need(db.inTransaction,'transaction');const installation=candidate(installationRef),row=rows(db,
-   'SELECT r.* FROM extension_role_head h JOIN extension_role_resolution r USING(resolution_id,revision) WHERE h.installation_id=?',installation.installation_id)[0];
-  if(!row)return null;const record=read(row.body_jcs,row.body_digest);configuration(installation,record.configuration_ref);
-  need(same(project(installation,record.configuration_ref,record.bindings),record.permissions),'changed');
-  return frozen({resolution_ref:{kind:'role_resolution',authority_service_id:service.service_id,database_instance_id:service.database_instance_id,object_id:record.resolution_id,
-   revision:String(row.revision),digest:record.resolution_digest},record});
+  need(db.inTransaction,'transaction');
+  const installation=candidate(installationRef);
+  return memoExecutionRead(db,'extension-current-role-resolution',[installation.installation_id,installationRef.digest],()=>{
+   const row=rows(db,'SELECT r.* FROM extension_role_head h JOIN extension_role_resolution r USING(resolution_id,revision) WHERE h.installation_id=?',
+    installation.installation_id)[0];
+   if(!row)return null;
+   const record=read(row.body_jcs,row.body_digest);configuration(installation,record.configuration_ref);
+   need(same(project(installation,record.configuration_ref,record.bindings),record.permissions),'changed');
+   return frozen({resolution_ref:{kind:'role_resolution',authority_service_id:service.service_id,database_instance_id:service.database_instance_id,object_id:record.resolution_id,
+    revision:String(row.revision),digest:record.resolution_digest},record});
+  });
  }
  attachCurrent?.(currentResolution);
  return Object.freeze({

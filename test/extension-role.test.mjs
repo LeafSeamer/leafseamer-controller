@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import canonicalize from 'canonicalize';
 import {resolveRolePermissions} from '../dist/extension-role-resolution.mjs';
+import {extensionRoleStore} from '../dist/extension-role-store.mjs';
+import {withExecutionReadView} from '../dist/execution-read-view.mjs';
 import {decodeArtifactDocument} from '../dist/sdk/artifact-import.mjs';
 import {migrateStorage} from '../dist/storage.mjs';
 import {inspect,hash} from './fixtures/extension-installation.mjs';
@@ -66,6 +68,31 @@ test('当前配置推进、未知设备、错摘要及客户端自报权限不�
  await api.configurations.configure({request_id:'new-config',installation_ref:installed.installation_ref,expected_revision:'1',bytes:Buffer.from('{"x":1}')});
  assert.deepEqual(api.roles.query('resolve'),first);assert.throws(()=>api.roles.current(installed.installation_ref),{code:'extension_role_configuration_stale'});
  await assert.rejects(api.roles.resolve({...request,request_id:'new',expected_revision:'1'}),{code:'extension_role_configuration_stale'});
+});
+test('角色读取仅在无写入的事务视图复用，配置变化使已读结果失效',{timeout:20000},async t=>{
+ const {f,api,installed,request}=await prepared(t),first=await api.roles.resolve(request),service=f.store.identity;
+ f.close();
+ inspect(f.dir,db=>{
+  db.pragma('foreign_keys=ON');
+  let current;
+  extensionRoleStore({db,service,attachCurrent(read){current=read;},reference(kind,object_id,revision,body){
+   return {kind,authority_service_id:service.service_id,database_instance_id:service.database_instance_id,
+    object_id,revision:String(revision),digest:hash(body)};
+  }});
+  const read=()=>current(installed.installation_ref);
+  const rollback=new Error('rollback_configuration_change');
+  assert.throws(()=>db.transaction(()=>withExecutionReadView(db,()=>{
+   const original=read();
+   assert.deepEqual(original,first);
+   assert.equal(read(),original);
+   assert.throws(()=>{original.record.bindings[0].kind='source';},TypeError);
+   assert.equal(db.prepare('UPDATE extension_configuration_head SET revision=revision+1 WHERE installation_id=?')
+    .run(installed.installation_ref.object_id).changes,1);
+   assert.throws(read,{code:'extension_role_configuration'});
+   throw rollback;
+  })).immediate(),error=>error===rollback);
+  db.transaction(()=>assert.deepEqual(read(),first)).immediate();
+ });
 });
 test('解析逐写故障整体回滚，来源撤销和等待期间配置推进均不提交',{timeout:20000},async t=>{
  for(const table of ['extension_role_resolution','extension_role_head','extension_role_operation']){
