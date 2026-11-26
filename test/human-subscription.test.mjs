@@ -9,6 +9,7 @@ import Database from 'better-sqlite3';
 import WebSocket from 'ws';
 import {setup,inspect} from './fixtures/extension-installation.mjs';
 import {peerCertificates} from './fixtures/peer-certificates.mjs';
+import {verifyHumanProjectionBrowser} from './fixtures/human-projection-browser.mjs';
 import {fixture as clockFixture} from './auth-clock-fixture.mjs';
 import {migrateStorage} from '../dist/storage.mjs';
 import {createAuthenticationHttp} from '../dist/auth-http.mjs';
@@ -120,10 +121,10 @@ test('迁移保留身份，真实 HTTPS 和 WebSocket 人员订阅确认快照�
  }});
 
  const {ca,leaves:[tls]}=peerCertificates();
- let api;
+ let api,browserAssets,projectionTransport;
  server=https.createServer(tls,(req,res)=>{
   if(req.url==='/ticket-test'){res.writeHead(200,{'content-type':'text/html'});res.end('<!doctype html><title>Subscription test</title>');return;}
-  if(!api.handle(req,res)){res.writeHead(404);res.end();}
+  if(!api.handle(req,res)&&!browserAssets?.handle(req,res)){res.writeHead(404);res.end();}
  });
  server.listen(0,'127.0.0.1');await once(server,'listening');
  const origin='https://127.0.0.1:'+server.address().port;
@@ -137,7 +138,9 @@ test('迁移保留身份，真实 HTTPS 和 WebSocket 人员订阅确认快照�
  api=createAuthenticationHttp({serviceId:service.service_id,databaseInstanceId:service.database_instance_id,serviceBootId:bootId,
   origin,sessions,localPairing:(auth,operation,request)=>manageLocalEvents(sessions,auth,operation,request)});
  humanEvents=createHumanEventWebsocket({origin,subscriptions:sessions.serviceSubscriptions,stable(){}});
- server.on('upgrade',(req,socket,head)=>{if(!humanEvents.upgrade(req,socket,head))socket.destroy();});
+ server.on('upgrade',(req,socket,head)=>{
+  if(humanEvents.upgrade(req,socket,head))projectionTransport=socket;else socket.destroy();
+ });
 
  function send(method,route,body,extra={}){
   const content=body===null?null:Buffer.from(canonical(body));
@@ -429,4 +432,13 @@ test('迁移保留身份，真实 HTTPS 和 WebSocket 人员订阅确认快照�
    'catching_up','catching_up','live','catching_up','catching_up','closed','building','building','revoked']);
  assert.deepEqual(db.pragma('foreign_key_check').map(row=>row.table).sort(),
   ['device_event_source','device_event_source','device_event_source','device_source_event','device_source_event']);
+ if(process.env.LEAFSEAMER_PROJECTION_GUI_ROOT){
+  assert.equal((await admin('set-status-scope-reader',{...grant,request_id:id(),expected_revision:'2'})).status,200);
+  await verifyHumanProjectionBrowser({dir:f.dir,service,origin,tls,login,scope:scoped.body.scope,registrationId:registration_id,db,
+   deploy(assets){browserAssets=assets;},disconnect(){projectionTransport.destroy();},publish:appendSourceEvent,
+   sweep(){sessions.serviceSubscriptions.sweep();humanEvents.sweep();},async revoke(){
+    assert.equal((await admin('set-status-scope-reader',{...disable,request_id:id(),expected_revision:'3'})).status,200);
+   }});
+  t.diagnostic('Edge 工作台核验固定快照、实时来源投影、断线续传、显式关闭及撤权清理');
+ }
 });
