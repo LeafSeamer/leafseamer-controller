@@ -30,10 +30,12 @@ export function simulatorPairingInputs(store,runtime,source){
   return {profile,evidence:{provider,signal}};
 }
 
-export async function admitSimulatorReference(t,{store,runtime,clock}){
+export async function admitSimulatorReference(t,{store,runtime,clock,withdrawal=null}){
   const artifactDigest=argument('--reference-provider');
-  const authorization=readInstalledLinuxReferenceCapture({identity:store.identity,providerDigest:artifactDigest,
+  const installed=readInstalledLinuxReferenceCapture({identity:store.identity,providerDigest:artifactDigest,
     approvalDigest:argument('--reference-capture')});
+  const authorization=withdrawal?{...installed,referenceAuthority:{...installed.referenceAuthority,
+    readApproval(...args){return withdrawal.withdraw()?null:installed.referenceAuthority.readApproval(...args);}}}:installed;
   const provider=await openLinuxReferenceProvider({core:runtime.binding,artifactDigest,
     timeoutMs:runtime.policy.bootstrap_timeout_ms,assertLive:runtime.assertLive});
   t.after(()=>provider.socket.destroy());

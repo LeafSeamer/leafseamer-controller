@@ -19,6 +19,7 @@ import {localPairingPath,runLocalExtensionAdmin,runLocalPairingAdmin} from '../.
 import {manageLocalEvents} from '../../dist/local-event-management.mjs';
 import {commandPermissions,openAutomaticSimulator,prepareAutomaticSimulator,prepareManualSimulator,writeManualSimulator} from './linux-simulator-command.mjs';
 import {admitSimulatorReference,simulatorPairingInputs,startSimulatorPairing} from './linux-simulator-pairing.mjs';
+import {scheduledReferenceWithdrawal} from './scheduled-reference-withdrawal.mjs';
 
 const compose=process.argv[2]==='contained-compose-linux';
 const inputFile=compose?path.join('/var/lib/leafseamer','worker-test.json'):process.argv[2];
@@ -121,7 +122,10 @@ try{
     }
   }});
   const store=x.f.store;
-  const installedReference=scheduled?await admitSimulatorReference(fixture,{store,runtime,clock}):null;
+  const withdrawal=input.paired?.scheduledReferenceWithdrawal?scheduledReferenceWithdrawal({databasePath:path.join(input.data,'controller.sqlite'),
+    tick:()=>clock.tick(),report:value=>process.stdout.write(JSON.stringify(value)+'\n')}):null;
+  if(withdrawal)fixture.after(withdrawal.close);
+  const installedReference=scheduled?await admitSimulatorReference(fixture,{store,runtime,clock,withdrawal}):null;
   const referenceBinding=store.bindCoreRuntime(binding,policy,supervision,installedReference?.provider);
   store.extensionInstallations.bindRuntimeSource(supervision);
   store.workerLaunches.runtime.bindSource(supervision);
@@ -189,7 +193,10 @@ try{
           await delay(30);
         }
       };
-      openTarget=()=>openAutomaticSimulator({store,operator:a,supervision,key,device:targetDevice,manual,waitForClockRenewal});
+      openTarget=async()=>{
+        await openAutomaticSimulator({store,operator:a,supervision,key,device:targetDevice,manual,waitForClockRenewal});
+        withdrawal?.arm();
+      };
     }
     const command=await writeManualSimulator({store,operator:a,supervision,key,device,manual,value:7});
     simulatorEvent={command,device,event:await waitForEvent(store,device,1,7)};
