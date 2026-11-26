@@ -9,7 +9,7 @@ import {endorsementReference} from './peer-run-approval-endorsement.mjs';
 import {currentControlSource} from './device-control-source.mjs';
 import {adoptRunGenerationDenial,readRunProtectionWork,scanRunProtectionWork} from './run-generation-denial.mjs';
 import {commitRunProtectionCompletion,observeRunProtectionCompletion,readRunProtectionCompletion} from './run-approval-protection-completion.mjs';
-import {runArmOperationReference} from './peer-run-initiator.mjs';
+import {runArmOperationReference,runRecoveryOperationReference} from './peer-run-initiator.mjs';
 import {runEligibilityObservationNs} from './peer-run-preparation.mjs';
 
 const operation='endorseRunApproval',path='/api/v1/run-approval-endorsements';
@@ -380,8 +380,10 @@ export function runApprovalEndorsementStore({db,service,writer,time,authorize,re
  }
  async function prepareRunInitiator(bindingId,ref,expected){
   need(readInitiator&&authorizeArmInitiator&&requireCurrentInitiator&&uuid(bindingId)&&pendingInitiators<4,'initiator_unavailable');
-  const fixed=runArmOperationReference(structuredClone(ref)),intent=structuredClone(expected);
-  need(exact(intent,'approval_ref,arm_generation,artifact_ref,definition_id,definition_version,preparation_id,run_id'),'initiator_request');
+  const recovery=ref?.kind==='recovery_operation';
+  const fixed=(recovery?runRecoveryOperationReference:runArmOperationReference)(structuredClone(ref)),intent=structuredClone(expected);
+  need(exact(intent,'approval_ref,arm_generation,artifact_ref,definition_id,definition_version,'+(recovery?'execution_id,':'')+'preparation_id,run_id')&&
+   (!recovery||uuid(intent.execution_id)),'initiator_request');
   const start=pairingSample(),started=BigInt(start.tick_ns),record=pairings().currentPending(bindingId),paired=pairingReference(record);
   pendingInitiators++;
   try{
@@ -400,14 +402,15 @@ export function runApprovalEndorsementStore({db,service,writer,time,authorize,re
      const eligible=prepared.assertCurrentInTransaction(),current=pairings().requireActivatedInTransaction(paired);
      need(same(current,record),'initiator_pairing');
      const {principal_kind:_kind,...actor}=initiator;
-     const tokenEnd=authorizeArmInitiator(credential,actor,fixed.scope.authority_service_id);
+     const tokenEnd=authorizeArmInitiator(credential,actor,fixed.scope.authority_service_id,recovery?'run.resume':'run.arm');
      const {original:recorded,audit}=read(db.prepare(select+' WHERE e.endorsement_id=?').raw().get(eligible.endorsement_ref.object_id),true);
      const endorsement=recorded.endorsement;
      const basis=requireCurrentInitiator(approval,endorsement,actor,time(),current);
      const end=[eligible_before_ns,eligible.eligible_before_ns,tokenEnd].map(BigInt).reduce((a,b)=>a<b?a:b),arrival=pairingSample(),tick=BigInt(arrival.tick_ns);
      need(same(arrival.runtime_domain_ref,start.runtime_domain_ref)&&tick>=started&&tick<started+2000000000n&&
       BigInt(arrival.upper_ns)<end,'initiator_expired');
-     const result={operation_ref:fixed,initiator,initiator_authorization_ref,initiator_policy_ref:basis.policy_ref,eligible_before_ns:String(end)};
+     const result={operation_ref:fixed,initiator,initiator_authorization_ref,initiator_policy_ref:basis.policy_ref,eligible_before_ns:String(end),
+      ...(recovery&&{execution_id:intent.execution_id})};
      const currentIssuance={initiator:result,approval_ref:eligible.approval_ref,endorsement_ref:eligible.endorsement_ref,
       validity:approval.validity,service_principal:approval.service_principal,service_approval_ref:approval.source_service_approval_ref,
       target_policy_ref:audit.target_policy_ref,device_actions:endorsement.device_actions,parameter_constraints:endorsement.parameter_constraints};

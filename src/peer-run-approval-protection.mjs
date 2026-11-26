@@ -3,7 +3,7 @@ import {pairingFields as fields,pairingNeed as need,pairingUuid as uuid} from '.
 import {endorsementReference} from './peer-run-approval-endorsement.mjs';
 import {runApprovalReference} from './peer-run-approval.mjs';
 import {proposalReference} from './peer-run-approval-proposal.mjs';
-import {runArmOperationReference} from './peer-run-initiator.mjs';
+import {runArmOperationReference,runRecoveryOperationReference} from './peer-run-initiator.mjs';
 
 const hash=value=>typeof value==='string'&&value.length===71&&/^sha256:[0-9a-f]{64}$/.test(value);
 function generation(value){
@@ -29,7 +29,8 @@ export function approvalProtectionNotice(value){
  const preparations=distinct(value.preparations,entry=>{
   fields(entry,'arm_generation,operation_ref,preparation_id,request_digest,run_id');uuid(entry.preparation_id);
   const {run_id,arm_generation,operation_ref,request_digest}=entry;
-  need(generations.includes(generation({run_id,arm_generation}))&&same(runArmOperationReference(operation_ref).scope,value.origin_scope)&&
+  const operation=(operation_ref?.kind==='recovery_operation'?runRecoveryOperationReference:runArmOperationReference)(operation_ref);
+  need(generations.includes(generation({run_id,arm_generation}))&&same(operation.scope,value.origin_scope)&&
    (request_digest===null||hash(request_digest)),'approval_protection_targets');return entry.preparation_id;
  });
  distinct(value.grants,entry=>{

@@ -141,9 +141,9 @@ export function sessionStore(db, serviceId, clock, authority = null, tokensEnabl
     return {actor:{issuer_id:proof.issuer_id,issuer_epoch:proof.issuer_epoch,principal_id:proof.principal_id},
       evidence:{session_id:proof.session_id,credential_id:proof.credential_id,authorization_digest:proof.authorization_digest,scope_digest:proof.scope_digest}};
   }
-  function authorizeArmInitiator(credential,actor,audience){
+  function authorizeArmInitiator(credential,actor,audience,permission='run.arm'){
     const proof=currentRecordedToken(credential.token_id,audience);
-    if(proof.denied||proof.principal_kind!=='human'||credential.issuer_service_id!==serviceId||!proof.permissions.includes('run.arm')||
+    if(proof.denied||proof.principal_kind!=='human'||credential.issuer_service_id!==serviceId||!proof.permissions.includes(permission)||
       !same([proof.issuer_id,proof.issuer_epoch,proof.principal_id,proof.session_id,proof.credential_id,proof.policy_revision,proof.scope_digest],
         [actor.issuer_id,actor.issuer_epoch,actor.principal_id,credential.session_id,credential.credential_id,credential.policy_revision,credential.scope_digest]))fail('run_initiator_authorization');
     const session=db.prepare("SELECT revision,recent_before_ns FROM auth_session WHERE session_id=? AND state='active'").raw().get(credential.session_id);

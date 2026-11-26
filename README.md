@@ -995,6 +995,14 @@ Schema 80 起，拥有 `automation.protect` 权限的配对 Seamer 可在内部�
 
 `not_found` 和 `pending` 分别表示当前未找到原拒绝或还没有完成回执。已有回执时，Controller 重新核对拒绝代次和完整设备出口清单，或检查原批准下仍无准备。只有重算的证据与原回执一致时才返回 `verified`。如有未覆盖出口或证据变化，则返回 `indeterminate` 并附原完成回执。该查询只反映本次读取，设备资源释放与人员恢复仍需各自的证据和授权。
 
+### 配对恢复准备
+
+Controller 在 Schema 78 起支持通过配对双向 TLS 提交、查回和复核恢复准备。使用原 `/internal/automation/preparations` 路径及其 `/lookup`、`/eligibility` 子路径，并显式选择 `X-LeafSeamer-Preparation-Version: automation-preparation/0.1.0-draft.3`。恢复请求固定新执行和代次，引用原已拒绝批准的 RunGrant，并通过配对 Seamer 读取恢复计划及人员原件。签发前复核当前 `run.resume`、新组织批准、设备保护态及原授权范围。普通布防继续使用 draft.2。
+
+首次签发原子保存请求、RunGrant 和回执。响应丢失后按原准备 ID 与请求摘要查回。旧启动域的回执仍可查询，其当前准备资格会失效。恢复准备只取得本目标的回执，独立开始屏障仍决定新执行何时可以提交动作。
+
+配对 Seamer 通过 `/internal/automation/recovery-plans/{preparation_id}` 和 `/internal/automation/recovery-operations/{operation_id}` 提供原件。请求、计划和人员原件均须指向同一恢复操作和新执行。
+
 ### 配对自动化命令裁决
 
 停机后使用 `leafseamer-controller migrate-storage --data-dir <绝对路径> --to-revision 95` 启用自动化命令裁决账本。配对 Seamer 使用内部 `/internal/automation/commands`、`/internal/automation/commands/lookup` 和 `/internal/automation/commands/reject`，分别提交、查原和永久拒收。提交额外要求 `automation.prepare`，拒收要求 `automation.protect`。

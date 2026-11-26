@@ -5,6 +5,7 @@ import {endorsementReference} from './peer-run-approval-endorsement.mjs';
 import {runProposalBodyLimit} from './peer-run-approval-proposal.mjs';
 
 export const preparationProtocol='automation-preparation/0.1.0-draft.2';
+export const recoveryPreparationProtocol='automation-preparation/0.1.0-draft.3';
 export const preparationRequestLimit=runProposalBodyLimit;
 export const preparationResponseLimit=4*preparationRequestLimit+4096;
 // 仅用于新发起的运行批准、准备资格和动作绑定观察。
@@ -39,9 +40,9 @@ function controllerReference(ref,kind,scope){
  need(ref.kind===kind&&same(ref.scope,scope)&&ref.revision==='1'&&isPreparationDigest(ref.digest),'preparation_response');
 }
 
-export function armPreparationRecord(value,lookup){
+export function armPreparationRecord(value,lookup,{recovery=false}={}){
  fields(value,'request,request_digest,revision,state,applied_receipt,protection_ref');
- const request=armPreparationRequest(value.request,lookup.controller_scope),receipt=value.applied_receipt;
+ const request=armPreparationRequest(value.request,lookup.controller_scope,{recovery}),receipt=value.applied_receipt;
  need(value.state==='applied'&&value.revision==='2'&&value.protection_ref===null&&
   value.request_digest===lookup.request_digest&&value.request_digest===digest(request)&&
   request.preparation_id===lookup.preparation_id&&same(request.origin_scope,lookup.origin_scope),'preparation_response');
@@ -62,11 +63,11 @@ export function armPreparationRecord(value,lookup){
  return value;
 }
 
-export function armPreparationReply(reply,request,pairing,challenge,lookup){
+export function armPreparationReply(reply,request,pairing,challenge,lookup,{recovery=false}={}){
  preparationEnvelope(reply,pairing,challenge);
- if(!lookup)return armPreparationRecord(reply.body,{...request,request_digest:digest(request)});
+ if(!lookup)return armPreparationRecord(reply.body,{...request,request_digest:digest(request)},{recovery});
  fields(reply.body,'state,record');
- if(reply.body.state==='found')armPreparationRecord(reply.body.record,request);
+ if(reply.body.state==='found')armPreparationRecord(reply.body.record,request,{recovery});
  else need(['not_found','indeterminate'].includes(reply.body.state)&&reply.body.record===null,'preparation_response');
  return reply.body;
 }

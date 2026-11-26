@@ -288,9 +288,10 @@ export async function startController({dataDir, host = '127.0.0.1', port = 0, tl
       if (pairing.peers !== undefined) peerTransport.bindPeers(pairing.peers);
       sessions.runEndorsementPolicies?.bindProposalReader((...args)=>peerTransport.readRunApprovalProposal(...args));
       sessions.runApprovalEndorsements?.bindApprovalReader((...args)=>peerTransport.readRunApproval(...args));
-      sessions.runApprovalEndorsements?.bindInitiatorReader((...args)=>peerTransport.readRunInitiator(...args));
-      sessions.runPreparations?.bindPlanReader(async(...args)=>{
-        const plan=await peerTransport.prepareRunArmPlan(...args);
+      sessions.runApprovalEndorsements?.bindInitiatorReader((bindingId,ref)=>ref.kind==='recovery_operation'?
+        peerTransport.readRunRecoveryInitiator(bindingId,ref):peerTransport.readRunInitiator(bindingId,ref));
+      sessions.runPreparations?.bindPlanReader(async(bindingId,ref)=>{
+        const plan=await (ref.kind==='recovery_plan'?peerTransport.prepareRunRecoveryPlan(bindingId,ref):peerTransport.prepareRunArmPlan(bindingId,ref));
         return {original:plan.original,assertCurrentInTransaction(){supervision?.assertCurrent();return plan.assertCurrentInTransaction();}};
       });
       sessions.runPreparations?.bindActionReader(async(...args)=>{

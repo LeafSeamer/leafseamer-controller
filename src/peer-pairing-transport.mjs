@@ -14,10 +14,10 @@ import {automationApprovalRequest,automationApprovalReply} from './peer-automati
 import {peerScope,proposalReference,proposalReadRequest,proposalReadReply,proposalWindowEnd,runProposalResponseLimit} from './peer-run-approval-proposal.mjs';
 import {endorsementReference,endorsementReadRequest,endorsementReadReply,endorsementControlReadReply} from './peer-run-approval-endorsement.mjs';
 import {runApprovalReference,runApprovalReadRequest,runApprovalReadReply} from './peer-run-approval.mjs';
-import {runArmOperationReference,runInitiatorReadRequest,runInitiatorReadReply} from './peer-run-initiator.mjs';
-import {armPlanReference,armPlanReadRequest,armPlanReadReply,armPreparationRequest} from './peer-run-arm-plan.mjs';
+import {runArmOperationReference,runRecoveryOperationReference,runInitiatorReadRequest,runInitiatorReadReply,runRecoveryInitiatorReadReply} from './peer-run-initiator.mjs';
+import {armPlanReference,recoveryPlanReference,armPlanReadRequest,armPlanReadReply,recoveryPlanReadReply,armPreparationRequest} from './peer-run-arm-plan.mjs';
 import {armPreparationEligibilityRequest,armPreparationEligibilityReply,armPreparationLookup,armPreparationReply,preparationProtocol,preparationRequestLimit,preparationResponseLimit,
- runEligibilityObservationMs,runEligibilityObservationNs} from './peer-run-preparation.mjs';
+ recoveryPreparationProtocol,runEligibilityObservationMs,runEligibilityObservationNs} from './peer-run-preparation.mjs';
 import {actionAdmissionRequest,actionBindingPath,actionBindingReply,actionBindingRequestLimit,actionBindingResponseLimit,
  actionBindingVersion,scheduledActionBindingVersion} from './peer-action-binding.mjs';
 import {automationCommandPaths,automationCommandReply,automationCommandRequest,automationCommandRequestLimit,automationCommandResponseLimit,automationCommandVersion} from './peer-automation-command.mjs';
@@ -39,6 +39,12 @@ const runRecordReads={
   deadline:value=>value.eligible_before_ns,timeout:'run_initiator_expired'},
  'arm-plans':{owner:'seamer',reader:'controller',name:'run-arm-plan',header:'x-leafseamer-plan-digest',
   reference:armPlanReference,request:(id,version,hash,challenge)=>armPlanReadRequest(id,hash,challenge),decode:armPlanReadReply,prepared:true,
+  deadline:value=>value.eligible_before_ns,timeout:'preparation_expired'},
+ 'recovery-operations':{owner:'seamer',reader:'controller',name:'run-recovery-initiator',header:'x-leafseamer-operation-digest',
+  reference:runRecoveryOperationReference,request:(id,version,hash,challenge)=>runInitiatorReadRequest(id,hash,challenge),decode:runRecoveryInitiatorReadReply,
+  deadline:value=>value.eligible_before_ns,timeout:'run_initiator_expired'},
+ 'recovery-plans':{owner:'seamer',reader:'controller',name:'run-recovery-plan',header:'x-leafseamer-plan-digest',
+  reference:recoveryPlanReference,request:(id,version,hash,challenge)=>armPlanReadRequest(id,hash,challenge),decode:recoveryPlanReadReply,prepared:true,
   deadline:value=>value.eligible_before_ns,timeout:'preparation_expired'},
  'run-approvals':{owner:'seamer',reader:'controller',name:'run-approval',header:'x-leafseamer-approval-digest',
   reference:runApprovalReference,request:runApprovalReadRequest,decode:runApprovalReadReply,versioned:true,
@@ -64,7 +70,7 @@ function unicast(host){
 }
 
 // 独立内部监听。pending只交付具名配对状态；普通核验另需显式处理器、active及用途授权。
-export async function startPeerPairingTransport({pairings,clock,identity,cert,key,ca,host='127.0.0.1',port=0,serverName=host,network=false,introspection=null,sessionDenial=null,sessionDenials=null,deviceBindings=null,deviceEvents=null,subscriptions=null,automationApproval=null,runProposal=null,runEndorsement=null,runControlObservation=null,runApproval=null,runInitiator=null,runArmPlan=null,runPreparations=null,runActionBinding=null,automationCommands=null,runApprovalProtection=null,runEndorsementRevocation=null,eventAge=null}){
+export async function startPeerPairingTransport({pairings,clock,identity,cert,key,ca,host='127.0.0.1',port=0,serverName=host,network=false,introspection=null,sessionDenial=null,sessionDenials=null,deviceBindings=null,deviceEvents=null,subscriptions=null,automationApproval=null,runProposal=null,runEndorsement=null,runControlObservation=null,runApproval=null,runInitiator=null,runArmPlan=null,runRecoveryInitiator=null,runRecoveryPlan=null,runPreparations=null,runActionBinding=null,automationCommands=null,runApprovalProtection=null,runEndorsementRevocation=null,eventAge=null}){
  need(typeof network==='boolean'&&(['127.0.0.1','::1'].includes(host)||network&&unicast(host))&&Number.isInteger(port)&&port>=0&&port<=65535,'listen');
  need(pairings&&typeof clock?.pairingSample==='function','configuration');
  need(sessionDenials===null||(identity.service_kind==='controller'&&typeof sessionDenials.scan==='function'&&typeof sessionDenials.deliverPending==='function'),'session_denial_delivery');
@@ -83,7 +89,8 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
  const current=(bindingId,socket,reference=null)=>{need(!closed&&peers,'configuration_missing');const record=reference?pairings.requireActivatedInTransaction(reference):pairings.currentPending(bindingId),peer=peers.find(p=>p.identity.service_id===record.peer_service_id);
   need(peer,'peer');validate(socket,peer);const party=record.transcript.parties.find(p=>p.service_id===peer.identity.service_id);
   need(same(pairingCertificate(socket.getPeerX509Certificate().raw),{certificate_der_sha256:party.certificate_der_sha256,spki_sha256:party.spki_sha256}),'certificate_binding');return record;};
- const readRunRecord={'approval-proposals':runProposal,'run-approval-endorsements':runEndorsement,'run-approval-control-observations':runControlObservation,'run-approvals':runApproval,'run-operations':runInitiator,'arm-plans':runArmPlan};
+ const readRunRecord={'approval-proposals':runProposal,'run-approval-endorsements':runEndorsement,'run-approval-control-observations':runControlObservation,
+  'run-approvals':runApproval,'run-operations':runInitiator,'arm-plans':runArmPlan,'recovery-operations':runRecoveryInitiator,'recovery-plans':runRecoveryPlan};
  const server=https.createServer({key,cert,ca:roots.map(root=>root.toString()),requestCert:true,rejectUnauthorized:true,minVersion:'TLSv1.3',maxVersion:'TLSv1.3',
   secureOptions:crypto.constants.SSL_OP_NO_TICKET,maxHeaderSize:8192,requestTimeout:5000,headersTimeout:5000,handshakeTimeout:5000,keepAliveTimeout:1000},async(req,res)=>{
   res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
@@ -163,10 +170,11 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
    }
    if(/^\/internal\/automation\/preparations(?:\/lookup|\/eligibility)?$/.test(req.url)){
     const lookup=req.url.endsWith('/lookup'),eligibility=req.url.endsWith('/eligibility');
+    const version=req.headers['x-leafseamer-preparation-version'],recovery=version===recoveryPreparationProtocol;
     const handle=eligibility?runPreparations?.prepareEligibility:lookup?runPreparations?.lookup:runPreparations?.prepare;
     const bindingId=req.headers['x-leafseamer-pairing'],challenge=req.headers['x-leafseamer-challenge'];pairingUuid(challenge);
     need(req.method==='POST'&&identity.service_kind==='controller'&&typeof handle==='function'&&
-     req.headers['x-leafseamer-preparation-version']===preparationProtocol&&req.headers.authorization===undefined&&
+     (recovery||version===preparationProtocol)&&req.headers.authorization===undefined&&
      req.headers.cookie===undefined&&req.headers.origin===undefined,'route');
     const record=current(bindingId,req.socket),peer=record.transcript.parties.find(part=>part.service_id===record.peer_service_id);
     need(record.state==='activated'&&peer?.service_kind==='seamer'&&peer.permissions.includes('automation.prepare.read'),'purpose');
@@ -176,24 +184,24 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
     const chunks=[];let size=0;for await(const chunk of req){size+=chunk.length;need(size<=Number(length),'capacity');chunks.push(chunk);}
     need(size===Number(length)&&same(current(bindingId,req.socket),record),'changed');
     const decode=eligibility?armPreparationEligibilityRequest:lookup?armPreparationLookup:armPreparationRequest;
-    const input=decode(decodeDeviceBindings(Buffer.concat(chunks),preparationRequestLimit),peerScope(identity),{allowScheduled:eligibility});
+    const input=decode(decodeDeviceBindings(Buffer.concat(chunks),preparationRequestLimit),peerScope(identity),{allowScheduled:eligibility&&!recovery,recovery});
     need(same((eligibility?input.lookup:input).origin_scope,peerScope(peer)),'preparation_scope');
     let outcome;
-    try{outcome=await handle(bindingId,req.socket,input);}catch(error){
+    try{outcome=await handle(bindingId,req.socket,input,{recovery});}catch(error){
      if(error?.code!=='peer_pairing_preparation_conflict')throw error;
      need(same(current(bindingId,req.socket),record),'changed');res.writeHead(409,{'Content-Length':0});res.end();return;
     }
     const reply={challenge_id:challenge,pair_attempt_id:record.transcript.pair_attempt_id,transcript_digest:record.transcript_digest,
      body:eligibility?outcome.body:lookup?outcome:outcome.record};
     if(eligibility)armPreparationEligibilityReply(reply,input,record,challenge);
-    else armPreparationReply(reply,input,record,challenge,lookup);
+    else armPreparationReply(reply,input,record,challenge,lookup,{recovery});
     const bytes=Buffer.from(canonical(reply));
     need(bytes.length<=preparationResponseLimit&&same(current(bindingId,req.socket),record),'changed');
     if(eligibility)need(same(outcome.beforeSend(),reply.body),'changed');
-    res.writeHead(!lookup&&!eligibility&&outcome.created?202:200,{'Content-Type':'application/json','Content-Length':bytes.length,'X-LeafSeamer-Preparation-Version':preparationProtocol});
+    res.writeHead(!lookup&&!eligibility&&outcome.created?202:200,{'Content-Type':'application/json','Content-Length':bytes.length,'X-LeafSeamer-Preparation-Version':version});
     res.end(bytes);return;
    }
-   const runRead=/^\/internal\/automation\/(approval-proposals|run-approval-endorsements|run-approval-control-observations|run-approvals|run-operations|arm-plans)\/([0-9a-f-]{36})(?:\/revisions\/([1-9][0-9]{0,19}))?$/.exec(req.url);
+   const runRead=/^\/internal\/automation\/(approval-proposals|run-approval-endorsements|run-approval-control-observations|run-approvals|run-operations|arm-plans|recovery-operations|recovery-plans)\/([0-9a-f-]{36})(?:\/revisions\/([1-9][0-9]{0,19}))?$/.exec(req.url);
    if(runRead){
     const [,collection,id,revision]=runRead,spec=runRecordReads[collection],read=readRunRecord[collection];
     need(req.method==='GET'&&identity.service_kind===spec.owner&&typeof read==='function'&&Boolean(revision)===Boolean(spec.versioned),'route');
@@ -367,6 +375,9 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
  const describe=(value,pem,ep,trust=trustDigest)=>({...value,...pairingCertificate(pem),trust_bundle_digest:trust,endpoint_config_digest:digest(ep)});
  const localConfiguration=describe(identity,cert,localEndpoint);
  async function remote(bindingId,operation,body=null,received=value=>value){
+  const recovery=operation.startsWith('recovery-preparations');
+  if(recovery)operation=operation.slice('recovery-'.length);
+  const preparationVersion=recovery?recoveryPreparationProtocol:preparationProtocol;
   need(!closed&&peers,'configuration_missing');const record=pairings.currentPending(bindingId),peer=peers.find(p=>p.identity.service_id===record.peer_service_id);need(peer,'peer');
   const target=record.transcript.parties.find(p=>p.service_id===peer.identity.service_id),bytes=body===null?null:Buffer.from(canonical(body));
   const approvalRead=operation==='automation-service-approval';
@@ -396,7 +407,7 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
    need(record.state==='activated'&&identity.service_kind==='seamer'&&target.service_kind==='controller'&&
     local?.permissions.includes('automation.prepare.read')&&(readPreparation||local.permissions.includes('automation.prepare')),'purpose');
    const decode=eligibility?armPreparationEligibilityRequest:lookup?armPreparationLookup:armPreparationRequest;
-   decode(body,peerScope(target),{allowScheduled:eligibility});
+   decode(body,peerScope(target),{allowScheduled:eligibility&&!recovery,recovery});
    need(same((eligibility?body.lookup:body).origin_scope,peerScope(identity))&&bytes.length<=preparationRequestLimit,'preparation_scope');
   }
   if(protection){
@@ -425,7 +436,7 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
    if(completion)headers['X-LeafSeamer-Protection-Version']=runApprovalProtectionVersion;
    if(observation)Object.assign(headers,{'X-LeafSeamer-Protection-Version':runApprovalProtectionObservationVersion,'X-LeafSeamer-Challenge':challenge});
    if(preparation)Object.assign(headers,{'X-LeafSeamer-Pairing':target.binding_id,'X-LeafSeamer-Challenge':challenge,
-    'X-LeafSeamer-Preparation-Version':preparationProtocol});
+    'X-LeafSeamer-Preparation-Version':preparationVersion});
    if(actionProtocol)Object.assign(headers,{'X-LeafSeamer-Pairing':target.binding_id,'X-LeafSeamer-Challenge':challenge,
     [actionVersionHeader]:actionVersion});
    const request=https.request(peer.origin+path,{method:bytes?'POST':'GET',agent:false,key,cert,ca:roots.map(root=>root.toString()),
@@ -442,7 +453,7 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
      need((response.statusCode===(protection&&!observation?202:200)||preparation&&!readPreparation&&response.statusCode===202||
       commandOperation==='submit'&&response.statusCode===202)&&response.headers['content-type']==='application/json'&&
       (!(approvalRead||protection||preparation||actionProtocol)||response.headers['cache-control']==='no-store')&&
-      (!preparation||response.headers['x-leafseamer-preparation-version']===preparationProtocol)&&
+      (!preparation||response.headers['x-leafseamer-preparation-version']===preparationVersion)&&
       (!observation||response.headers['x-leafseamer-protection-version']===runApprovalProtectionObservationVersion),'response');
     }catch(error){response.destroy();reject(error);return;}
     const socket=response.socket,chunks=[],limit=actionRead?actionBindingResponseLimit:commandOperation?automationCommandResponseLimit:
@@ -462,7 +473,7 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
      }
      if(preparation){
       need(same(current(bindingId,socket),record),'changed');
-      const result=eligibility?armPreparationEligibilityReply(value,body,record,challenge):armPreparationReply(value,body,record,challenge,lookup);
+      const result=eligibility?armPreparationEligibilityReply(value,body,record,challenge):armPreparationReply(value,body,record,challenge,lookup,{recovery});
       resolve(readPreparation?result:{created:response.statusCode===202,record:result});return;
      }
      if(protection){
@@ -563,6 +574,8 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
   deliverRunEndorsementRevocation:(bindingId,notice)=>remote(bindingId,'run-endorsement-revocation',structuredClone(notice)),
   submitRunPreparation:(bindingId,request)=>remote(bindingId,'preparations',structuredClone(request)),
   lookupRunPreparation:(bindingId,request)=>remote(bindingId,'preparations/lookup',structuredClone(request)),
+  submitRecoveryPreparation:(bindingId,request)=>remote(bindingId,'recovery-preparations',structuredClone(request)),
+  lookupRecoveryPreparation:(bindingId,request)=>remote(bindingId,'recovery-preparations/lookup',structuredClone(request)),
   readAutomationServiceApproval:(bindingId,{principal,approval_ref})=>remote(bindingId,'automation-service-approval',
    {format:'leafseamer.automation-approval-request/1',challenge_id:crypto.randomUUID(),principal:structuredClone(principal),approval_ref:structuredClone(approval_ref)}),
   readRunApprovalProposal:(bindingId,reference)=>requestRunRecord(bindingId,reference,'approval-proposals'),
@@ -570,9 +583,13 @@ export async function startPeerPairingTransport({pairings,clock,identity,cert,ke
   readRunApprovalControls:(bindingId,reference)=>requestRunRecord(bindingId,reference,'run-approval-control-observations'),
   readRunApproval:(bindingId,reference)=>requestRunRecord(bindingId,reference,'run-approvals'),
   readRunInitiator:(bindingId,reference)=>requestRunRecord(bindingId,reference,'run-operations'),
+  readRunRecoveryInitiator:(bindingId,reference)=>requestRunRecord(bindingId,reference,'recovery-operations'),
   prepareRunArmPlan:(bindingId,reference)=>prepareBoundObservation(bindingId,()=>requestRunRecord(bindingId,reference,'arm-plans'),body=>body.original,2000000000n),
+  prepareRunRecoveryPlan:(bindingId,reference)=>prepareBoundObservation(bindingId,()=>requestRunRecord(bindingId,reference,'recovery-plans'),body=>body.original,2000000000n),
   prepareRunPreparationEligibility:(bindingId,request)=>prepareBoundObservation(bindingId,
    ()=>remote(bindingId,'preparations/eligibility',structuredClone(request)),body=>body,runEligibilityObservationNs),
+  prepareRecoveryPreparationEligibility:(bindingId,request)=>prepareBoundObservation(bindingId,
+   ()=>remote(bindingId,'recovery-preparations/eligibility',structuredClone(request)),body=>body,runEligibilityObservationNs),
   prepareRunActionBinding:(bindingId,request)=>prepareBoundObservation(bindingId,
    ()=>remote(bindingId,'action-bindings',structuredClone(request)),body=>body,runEligibilityObservationNs),
   submitAutomationCommand:(bindingId,request)=>remote(bindingId,'automation-commands/submit',structuredClone(request)),

@@ -5,20 +5,33 @@ import {runApprovalReference} from './peer-run-approval.mjs';
 const hash=value=>typeof value==='string'&&/^sha256:[0-9a-f]{64}$(?![\s\S])/.test(value);
 const revision=value=>typeof value==='string'&&/^[1-9][0-9]{0,19}$(?![\s\S])/.test(value);
 export function runArmOperationReference(value){
+ return runOperationReference(value,'run_arm_operation');
+}
+export function runRecoveryOperationReference(value){
+ return runOperationReference(value,'recovery_operation');
+}
+function runOperationReference(value,kind){
  fields(value,'kind,scope,object_id,revision,digest');fields(value.scope,'authority_service_id,database_instance_id');
  Object.values(value.scope).forEach(uuid);uuid(value.object_id);
- need(value.kind==='run_arm_operation'&&value.revision==='1'&&hash(value.digest),'run_initiator_reference');return value;
+ need(value.kind===kind&&value.revision==='1'&&hash(value.digest),'run_initiator_reference');return value;
 }
 export function runInitiatorReadRequest(id,operationDigest,challenge){
  uuid(id);uuid(challenge);need(hash(operationDigest),'run_initiator_reference');
  return {operation_id:id,operation_digest:operationDigest,challenge_id:challenge};
 }
 export function runInitiatorReadReply(reply,request,record,seamer,controller){
+ return initiatorReadReply(reply,request,record,seamer,controller,false);
+}
+export function runRecoveryInitiatorReadReply(reply,request,record,seamer,controller){
+ return initiatorReadReply(reply,request,record,seamer,controller,true);
+}
+function initiatorReadReply(reply,request,record,seamer,controller,recovery){
  fields(reply,'format,challenge_id,pair_attempt_id,transcript_digest,body');
- need(reply.format==='leafseamer.run-initiator-response/1'&&reply.challenge_id===request.challenge_id&&
+ need(reply.format===(recovery?'leafseamer.run-recovery-initiator-response/1':'leafseamer.run-initiator-response/1')&&reply.challenge_id===request.challenge_id&&
   reply.pair_attempt_id===record.transcript.pair_attempt_id&&reply.transcript_digest===record.transcript_digest,'run_initiator_response');
- const body=reply.body;fields(body,'operation_ref,run_id,definition_id,definition_version,arm_generation,approval_ref,artifact_ref,target_scope,preparation_id,initiator,initiator_authorization_ref,credential,eligible_before_ns');
- const operation=runArmOperationReference(body.operation_ref),approval=runApprovalReference(body.approval_ref),artifact=body.artifact_ref;
+ const body=reply.body;fields(body,'operation_ref,run_id,definition_id,definition_version,arm_generation,approval_ref,artifact_ref,target_scope,preparation_id,initiator,initiator_authorization_ref,credential,eligible_before_ns'+(recovery?',execution_id':''));
+ if(recovery)uuid(body.execution_id);
+ const operation=(recovery?runRecoveryOperationReference:runArmOperationReference)(body.operation_ref),approval=runApprovalReference(body.approval_ref),artifact=body.artifact_ref;
  fields(artifact,'kind,scope,object_id,revision,digest');uuid(artifact.object_id);
  for(const id of [body.run_id,body.definition_id,body.preparation_id])uuid(id);
  need(operation.object_id===request.operation_id&&operation.digest===request.operation_digest&&same(operation.scope,seamer)&&

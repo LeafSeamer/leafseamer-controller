@@ -195,7 +195,7 @@ test('显式接入 Controller 准备受理，核验同一计划与控制原件�
  const binding={binding_id:bindingId,revision:'4',digest:digest('paired transcript'),state:'activated'};
  let permissionsForPeer=['automation.prepare','automation.prepare.read'];
  const planById=new Map(),proofByOperation=new Map(),approvals=new Map();
- let reads=0,checks=0,failAt=Infinity;
+ let reads=0,checks=0,failAt=Infinity,observeRecoveryInitiator=null,overrideRecoveryExecution=null;
  function choose(origin,variant=()=>{}){
   const operation_id=id(),preparation_id=id(),run_id=origin?.run_id??id(),definition_id=id(),controls=[{device_id:device,control_ref:control.ref}];
   const approval={approval_id:id(),run_id,controller_endorsement_refs:[endorsement_ref]};
@@ -213,7 +213,7 @@ test('显式接入 Controller 准备受理，核验同一计划与控制原件�
    target_policy_ref:{id:policyId,revision:authorization_policy_revision,digest:digest('policy')},device_actions:planned.grant_intent.device_actions,parameter_constraints:[]};
   variant(original,proof);
   planById.set(preparation_id,original);proofByOperation.set(operation_id,proof);
-  return {...planned,plan_ref:ref('arm_plan',origin_scope,preparation_id,original)};
+  return {...planned,plan_ref:ref(planned.mode==='recovery'?'recovery_plan':'arm_plan',origin_scope,preparation_id,original)};
  }
  const authorizePeer=(supplied,socket)=>{
   assert.equal(supplied,bindingId);assert.equal(db.inTransaction,true);
@@ -225,6 +225,10 @@ test('显式接入 Controller 准备受理，核验同一计划与控制原件�
   const original=planById.get(expected.preparation_id);
   assert.equal(expected.definition_id,original.definition_id);assert.equal(expected.run_id,original.preparation.run_id);
   assert.deepEqual(expected.approval_ref,original.preparation.approval_ref);
+  if(ref.kind==='recovery_operation'){
+   const observed=await observeRecoveryInitiator(ref);
+   if(observed.execution_id!==expected.execution_id)throw Error('recovery execution changed');
+  }
   return {assertIssuanceInTransaction(){assert.equal(db.inTransaction,true);return proofByOperation.get(ref.object_id);}};
  };
  let approvalCurrent=true;
@@ -343,17 +347,30 @@ test('显式接入 Controller 准备受理，核验同一计划与控制原件�
    resource:(...args)=>networkStore.automationCommands.resource(...args),
    reject:(...args)=>networkStore.automationCommands.reject(...args)
   },runPreparations:{
-  lookup:(...args)=>networkStore.lookup(...args),prepareEligibility:(...args)=>networkStore.prepareEligibility(...args),async prepare(key,socket,input){
-   const result=await networkStore.prepare(key,socket,input);
+  lookup:(...args)=>networkStore.lookup(...args),prepareEligibility:(...args)=>networkStore.prepareEligibility(...args),async prepare(key,socket,input,options){
+   const result=await networkStore.prepare(key,socket,input,options);
    if(input.preparation_id===loseResponseFor)socket.destroy();
    return result;
   }
  }});t.after(()=>controller.transport.close());
- const seamer=await endpoint(origin_scope,'seamer',seamerMaterial,{runActionBinding:(...args)=>actionReadHandler(...args),runArmPlan(_binding,_socket,request){
-  const original=planById.get(request.preparation_id),plan_ref=ref('arm_plan',origin_scope,request.preparation_id,original);
+ function planReply(request,kind){
+  const original=planById.get(request.preparation_id),plan_ref=ref(kind,origin_scope,request.preparation_id,original);
   assert.equal(request.plan_digest,plan_ref.digest);
   const body={plan_ref,original,eligible_before_ns:String(end)};
   return {body,beforeSend:()=>body};
+ }
+ const seamer=await endpoint(origin_scope,'seamer',seamerMaterial,{runActionBinding:(...args)=>actionReadHandler(...args),
+  runArmPlan(_binding,_socket,request){return planReply(request,'arm_plan');},
+  runRecoveryPlan(_binding,_socket,request){return planReply(request,'recovery_plan');},runRecoveryInitiator(_binding,_socket,request){
+   const {definition_id,preparation}=Array.from(planById.values()).find(value=>value.preparation.operation_id===request.operation_id);
+   const {operation_ref,run_id,definition_version,arm_generation,approval_ref,artifact_ref,preparation_id,execution_id}=preparation;
+   const {initiator}=proofByOperation.get(request.operation_id).initiator;
+   return {operation_ref,run_id,definition_id,definition_version,arm_generation,approval_ref,artifact_ref,target_scope:controller_scope,
+    preparation_id,execution_id:overrideRecoveryExecution??execution_id,initiator,
+    initiator_authorization_ref:{id:request.operation_id,revision:'1',digest:digest('recovery authorization')},
+    credential:{issuer_service_id:controller_scope.authority_service_id,token_id:request.operation_id,session_id:request.operation_id,
+     session_revision:'1',credential_id:request.operation_id,policy_revision:'1',scope_digest:digest('issuer scope'),recent_before_ns:String(end)},
+    eligible_before_ns:String(end)};
  }});t.after(()=>seamer.transport.close());
  controller.transport.bindPeers([seamer.peer]);seamer.transport.bindPeers([controller.peer]);
  const originBinding=id();
@@ -364,6 +381,7 @@ test('显式接入 Controller 准备受理，核验同一计划与控制原件�
  Object.assign(binding,pair,{peer_service_id:a.service_id});controller.bindRecord(binding);
  seamer.bindRecord({...pair,binding_id:originBinding,peer_service_id:b.service_id});
  networkStore.bindPlanReader(controller.transport.prepareRunArmPlan);
+ observeRecoveryInitiator=ref=>controller.transport.readRunRecoveryInitiator(bindingId,ref);
  const submit=input=>seamer.transport.submitRunPreparation(originBinding,input);
  const lookup=input=>seamer.transport.lookupRunPreparation(originBinding,query(input));
  function revocation(request,grants=[]){
@@ -802,5 +820,49 @@ test('显式接入 Controller 准备受理，核验同一计划与控制原件�
   await assert.rejects(readResource(runtimeCandidate.request),{code:'peer_pairing_response'});
  }
  finally{binding.digest=oldPairingDigest;}
+ function recoveryRequest(generation,baseline=receipt.grant_ref){
+  return choose({run_id:main.run_id,arm_generation:generation},(original,proof)=>{
+   const preparation=original.preparation;
+   original.format='leafseamer.run-recovery-plan/1';
+   preparation.mode='recovery';preparation.execution_id=id();preparation.artifact_ref=main.artifact_ref;
+   preparation.baseline_grant_ref=baseline;
+   preparation.operation_ref=ref('recovery_operation',origin_scope,preparation.operation_id,'consumed recovery preview');
+   proof.initiator.operation_ref=preparation.operation_ref;
+   proof.initiator.execution_id=preparation.execution_id;
+  });
+ }
+ networkStore.bindPlanReader(controller.transport.prepareRunRecoveryPlan);
+ const recovery=recoveryRequest('2'),submitRecovery=input=>seamer.transport.submitRecoveryPreparation(originBinding,input);
+ const lookupRecovery=()=>seamer.transport.lookupRecoveryPreparation(originBinding,query(recovery));
+ const beforeRecovery=counts();
+ await assert.rejects(submitRecovery(recoveryRequest('1')),{code:'peer_pairing_response'});
+ await assert.rejects(submitRecovery(recoveryRequest('2',{...receipt.grant_ref,digest:digest('wrong old grant')})),{code:'peer_pairing_response'});
+ await assert.rejects(seamer.transport.submitRunPreparation(originBinding,recovery),{code:'peer_pairing_preparation_request'});
+ overrideRecoveryExecution=id();
+ await assert.rejects(submitRecovery(recovery),{code:'peer_pairing_response'});
+ overrideRecoveryExecution=null;
+ assert.deepEqual(counts(),beforeRecovery);
+ assert.deepEqual(await lookupRecovery(),{state:'not_found',record:null});
+ loseResponseFor=recovery.preparation_id;
+ await assert.rejects(submitRecovery(recovery));
+ loseResponseFor=null;
+ const recoveredPreparation=await lookupRecovery();
+ assert.equal(recoveredPreparation.state,'found');
+ assert.deepEqual(recoveredPreparation.record.request,recovery);
+ assert.equal(recoveredPreparation.record.applied_receipt.grant.arm_generation,'2');
+ assert.deepEqual(await submitRecovery(recovery),{created:false,record:recoveredPreparation.record});
+ assert.deepEqual(counts(),beforeRecovery.map(count=>count+1));
+ const recoveredReceipt=recoveredPreparation.record.applied_receipt,recoveryProof={lookup:query(recovery),grant_ref:recoveredReceipt.grant_ref,
+  receipt_ref:ref('preparation_receipt',controller_scope,recoveredReceipt.receipt_id,recoveredReceipt)};
+ await assert.rejects(seamer.transport.lookupRunPreparation(originBinding,query(recovery)),{code:'peer_pairing_response'});
+ await assert.rejects(observe(recoveryProof),{code:'peer_pairing_response'});
+ assert.equal((await seamer.transport.prepareRecoveryPreparationEligibility(originBinding,recoveryProof)).original.state,'eligible');
+ networkStore.bindActionReader(controller.transport.prepareRunActionBinding);
+ await assert.rejects(networkStore.prepareActionAdmission(bindingId,'paired TLS',
+  {...runtimeCandidate.request.action,preparation:recoveryProof}),{code:'peer_pairing_preparation_ineligible'});
+ assert.deepEqual(writer(()=>currentControlSource(db,device).current),control);
+ db.close();db=open();networkStore=construct(id());
+ assert.deepEqual(await lookupRecovery(),recoveredPreparation);
+ await assert.rejects(seamer.transport.prepareRecoveryPreparationEligibility(originBinding,recoveryProof),{code:'peer_pairing_response'});
  assert.equal(db.prepare('SELECT count(*) FROM ca_command_initial').pluck().get(),0);
 });

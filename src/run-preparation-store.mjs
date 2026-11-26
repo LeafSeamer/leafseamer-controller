@@ -104,8 +104,23 @@ export function runPreparationStore({db,service,bootId,writer,time,pairingSample
    .pluck().get(origin.authority_service_id,origin.database_instance_id,approval.object_id),'preparation_rejected');
   if(Number(service.schema_revision)>=78)need(!runGenerationDenied(db,origin,runId,generation),'preparation_generation_denied');
  }
- async function prepare(bindingId,socket,input){
-  const request=armPreparationRequest(structuredClone(input),scope),requestDigest=digest(request);
+ function recoveryBaseline(request){
+  const {origin_scope:origin,baseline_grant_ref,grant_intent}=request;
+  const row=db.prepare(select+' WHERE g.grant_id=? AND p.origin_service_id=? AND p.origin_database_instance_id=?')
+   .raw().get(baseline_grant_ref.object_id,origin.authority_service_id,origin.database_instance_id);
+  need(row,'preparation_recovery_baseline');
+  const prior=stored(row),{grant,grant_ref}=prior.applied_receipt;
+  need(same(grant_ref,baseline_grant_ref)&&grant.run_id===request.run_id&&grant.definition_version===request.definition_version&&
+   same(prior.request.artifact_ref,request.artifact_ref)&&grant.approval_ref.object_id!==request.approval_ref.object_id&&
+   BigInt(grant.arm_generation)<BigInt(request.arm_generation)&&same(grant.principal,grant_intent.principal)&&
+   same(grant.device_actions,grant_intent.device_actions)&&same(grant.parameter_constraints,grant_intent.parameter_constraints)&&
+   request.execution_id!==prior.request.execution_id&&runGenerationDenied(db,origin,request.run_id,grant.arm_generation)&&
+   db.prepare('SELECT 1 FROM run_approval_rejection WHERE origin_service_id=? AND origin_database_instance_id=? AND approval_id=?')
+    .pluck().get(origin.authority_service_id,origin.database_instance_id,grant.approval_ref.object_id),'preparation_recovery_baseline');
+ }
+ async function prepare(bindingId,socket,input,{recovery=false}={}){
+  need(!recovery||Number(service.schema_revision)>=78,'preparation_unavailable');
+  const request=armPreparationRequest(structuredClone(input),scope,{recovery}),requestDigest=digest(request);
   const {origin_scope:origin,preparation_id:id,plan_ref,operation_ref,approval_ref,grant_intent:intent}=request;
   const initial=writer(()=>{
    const record=paired(bindingId,socket,origin),existing=find(origin,id,requestDigest);
@@ -118,9 +133,10 @@ export function runPreparationStore({db,service,bootId,writer,time,pairingSample
   try{
    const plan=await readPlan(bindingId,structuredClone(plan_ref));
    const original=structuredClone(plan?.original);
-   need(same(armPlanOriginal(original,plan_ref,scope),request)&&typeof plan.assertCurrentInTransaction==='function','preparation_plan');
+   need(same(armPlanOriginal(original,plan_ref,scope,{recovery}),request)&&typeof plan.assertCurrentInTransaction==='function','preparation_plan');
    const expected={approval_ref,arm_generation:request.arm_generation,artifact_ref:request.artifact_ref,definition_id:original.definition_id,
-    definition_version:request.definition_version,preparation_id:id,run_id:request.run_id};
+    definition_version:request.definition_version,preparation_id:id,run_id:request.run_id,
+    ...(recovery&&{execution_id:request.execution_id})};
    const prepared=await prepareInitiator(bindingId,operation_ref,expected);
    return writer(()=>{
     const before=paired(bindingId,socket,origin),existing=find(origin,id,requestDigest);
@@ -136,11 +152,13 @@ export function runPreparationStore({db,service,bootId,writer,time,pairingSample
      const lower=BigInt(Date.parse(not_before))*1000000n,upper=BigInt(Date.parse(not_after))*1000000n;
      const now=time();
      need(same(actual.approval_ref,approval_ref)&&same(actual.initiator.operation_ref,operation_ref)&&
+      (!recovery||actual.initiator.execution_id===request.execution_id)&&
       same(intent.principal,{...actual.service_principal,principal_kind:'service'})&&same(intent.device_actions,actual.device_actions)&&
       same(intent.parameter_constraints,actual.parameter_constraints)&&authorization_policy_revision===actual.target_policy_ref.revision&&
       lower>=BigInt(Date.parse(actual.validity.not_before))*1000000n&&upper<=proposalWindowEnd(actual)&&
       now.lower>=lower&&now.upper<upper&&now.upper<BigInt(actual.initiator.eligible_before_ns),'preparation_authorization');
      assertRunEligible(origin,approval_ref,request.run_id,request.arm_generation);
+     if(recovery)recoveryBaseline(request);
      const controls=controlsCurrent(request);
      need(same(controls,original.controls),'preparation_control_changed');
      const last=pairingSample(),tick=BigInt(last.tick_ns);
@@ -178,7 +196,7 @@ export function runPreparationStore({db,service,bootId,writer,time,pairingSample
    });
   }finally{pending--;}
  }
- async function prepareGrantObservation(bindingId,socket,request,forAction=false){
+ async function prepareGrantObservation(bindingId,socket,request,forAction=false,recovery=false){
   need(prepareApproval&&pendingEligibility<4,'preparation_unavailable');
   const {origin_scope,preparation_id,request_digest}=request.lookup;
   const start=pairingSample(),started=BigInt(start.tick_ns);
@@ -188,10 +206,12 @@ export function runPreparationStore({db,service,bootId,writer,time,pairingSample
    const original=find(origin_scope,preparation_id,request_digest,true);
    need(original,'preparation_ineligible');
    const {record,commit}=original,receipt=record.applied_receipt,grant=receipt.grant;
+   need(record.request.mode===(recovery?'recovery':'arm'),'preparation_ineligible');
    need(bootId&&commit.service_boot_id===bootId&&same(commit.clock_domain_ref,start.runtime_domain_ref)&&
     same(commit.pairing_ref,pairingReference(pair))&&same(receipt.grant_ref,request.grant_ref)&&
     same(reference('preparation_receipt',scope,receipt.receipt_id,receipt),request.receipt_ref),'preparation_ineligible');
    assertRunEligible(origin_scope,grant.approval_ref,grant.run_id,grant.arm_generation);
+   if(recovery)recoveryBaseline(record.request);
    need(same(controlsCurrent(record.request,commit.proof.controls,receipt.grant_ref),commit.proof.controls),'preparation_control_changed');
    return {pair,record};
   }
@@ -216,9 +236,9 @@ export function runPreparationStore({db,service,bootId,writer,time,pairingSample
    return verifyInTransaction;
   }finally{pendingEligibility--;}
  }
- async function prepareEligibility(bindingId,socket,input){
-  const request=armPreparationEligibilityRequest(structuredClone(input),scope,{allowScheduled:true});
-  const check=await prepareGrantObservation(bindingId,socket,request);
+ async function prepareEligibility(bindingId,socket,input,{recovery=false}={}){
+  const request=armPreparationEligibilityRequest(structuredClone(input),scope,{allowScheduled:!recovery});
+  const check=await prepareGrantObservation(bindingId,socket,request,false,recovery);
   let gateBasis=null;
   const verify=()=>writer(()=>{
    const {record,eligible_before_ns}=check();
@@ -293,11 +313,12 @@ export function runPreparationStore({db,service,bootId,writer,time,pairingSample
     receipt.grant.device_actions.some(action=>same(action,request.target)),'automation_command_authority');
    return {pairing_ref:pairingReference(pair),principal:receipt.grant.principal};
   }}):null;
- return Object.freeze({prepare,prepareEligibility,prepareActionAdmission,automationCommands,protectionTargets,lookup(bindingId,socket,input){
+ return Object.freeze({prepare,prepareEligibility,prepareActionAdmission,automationCommands,protectionTargets,lookup(bindingId,socket,input,{recovery=false}={}){
   const request=armPreparationLookup(structuredClone(input),scope);
   return writer(()=>{
    const binding=paired(bindingId,socket,request.origin_scope);
    const record=find(request.origin_scope,request.preparation_id,request.request_digest);
+   need(!record||record.request.mode===(recovery?'recovery':'arm'),'preparation_ineligible');
    need(same(paired(bindingId,socket,request.origin_scope),binding),'preparation_pairing_changed');
    return {state:record?'found':'not_found',record:structuredClone(record)};
   });
