@@ -950,6 +950,7 @@ Schema 66提供规范服务订阅的初始持久生命周期。人员管理入�
 配置了配对管理的运行代可使用本机 `pairing-admin --origin https://127.0.0.1:8444 --ca-file <绝对路径>`。命令从标准输入读取 JSON 对象 `{login,password,operation,request}`，使用当前人员会话、CSRF 和近期认证核对 `auth.manage`。管理代理不转发该回环入口。
 
 - `register-event-scope` 接收 `{request_id,device_ids}`，从当代已启动来源登记范围，返回完整 `scope_ref` 及供 Seamer 创建订阅时使用的 `scope`。
+- `register-status-scope` 接收相同字段，从已有持久投影的来源登记人员状态范围。Profile 固定为人员所有者和 `status_projection`，并独立封存。相同请求可查原，跨用途复用请求标识会冲突。
 - `create-event-consumer` 接收 `{request_id,display_name}`，登记用途为 `event_consumer` 的停用主体。随后用 `approve-event-consumer` 提交现有 `approveSubscriptionServicePrincipal` 请求，用 `approve-event-policy` 提交现有 `approveLocalSubscriptionPolicy` 请求。两次批准均要求精确的 `event.internal.subscribe` 与 `status.read`，并复用原有配对、范围、期限及消费者槽校验。
 - `revoke-event-scope` 接收登记返回的 `{scope_ref}`。撤销保存墓碑，原登记请求的重投仅返回历史引用。
 
@@ -962,6 +963,8 @@ Schema 66提供规范服务订阅的初始持久生命周期。人员管理入�
 Schema 67将固定设备来源的SDK投影及有序通知接入来源writer。新来源、已提交事件、停止和失联同时保存投影修订与通知；事件通知保留原Origin，投影通知保留完整具名Record。重复批次不生成第二份通知，不推进投影修订。任一投影、head或通知缺写都会回滚对应来源写集；通知最多65536条且正文总计64MiB，满额拒绝。该通知序号仅供核心维护快照与增量的内部切点，不作为公共订阅游标。
 
 可信核心可调用 `workerLaunches.eventScopes.snapshotCut(scopeRef)`：先核当前固定范围，在独立只读SQLite事务内取得通知水位、完整来源投影及对应watermark，结束读事务后再次核验当前范围。读取不跨HTTP分页持有数据库锁。投影保留连续前沿、最高已见序号和真实缺口；启动后为baseline_required，尚未生成baseline采用证明。明确丢弃区间保留known缺口，失联保留unknown缺口；快照读取和重投不会消除它们。迁移保留旧来源及订阅原件，不补造过去的投影历史，未具备投影原件的旧来源拒绝进入新快照切点。持久manifest／页面由下述68版实现；当前连接代际释放由下述69版实现；接收端原子采用由Seamer Schema 4提供。
+
+人员状态范围复用这一读切点及 product9 的 manifest 和投影页面。封存要求范围、用途、所有者类别和发布库一致。人员公开订阅的签发、连接附着和增量释放仍待接线。
 
 Schema 68显式增加固定来源范围的持久快照。后台从building订阅预留8MiB、原运行时钟域及5秒构建截止和内部日志pin；独立只读事务取得全部来源投影后，释放读连接，在有界内存完成页面封存，再由writer重核授权、原期限、时钟域及预留并原子保存manifest、所有页面原字节、基线摘要、内部日志映射和snapshot_ready修订。任一缺写整笔回滚；进程中断留下的预留失效，不从新状态补页。读取及封存是本进程内阶段，只有完整发布结果持久可见。
 

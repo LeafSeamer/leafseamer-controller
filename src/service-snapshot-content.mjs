@@ -5,8 +5,13 @@ const hash=value=>digest(value).slice(7),format_version='snapshot-projection/0.2
 export const snapshotBudget=Object.freeze({page:245760,response:262144,total:8388608,pages:128,build:5000000000n,apply:30000000000n});
 // 输入只能来自批准scope的一致读切点；本函数不查询设备或产生采样证据。
 export function sealSourceSnapshot({view,cut,snapshotId,domainRef,createdAt,expiresAt}){
- const scope=view.scope,registration=cut.registration;
- need(view.purpose==='canonical_trigger'&&same(scope,registration.scope)&&same(scope.projection_profile_ref,registration.selector.profile_ref),'scope');
+ const {scope,binding:subscriptionBinding}=view,registration=cut.registration;
+ const profileRef=scope.projection_profile_ref;
+ need((view.purpose==='canonical_trigger'&&view.owner.kind==='service'||view.purpose==='status_projection'&&view.owner.kind==='human')&&
+  view.purpose===registration.purpose&&same(scope,registration.scope)&&same(profileRef,registration.selector.profile_ref)&&
+  subscriptionBinding.scope_digest===hash(scope)&&subscriptionBinding.publisher_service_id===profileRef.authority_service_id&&
+  subscriptionBinding.publisher_database_instance_id===profileRef.database_instance_id,'scope');
+ need(registration.profile.owner_kinds.includes(view.owner.kind)&&registration.profile.purposes.includes(view.purpose),'profile');
  need(registration.profile.collections.length===1&&registration.profile.collections[0].entity_kind==='sources'&&scope.collections.length===1&&scope.collections[0].entity_kind==='sources','profile');
  const selected=registration.selector.entity_ids;
  need(Array.isArray(selected)&&selected.length>=1&&selected.length<=32&&new Set(selected).size===selected.length,'scope');
@@ -19,7 +24,7 @@ export function sealSourceSnapshot({view,cut,snapshotId,domainRef,createdAt,expi
   const expected={source_key:record.view.source_key,binding_ref:record.view.binding_ref,baseline_sequence:record.view.contiguous_sequence,source_state_revision:record.entity_revision,baseline_ref:record.view.baseline_ref,gap_summary:record.view.gaps};
   need(same(marks[0],expected),'watermark');watermarks.push(expected);
  }
- const {connection_generation,...delivery}=view.binding,binding={snapshot_id:snapshotId,...delivery,projection_profile_ref:scope.projection_profile_ref,publisher_domain_ref:domainRef};
+ const {connection_generation,...delivery}=subscriptionBinding,binding={snapshot_id:snapshotId,...delivery,projection_profile_ref:profileRef,publisher_domain_ref:domainRef};
  const content=(index,items,next)=>({format_version,binding,page_index:index,next_page_index:next,records:items});
  const groups=[];let group=[];
  for(const record of records){const candidate=[...group,record];if(Buffer.byteLength(canonical(content(groups.length,candidate,127)))>snapshotBudget.page){need(group.length>0,'record_capacity');groups.push(group);group=[];}

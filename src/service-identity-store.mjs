@@ -96,7 +96,7 @@ export function serviceIdentityStore({db,service,bootId,writer,time,authenticate
  function consumerScope(slot,approved,record){
   if(Number(service.schema_revision)<65)return;
   need(eventScopes,'consumer_scope_required');const resolved=eventScopes.currentInTransaction(slot.allowed_scope_ref),peer=record.transcript.parties.find(p=>p.service_id===slot.consumer_service_id);
-  need(resolved.registration.purpose===slot.purpose&&approved.permissions.includes('status.read')&&resolved.registration.sources.every(s=>approved.device_ids.includes(s.device_id))&&
+  need(resolved.registration.purpose===slot.purpose&&resolved.registration.profile.owner_kinds.includes('service')&&approved.permissions.includes('status.read')&&resolved.registration.sources.every(s=>approved.device_ids.includes(s.device_id))&&
    peer.object_scope_digest===digest({format:'leafseamer.device-binding-scope/1',authority_service_id:service.service_id,database_instance_id:service.database_instance_id,device_ids:approved.device_ids}),'consumer_scope');
   return resolved;
  }
@@ -238,9 +238,9 @@ export function serviceIdentityStore({db,service,bootId,writer,time,authenticate
   prepareInitiator:runApprovalEndorsements.prepareRunInitiator,prepareApproval:runApprovalEndorsements.prepareRunApproval,automationExecution}):null;
  return Object.freeze({
   ...(eventScopes&&Number(service.schema_revision)>=66&&{
-   registerEventScope(input,request){
+   registerEventScope(input,request,purpose='canonical_trigger'){
     return management(input,'auth.manage',()=>{
-     const {registration,scope_ref}=eventScopes.register(request);
+     const {registration,scope_ref}=eventScopes.register(request,purpose);
      return {scope_ref,scope:registration.scope};
     });
    },
