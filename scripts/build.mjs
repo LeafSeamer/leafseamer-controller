@@ -11,6 +11,7 @@ const names = ['authority-source-window.mjs', 'supervisor-control.mjs', 'core-bo
 names.push('trusted-pairing-profile.mjs', 'local-pairing-admin.mjs', 'local-pairing-management.mjs', 'local-event-management.mjs', 'local-extension-management.mjs', 'clock-evidence.mjs', 'protected-ingress-profile.mjs', 'linux-chrony-health.mjs');
 names.push('linux-core-bootstrap.mjs', 'linux-installation-source.mjs', 'linux-clock-evidence.mjs', 'clock-evidence-envelope.mjs', 'linux-kernel-sleep.mjs');
 names.push('storage-revision.mjs');
+names.push('backup-command-verification.mjs');
 names.push('command-dispatch-interruption.sql', 'command-dispatch-interruption.mjs');
 names.push('command-unsent-recovery.sql', 'command-unsent-recovery.mjs');
 names.push('obs-prior-execution.sql', 'obs-prior-execution.mjs');

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import {contractSelection as selection} from '@leafseamer/sdk';
-import {initializeStorage, migrateStorage, openStorage} from '../dist/storage.mjs';
+import {initializeStorage, migrateStorage, openStorage, verifyBackupSnapshot} from '../dist/storage.mjs';
 import {startAuthenticationClock} from '../dist/auth-clock.mjs';
 import {digest} from '../dist/auth-clock-value.mjs';
 import {commandContent} from '../dist/command-admission-store.mjs';
@@ -80,6 +80,25 @@ test('真实文件库拒收同键永久查原，换context和关联标识不增�
       db.pragma('recursive_triggers=ON');
       assert.throws(() => db.exec('INSERT OR REPLACE INTO ca_request_key SELECT * FROM ca_request_key'));
     });
+    const snapshot=path.join(a.dir,'staged.sqlite'), original=new Database(path.join(a.dir,'controller.sqlite'));
+    try{await original.backup(snapshot);}finally{original.close();}
+    const staged=new Database(snapshot);
+    try{assert.equal(staged.pragma('journal_mode=DELETE',{simple:true}),'delete');}finally{staged.close();}
+    const state=a.storage.identity;
+    const receipt=()=>{const bytes=fs.readFileSync(snapshot);return {state:'staged',engine:'3.53.4',
+      backup_operation_id:crypto.randomUUID(),bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),
+      scope:{authority:'controller',service_id:state.service_id,database_instance_id:state.database_instance_id,
+        control_epoch:state.control_epoch,request_epoch:state.request_epoch,schema_revision:state.schema_revision}};};
+    const source=receipt(),report=verifyBackupSnapshot(snapshot,source);
+    assert.equal(report.sha256,source.sha256);
+    assert.deepEqual(report.command_inventory,{requests:1,commands:0,pending:0,unresolved:0});
+    const corrupt=new Database(snapshot);
+    try{
+      corrupt.exec('DROP TRIGGER ca_key_no_update');
+      corrupt.prepare("UPDATE ca_request_key SET content_body=?").run(Buffer.from('{"device_id":"synthetic-other"}'));
+      assert.equal(corrupt.pragma('integrity_check',{simple:true}),'ok');
+    }finally{corrupt.close();}
+    assert.throws(()=>verifyBackupSnapshot(snapshot,receipt()),{code:'backup_snapshot_inventory'});
   } finally { a.close(); }
 });
 

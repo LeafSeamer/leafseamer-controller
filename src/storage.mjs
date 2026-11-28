@@ -1,4 +1,5 @@
 import {supportsStorageRevision} from './storage-revision.mjs';
+import {verifyBackupCommands} from './backup-command-verification.mjs';
 import fs from 'node:fs';
 import canonicalize from 'canonicalize';
 import path from 'node:path';
@@ -324,17 +325,65 @@ export function initializeStorage(dataDir) {
     return identity(db);
   } finally { db?.close(); }
 }
-function validateStorage(db) {
+function validateStorage(db, snapshot = false) {
   const revision = pragma(db, 'user_version');
   require(pragma(db, 'application_id') === applicationId && supportsStorageRevision(revision,1), 'database_version_mismatch');
-  require(pragma(db, 'journal_mode') === 'wal', 'journal_mode_mismatch');
-  pragma(db, 'synchronous = FULL');
-  require(pragma(db, 'synchronous') === 2, 'synchronous_mismatch');
-  require(pragma(db, 'quick_check') === 'ok' && rows(db, 'PRAGMA foreign_key_check').length === 0, 'database_integrity');
+  require(pragma(db, 'journal_mode') === (snapshot ? 'delete' : 'wal'), 'journal_mode_mismatch');
+  if (!snapshot) {
+    pragma(db, 'synchronous = FULL');
+    require(pragma(db, 'synchronous') === 2, 'synchronous_mismatch');
+  }
+  require(pragma(db, snapshot ? 'integrity_check(1)' : 'quick_check') === 'ok' &&
+    db.prepare('PRAGMA foreign_key_check').raw().get() === undefined, 'database_integrity');
   const migrations = rows(db, 'SELECT * FROM schema_migration ORDER BY CAST(to_revision AS INTEGER)');
   require(migrations.length === revision && migrations[0].from_revision === '0' && migrations[0].to_revision === '1' && migrations[0].state === 'committed' && migrations[0].script_digest === scriptDigest, 'migration_mismatch');
   for (let i = 1; i < revision; i++) require(migrations[i].from_revision === String(i) && migrations[i].to_revision === String(i + 1) && migrations[i].state === 'committed' && migrations[i].script_digest === [scriptDigest, identityDigest, clockDigest, authClockDigest, sessionDigest, tokenDigest, permissionDigest, contextDigest, admissionDigest, deviceDigest, runtimeDigest, workerDigest, extensionDigest, configurationDigest, roleDigest, reviewDigest, approvalDigest, capabilityDigest, workerRuntimeDigest, dependencyDigest, planDigest, activationDigest, authorizationDigest, moduleDigest, catalogDigest, controlDigest, executionDigest, executionFramesDigest, executionBindingDigest, executionHandshakeDigest, executionControlDigest, controlSourceDigest, manualAuthorityDigest, deviceAuthorizationDigest, coreSourceDigest, serviceIdentityDigest, serviceAccessTokenDigest, evaluatorSourceDigest, principalRevocationDigest, deviceRecoveryDigest, deviceConsumptionDigest, manualChallengeDigest, deviceEvidenceDigest, initialResourceDigest, initialOpenDigest, workerBindingDigest, executionOpenDigest, initialReadyDigest, commandRecordDigest, commandLifecycleDigest, commandEncodingDigest, commandFinalAdmissionDigest, commandGuardDigest, commandDispatchDigest, commandSettlementDigest, commandPreparationCleanupDigest, resourceSuccessorDigest, controlCommandCutDigest, peerPairingDigest, remotePermissionDigest, issuerWatermarkDigest, sessionDenialDigest, moduleEventsDigest, eventSourceDigest, eventScopeDigest, subscriptionDigest, sourceProjectionDigest, snapshotDigest, channelDigest, baselineDigest, deliveryDigest, runEndorsementPolicyDigest, runApprovalEndorsementDigest, runApprovalRejectionDigest, runEndorsementRevocationDigest, runEndorsementRevocationReceiptDigest, runPreparationDigest, runGenerationDenialDigest, executionRunFenceDigest, runProtectionCompletionDigest, timeProviderRuntimeDigest, timeProviderPollsDigest, timeProviderCaptureDigest, timeProviderReleaseDigest, timeProviderRecoveryDigest, timeProviderControlDigest, referenceTimeAnchorDigest, commandReferenceAcceptanceDigest, referenceTimeInvalidationDigest, referenceTimeExitsDigest, referenceTimeExitRecoveryDigest, commandIssueOrderDigest, firstPairingIssueDigest, deviceSourceTimeDigest, automationCommandDigest, automaticGateDigest, automationEncodingDigest, obsResourceDigest, resourceOwnershipDigest, obsSceneConfirmationDigest, obsCutExecutionDigest, obsCutResourceDigest, obsCutCommandDigest, commandInterruptionDigest, commandUnsentDigest, obsPriorExecutionDigest, obsRestartLaunchDigest, obsCutReconciliationDigest, linuxWorkerLaunchDigest, linuxReferenceRuntimeDigest, linuxReferenceSourceSwitchDigest, executionTimeFenceDigest, commandReferenceGuardDigest, humanSubscriptionDigest, humanSubscriptionTicketDigest, humanProjectionDeliveryDigest][i] && /^sha256:[0-9a-f]{64}$/.test(migrations[i].backup_ref), 'migration_mismatch');
   return identity(db, String(revision));
+}
+
+export function verifyBackupSnapshot(file, receipt) {
+  require(typeof file==='string'&&path.isAbsolute(file)&&receipt?.state==='staged'&&
+    typeof receipt.backup_operation_id==='string'&&uuid.test(receipt.backup_operation_id)&&
+    receipt.scope?.authority==='controller'&&receipt.engine===engine.version&&
+    Number.isSafeInteger(receipt.bytes)&&receipt.bytes>0&&receipt.bytes<=32*1024**3&&
+    typeof receipt.sha256==='string'&&/^[0-9a-f]{64}(?![\s\S])/.test(receipt.sha256),'backup_snapshot_receipt');
+  let fd,db;
+  try{
+    const before=fs.lstatSync(file,{bigint:true});
+    const sameFile=value=>value.isFile()&&value.nlink===1n&&value.size===BigInt(receipt.bytes)&&
+      value.dev===before.dev&&value.ino===before.ino&&value.ctimeNs===before.ctimeNs&&value.mtimeNs===before.mtimeNs;
+    const noSidecars=()=>['-wal','-shm','-journal'].every(suffix=>fs.lstatSync(file+suffix,{throwIfNoEntry:false})===undefined);
+    require(sameFile(before)&&noSidecars(),'backup_snapshot_file');
+    fd=fs.openSync(file,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0));
+    require(sameFile(fs.fstatSync(fd,{bigint:true})),'backup_snapshot_file');
+    const hash=crypto.createHash('sha256'), buffer=Buffer.alloc(65536);
+    for(let offset=0;offset<receipt.bytes;){
+      const count=fs.readSync(fd,buffer,0,Math.min(buffer.length,receipt.bytes-offset),offset);
+      require(count>0,'backup_snapshot_file');
+      hash.update(buffer.subarray(0,count));offset+=count;
+    }
+    require(hash.digest('hex')===receipt.sha256,'backup_snapshot_digest');
+    db=new Database(file,{readonly:true,fileMustExist:true,timeout:0});
+    const actual=db.prepare('SELECT sqlite_version(),sqlite_source_id()').raw().get();
+    require(actual[0]===engine.version&&actual[1]===engine.source,'sqlite_engine_mismatch');
+    pragma(db,'trusted_schema=OFF');pragma(db,'query_only=ON');
+    const result=db.transaction(()=>{
+      const state=validateStorage(db,true);
+      const scope={authority:state.authority,service_id:state.service_id,database_instance_id:state.database_instance_id,
+        control_epoch:state.control_epoch,request_epoch:state.request_epoch,schema_revision:state.schema_revision};
+      require(Object.entries(scope).every(([field,value])=>receipt.scope[field]===value),'backup_snapshot_scope');
+      const command_inventory=verifyBackupCommands(db,scope);
+      return {format:'leafseamer.controller-backup-validation/1',backup_operation_id:receipt.backup_operation_id,
+        scope,engine,bytes:receipt.bytes,sha256:receipt.sha256,command_inventory};
+    })();
+    require(sameFile(fs.fstatSync(fd,{bigint:true}))&&sameFile(fs.lstatSync(file,{bigint:true}))&&noSidecars(),'backup_snapshot_file');
+    return result;
+  }catch(error){
+    if(error instanceof StorageError)throw error;
+    throw new StorageError(fd===undefined?'backup_snapshot_file':'backup_snapshot_inventory');
+  }finally{
+    try{db?.close();}finally{if(fd!==undefined)fs.closeSync(fd);}
+  }
 }
 export async function migrateStorage(dataDir, targetRevision = 70) {
   require(supportsStorageRevision(targetRevision,2), 'migration_target');
