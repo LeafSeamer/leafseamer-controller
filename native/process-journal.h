@@ -97,9 +97,13 @@ class ProcessJournal {
     require(code == SQLITE_DONE, "process_journal_schema"); return out;
   }
 public:
+  enum class Mode { launch, initialize, upgrade, upgradeTimeProvider, retirement, fenceRecovery };
   bool upgraded = false;
   bool timeProviderEnabled = false;
-  ProcessJournal(Instance& instance, bool initialize, bool upgrade = false, bool upgradeTimeProvider = false, bool observe = false) {
+  bool recoveryFenced = false;
+  ProcessJournal(Instance& instance, Mode mode) {
+    const bool initialize=mode==Mode::initialize, upgradeTimeProvider=mode==Mode::upgradeTimeProvider;
+    const bool upgrade=mode==Mode::upgrade||upgradeTimeProvider, observe=mode==Mode::retirement, fence=mode==Mode::fenceRecovery;
     const std::wstring filename = instance.path + L"\\supervisor-journal.db";
     file.value = CreateFileW(filename.c_str(), observe ? GENERIC_READ : GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &instance.security,
       initialize ? CREATE_NEW : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
@@ -109,7 +113,7 @@ public:
     FILE_ATTRIBUTE_TAG_INFO attributes{};
     require(GetFileInformationByHandleEx(file.value, FileAttributeTagInfo, &attributes, sizeof(attributes)) &&
       !(attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT), "process_journal_link");
-    if (observe) {
+    if (observe||fence) {
       FILE_STANDARD_INFO standard{}; unsigned char header[20]{}; DWORD bytes = 0;
       require(GetFileInformationByHandleEx(file.value, FileStandardInfo, &standard, sizeof(standard)) && standard.NumberOfLinks == 1 &&
         ReadFile(file.value, header, sizeof(header), &bytes, nullptr) && bytes == sizeof(header) &&
@@ -138,20 +142,24 @@ public:
     require(scalar("PRAGMA application_id") == "1280528456", "process_journal_version");
     const auto version = scalar("PRAGMA user_version");
     const bool oldVersion = version == "1" || version == "2" || version == "3" || version == "4";
-    require(version=="5"||version=="6"||(upgrade&&oldVersion),"process_journal_migration_required");
-    timeProviderEnabled=version=="6";
+    recoveryFenced=version=="7";
+    require(!recoveryFenced||observe||fence,"process_recovery_startup_fenced");
+    require(version=="5"||version=="6"||recoveryFenced||(upgrade&&oldVersion),"process_journal_migration_required");
+    timeProviderEnabled=version=="6"||recoveryFenced;
     require(scalar("PRAGMA integrity_check") == "ok", "process_journal_integrity");
     Statement foreignKeys(db.get(), "PRAGMA foreign_key_check"); require(sqlite3_step(foreignKeys.value) == SQLITE_DONE, "process_journal_foreign_key");
     sqlite3* memory = nullptr; require(sqlite3_open(":memory:", &memory) == SQLITE_OK, "process_journal_schema");
     std::unique_ptr<sqlite3, DatabaseCloser> reference(memory);
     require(sqlite3_exec(memory, version == "1" ? processJournalV1Sql : (version == "2" ? processJournalV2Sql : (version == "3" ? processJournalV3Sql : (version == "4" ? processJournalV4Sql : processJournalSql))), nullptr, nullptr, nullptr) == SQLITE_OK, "process_journal_schema");
     if(timeProviderEnabled)require(sqlite3_exec(memory,processJournalTimeProviderSql,nullptr,nullptr,nullptr)==SQLITE_OK,"process_journal_schema");
+    if(recoveryFenced)require(sqlite3_exec(memory,processJournalRecoveryStartupSql,nullptr,nullptr,nullptr)==SQLITE_OK,"process_journal_schema");
     require(schema(memory)==schema(db.get()),"process_journal_schema");
     Statement meta(db.get(), "SELECT directory_id,owner_sid FROM host_meta WHERE singleton=1");
     require(sqlite3_step(meta.value) == SQLITE_ROW && meta.text(0) == instance.directoryId && meta.text(1) == instance.owner, "process_journal_identity");
     require(sqlite3_step(meta.value) == SQLITE_DONE, "process_journal_identity");
     require(scalar("SELECT count(*) FROM core_attempt a LEFT JOIN core_exit e USING(attempt_id) WHERE e.attempt_id IS NULL") == "0", "process_recovery_required");
     if(timeProviderEnabled)require(scalar("SELECT count(*) FROM time_provider_attempt a LEFT JOIN time_provider_exit e USING(launch_id) WHERE e.launch_id IS NULL")=="0","process_recovery_required");
+    if(recoveryFenced)require(scalar("SELECT count(*) FROM recovery_startup_fence")=="1","process_retirement_unproven");
     if (oldVersion || (upgradeTimeProvider && !timeProviderEnabled)) {
       // 显式升级才备份并改变DDL；未结束尝试不能通过升级绕开恢复。
       const auto suffix = identifier(); const auto backupPath = instance.path + (upgradeTimeProvider?L"\\supervisor-before-v6-":L"\\supervisor-before-v5-") + std::wstring(suffix.begin(), suffix.end()) + L".db";
@@ -180,7 +188,7 @@ public:
       upgraded = true;
     }
   }
-  std::string recoveryRetirement(const std::string& generation) {
+  std::string recoveryRetirement(const std::string& generation,const std::string& service="",const std::string& database="") {
     require(generation.size() == 32 && generation.find_first_not_of("0123456789abcdef") == std::string::npos,
       "process_retirement_generation");
     const std::string providerCount = timeProviderEnabled
@@ -196,12 +204,43 @@ public:
       " FROM core_attempt a JOIN core_observation o USING(attempt_id) JOIN core_bootstrap b USING(attempt_id)"
       " JOIN core_admission c USING(attempt_id) JOIN core_exit e USING(attempt_id) CROSS JOIN host_meta m"
       " WHERE a.rowid=(SELECT max(rowid) FROM core_attempt) AND e.active_processes=0"
-      " AND json_extract(b.descriptor_jcs,'$.runtime_generation')=? AND m.singleton=1";
+      " AND json_extract(b.descriptor_jcs,'$.runtime_generation')=? AND m.singleton=1"
+      " AND (?2 IS NULL OR (json_extract(b.policy_jcs,'$.service_id')=?2 AND json_extract(b.policy_jcs,'$.database_instance_id')=?3))";
     Statement q(db.get(), query.c_str()); q.bind(1, generation);
+    if(!service.empty()){q.bind(2,service);q.bind(3,database);}
     require(sqlite3_step(q.value) == SQLITE_ROW, "process_retirement_unproven");
     auto body = q.text(0);
     require(sqlite3_step(q.value) == SQLITE_DONE && body.size() <= 49152, "process_retirement_unproven");
     return body;
+  }
+  std::string recoveryStartupFence(const std::string& evidence) {
+    if(!recoveryFenced)return "null";
+    Statement q(db.get(),"SELECT json_object('plan_digest',plan_digest,'retirement_id',retirement_id)"
+      " FROM recovery_startup_fence WHERE singleton=1 AND attempt_id=json_extract(?,'$.attempt_id')");
+    q.bind(1,evidence);
+    require(sqlite3_step(q.value)==SQLITE_ROW,"process_retirement_unproven");
+    auto body=q.text(0);
+    require(sqlite3_step(q.value)==SQLITE_DONE,"process_retirement_unproven");
+    return body;
+  }
+  std::string fenceRecoveryStartup(const std::string& generation,const std::string& service,const std::string& database,
+      const std::string& plan,const std::string& retirement) {
+    require(!service.empty()&&!database.empty(),"process_retirement_scope");
+    const auto evidence=recoveryRetirement(generation,service,database);
+    if(recoveryFenced){
+      Statement existing(db.get(),"SELECT 1 FROM recovery_startup_fence WHERE singleton=1 AND plan_digest=? AND retirement_id=?");
+      existing.bind(1,plan);existing.bind(2,retirement);
+      require(sqlite3_step(existing.value)==SQLITE_ROW&&sqlite3_step(existing.value)==SQLITE_DONE,"process_recovery_fence_conflict");
+      return evidence;
+    }
+    execute("BEGIN IMMEDIATE");
+    if(!timeProviderEnabled)execute(processJournalTimeProviderSql);
+    execute(processJournalRecoveryStartupSql);
+    Statement insert(db.get(),"INSERT INTO recovery_startup_fence VALUES(1,json_extract(?,'$.attempt_id'),?,?)");
+    insert.bind(1,evidence);insert.bind(2,plan);insert.bind(3,retirement);insert.done();
+    execute("COMMIT");
+    recoveryFenced=true;
+    return evidence;
   }
   void begin(const std::string& id, const std::wstring& job, const std::string& policy = "", const std::string& descriptor = "", const std::string& intent = "") {
     execute("BEGIN IMMEDIATE"); Statement q(db.get(), "INSERT INTO core_attempt VALUES(?,?,?)");

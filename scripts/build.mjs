@@ -139,6 +139,7 @@ if (process.platform === 'win32') {
       host.binary_sha256 !== hash(hostBinary) || host.source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-host.cc'))) ||
       host.time_provider_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-time-provider.h'))) ||
       host.journal_time_provider_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-journal-time-provider.sql'))) ||
+      host.journal_recovery_startup_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-journal-recovery-startup.sql'))) ||
       host.worker_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-worker.h'))) ||
       host.creation_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-creation.h'))) ||
       host.module_link_source_sha256 !== hash(await fs.readFile(path.join(root, 'native/process-module-link.h'))) ||

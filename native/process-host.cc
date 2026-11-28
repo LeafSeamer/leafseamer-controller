@@ -77,14 +77,25 @@ int wmain(int argc, wchar_t** argv) {
     const bool upgrade = argc == 3 && std::wstring(argv[1]) == L"--upgrade";
     const bool upgradeTimeProvider=argc==3&&std::wstring(argv[1])==L"--upgrade-time-provider";
     const bool retirement=argc==4&&std::wstring(argv[1])==L"--query-recovery-retirement";
-    const bool journalCommand=initialize||upgrade||upgradeTimeProvider||retirement;
+    const bool fenceRecovery=argc==8&&std::wstring(argv[1])==L"--fence-recovery-startup";
+    const bool journalCommand=initialize||upgrade||upgradeTimeProvider||retirement||fenceRecovery;
     require(journalCommand ? absolute(argv[2]) : (argc >= 4 && absolute(argv[1]) && absolute(argv[2]) && absolute(argv[3])), "process_arguments");
     require(GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_PIPE, "control_pipe_required");
     require(GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_PIPE, "status_pipe_required");
-    Instance instance(journalCommand ? argv[2] : argv[1]); ProcessJournal journal(instance, initialize, upgrade,upgradeTimeProvider,retirement);
-    if(retirement){
-      const auto evidence=journal.recoveryRetirement(utf8(argv[3]));
-      printf("{\"event\":\"process_recovery_retirement\",\"runtime_admitted\":false,\"evidence\":%s}\n",evidence.c_str());
+    using Mode=ProcessJournal::Mode;
+    Mode mode=Mode::launch;
+    if(initialize)mode=Mode::initialize;
+    if(upgrade)mode=Mode::upgrade;
+    if(upgradeTimeProvider)mode=Mode::upgradeTimeProvider;
+    if(retirement)mode=Mode::retirement;
+    if(fenceRecovery)mode=Mode::fenceRecovery;
+    Instance instance(journalCommand ? argv[2] : argv[1]); ProcessJournal journal(instance,mode);
+    if(retirement||fenceRecovery){
+      const auto generation=utf8(argv[3]);
+      const auto evidence=fenceRecovery?journal.fenceRecoveryStartup(generation,utf8(argv[4]),utf8(argv[5]),utf8(argv[6]),utf8(argv[7]))
+        :journal.recoveryRetirement(generation);
+      const auto fence=journal.recoveryStartupFence(evidence);
+      printf("{\"event\":\"process_recovery_retirement\",\"runtime_admitted\":false,\"evidence\":%s,\"startup_fence\":%s}\n",evidence.c_str(),fence.c_str());
       fflush(stdout);return 0;
     }
     if (initialize) { printf("{\"event\":\"process_journal_initialized\",\"runtime_admitted\":false}\n"); fflush(stdout); return 0; }

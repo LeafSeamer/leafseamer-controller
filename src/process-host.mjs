@@ -14,6 +14,10 @@ const digest = value => 'sha256:' + hash(canonicalize(value));
 const same = (left,right) => canonicalize(left) === canonicalize(right);
 const identifier = /^[0-9a-f]{32}(?![\s\S])/;
 const fileIdentity = /^[0-9a-f]{48}(?![\s\S])/;
+const recoveryPlanDigest = /^sha256:[0-9a-f]{64}(?![\s\S])/;
+const recoveryOperation = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?![\s\S])/;
+const recoveryScope = /^[A-Za-z0-9_.:-]{1,128}(?![\s\S])/;
+const matches = (pattern,value) => typeof value === 'string' && pattern.test(value);
 
 function prepareProcessHost() {
   check(process.platform === 'win32' && process.arch === 'x64', 'process_host_platform');
@@ -72,12 +76,29 @@ function journalCommand(dataDir, mode, args = [], maxBytes = 4096) {
 }
 
 export async function readProcessRecoveryRetirement({dataDir,runtimeGeneration,serviceId,databaseInstanceId} = {}) {
-  const code = 'process_retirement_unproven';
-  check(typeof runtimeGeneration === 'string' && identifier.test(runtimeGeneration), 'process_retirement_generation');
+  check(matches(identifier,runtimeGeneration), 'process_retirement_generation');
   const frame = await journalCommand(dataDir, '--query-recovery-retirement', [runtimeGeneration], 65536);
+  return verifyRecoveryRetirement(frame,{runtimeGeneration,serviceId,databaseInstanceId});
+}
+
+export async function fenceProcessRecoveryStartup({dataDir,runtimeGeneration,serviceId,databaseInstanceId,planDigest,retirementId} = {}) {
+  check(matches(identifier,runtimeGeneration), 'process_retirement_generation');
+  check(matches(recoveryScope,serviceId)&&matches(recoveryScope,databaseInstanceId),'process_retirement_scope');
+  check(matches(recoveryPlanDigest,planDigest)&&matches(recoveryOperation,retirementId),'process_recovery_fence_request');
+  const frame=await journalCommand(dataDir,'--fence-recovery-startup',
+    [runtimeGeneration,serviceId,databaseInstanceId,planDigest,retirementId],65536);
+  const proof=await verifyRecoveryRetirement(frame,{runtimeGeneration,serviceId,databaseInstanceId});
+  check(same(proof.startup_fence,{plan_digest:planDigest,retirement_id:retirementId}),'process_recovery_fence_conflict');
+  return proof;
+}
+
+async function verifyRecoveryRetirement(frame,{runtimeGeneration,serviceId,databaseInstanceId}) {
+  const code = 'process_retirement_unproven';
   check(frame.event === 'process_recovery_retirement' && frame.runtime_admitted === false && frame.evidence,code);
   try {
-    const evidence = frame.evidence, attempt = evidence.attempt_id;
+    const evidence = frame.evidence, attempt = evidence.attempt_id, fence=frame.startup_fence??null;
+    check(fence===null||(matches(recoveryPlanDigest,fence.plan_digest)&&matches(recoveryOperation,fence.retirement_id)&&
+      Object.keys(fence).sort().join(',')==='plan_digest,retirement_id'),code);
     const {receipt,descriptor} = evidence;
     const policy = validateBootstrapPolicy(evidence.policy);
     const intent = await decodeProtectedLaunchIntent(Buffer.from(canonicalize(evidence.intent)));
@@ -111,7 +132,8 @@ export async function readProcessRecoveryRetirement({dataDir,runtimeGeneration,s
     return Object.freeze({format:'leafseamer-windows-process-retirement/1',runtime_generation:runtimeGeneration,
       service_id:serviceId,database_instance_id:databaseInstanceId,containment_id:attempt,receipt_id:receipt.receipt_id,
       directory_id:evidence.directory_id,journal_incarnation:evidence.journal_incarnation,active_processes:evidence.active_processes,
-      exit_code:evidence.exit_code,forced:Boolean(evidence.forced),retirement_digest:digest(evidence)});
+      exit_code:evidence.exit_code,forced:Boolean(evidence.forced),retirement_digest:digest(evidence),
+      ...(fence&&{startup_fence:Object.freeze(fence)})});
   } catch(error) {
     throw error instanceof ProcessHostError ? error : new ProcessHostError(code);
   }

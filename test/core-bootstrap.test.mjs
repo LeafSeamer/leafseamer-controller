@@ -19,7 +19,7 @@ import {canonical, digest, ref, seal} from '../dist/auth-clock-value.mjs';
 import {fixture as clockFixture} from './auth-clock-fixture.mjs';
 import {peerCertificates} from './fixtures/peer-certificates.mjs';
 import {startProcessHost, initializeProcessHost, upgradeProcessHost, upgradeTimeProviderJournal,
-  installedCoreDigest, installedTimeProviderDigest, readProcessRecoveryRetirement} from '../dist/process-host.mjs';
+  installedCoreDigest, installedTimeProviderDigest, readProcessRecoveryRetirement, fenceProcessRecoveryStartup} from '../dist/process-host.mjs';
 
 const options = {skip: process.platform !== 'win32', timeout: 30000};
 function temporary(t) {
@@ -241,6 +241,15 @@ test('Windows 监督器在共享时钟域创建、准入并清理固定时间提
     assert.deepEqual(row(db,'SELECT * FROM time_provider_runtime_binding'),stored);
     assert.equal(db.prepare('SELECT count(*) FROM time_provider_runtime_binding WHERE service_boot_id=?').pluck().get(newBoot),0);
   });
+  const runtimeGeneration=native.core.containment_ref.generation;
+  const fence=await fenceProcessRecoveryStartup({dataDir:dir,runtimeGeneration,serviceId:identity.service_id,
+    databaseInstanceId:identity.database_instance_id,planDigest:digest('provider recovery plan'),retirementId:crypto.randomUUID()});
+  assert.equal(fence.active_processes,0);
+  inspect(dir,'supervisor-journal.db',db=>{
+    assert.equal(db.pragma('user_version',{simple:true}),7);
+    assert.deepEqual(row(db,'SELECT * FROM time_provider_observation'),native.observation);
+    assert.deepEqual(JSON.parse(row(db,'SELECT * FROM time_provider_admission').receipt_jcs),native.receipt);
+  });
   assert(!/secret|challenge_nonce|"proof"/.test(output));
 });
 
@@ -337,6 +346,7 @@ test('按当前运行代查回原生 Job 退役证据，并拒绝活跃或过时
   await migrateStorage(dir,48);
   await initializeProcessHost(dir);
   const lookup={dataDir:dir,serviceId:identity.service_id,databaseInstanceId:identity.database_instance_id};
+  const recovery={planDigest:digest('approved recovery plan'),retirementId:crypto.randomUUID()};
   const journalPath=path.join(dir,'supervisor-journal.db');
   await assert.rejects(readProcessRecoveryRetirement({...lookup,runtimeGeneration:'f'.repeat(32)}),
     {code:'process_retirement_unproven'});
@@ -353,6 +363,7 @@ test('按当前运行代查回原生 Job 退役证据，并拒绝活跃或过时
   }
   const first=await launch();
   await assert.rejects(readProcessRecoveryRetirement({...lookup,runtimeGeneration:'f'.repeat(32)}),{code:'instance_in_use'});
+  await assert.rejects(fenceProcessRecoveryStartup({...lookup,...recovery,runtimeGeneration:'f'.repeat(32)}),{code:'instance_in_use'});
   assert.equal((await first.close()).exitCode,0);
   const retiredRequest={...lookup,runtimeGeneration:runtime()};
   const original=fs.readFileSync(journalPath);
@@ -368,7 +379,43 @@ test('按当前运行代查回原生 Job 退役证据，并拒绝活跃或过时
   const next=await launch();
   assert.equal((await next.close()).exitCode,0);
   await assert.rejects(readProcessRecoveryRetirement(retiredRequest),{code:'process_retirement_unproven'});
-  assert.equal((await readProcessRecoveryRetirement({...lookup,runtimeGeneration:runtime()})).containment_id,next.containment.containment_id);
+  await assert.rejects(fenceProcessRecoveryStartup({...retiredRequest,...recovery}),{code:'process_retirement_unproven'});
+  const request={...lookup,...recovery,runtimeGeneration:runtime()};
+  const prior=await readProcessRecoveryRetirement(request);
+  assert.equal(prior.containment_id,next.containment.containment_id);
+  await assert.rejects(fenceProcessRecoveryStartup({...request,databaseInstanceId:crypto.randomUUID()}),{code:'process_retirement_unproven'});
+
+  // 固定宿主直接收到错误操作标识时，INSERT 约束必须和版本变动一起回滚。
+  const executable=fileURLToPath(new URL('../dist/native/leafseamer_process_host.exe',import.meta.url));
+  const invalid=spawn(executable,['--fence-recovery-startup',dir,request.runtimeGeneration,request.serviceId,
+    request.databaseInstanceId,request.planDigest,'invalid'],{windowsHide:true,signal:AbortSignal.timeout(10000)});
+  invalid.stdin.end();invalid.stdout.resume();invalid.stderr.resume();
+  assert.deepEqual(await once(invalid,'close'),[1,null]);
+  inspect(dir,'supervisor-journal.db',db=>{
+    assert.equal(db.pragma('user_version',{simple:true}),5);
+    assert.equal(db.prepare("SELECT 1 FROM sqlite_schema WHERE name='recovery_startup_fence'").get(),undefined);
+  });
+  assert.deepEqual(await readProcessRecoveryRetirement(request),prior);
+
+  const storageOriginal=fs.readFileSync(path.join(dir,'controller.sqlite'));
+  const fenced=await fenceProcessRecoveryStartup(request);
+  assert.deepEqual(fenced,{...prior,startup_fence:{plan_digest:recovery.planDigest,retirement_id:recovery.retirementId}});
+  assert.deepEqual(await fenceProcessRecoveryStartup(request),fenced);
+  await assert.rejects(fenceProcessRecoveryStartup({...request,planDigest:digest('other plan')}),{code:'process_recovery_fence_conflict'});
+  await assert.rejects(fenceProcessRecoveryStartup({...request,retirementId:crypto.randomUUID()}),{code:'process_recovery_fence_conflict'});
+  await assert.rejects(startProcessHost({dataDir:dir,bootstrapPolicy:policyFor(identity)}),{code:'process_recovery_startup_fenced'});
+  await assert.rejects(startProcessHost({dataDir:dir}),{code:'process_recovery_startup_fenced'});
+  await assert.rejects(upgradeProcessHost(dir),{code:'process_recovery_startup_fenced'});
+  await assert.rejects(upgradeTimeProviderJournal(dir),{code:'process_recovery_startup_fenced'});
+  assert.deepEqual(await readProcessRecoveryRetirement(request),fenced);
+  assert.deepEqual(fs.readFileSync(path.join(dir,'controller.sqlite')),storageOriginal);
+  inspect(dir,'supervisor-journal.db',db=>{
+    assert.equal(db.pragma('user_version',{simple:true}),7);
+    assert.equal(db.prepare('SELECT count(*) FROM core_attempt').pluck().get(),2);
+    assert.equal(db.prepare('SELECT count(*) FROM core_exit').pluck().get(),2);
+    assert.throws(()=>db.prepare('DELETE FROM recovery_startup_fence').run(),/immutable/);
+    assert.deepEqual(db.pragma('foreign_key_check'),[]);
+  });
 });
 
 test('核心绑定事务失败时不监听，监督准入原件仍保留且没有业务绑定', options, async t => {
