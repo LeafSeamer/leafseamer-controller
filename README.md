@@ -609,6 +609,8 @@ node --disallow-code-generation-from-strings dist/cli.mjs migrate-storage --data
 
 可信本机维护进程可调用 `dist/storage.mjs` 导出的 `verifyBackupSnapshot(file, receipt)` 验证隔离的 Controller 单文件快照。入口核对快照回执的字节数、SHA-256、原库身份与两个 epoch，复用固定 SQLite 引擎及版本迁移校验，并按库版本重新读取请求裁决、命令原件、生命周期修订和资源证据。返回报告绑定相同快照回执，并记录待收敛命令及未决资源数量。维护调用方保管独占暂存目录及执行时限，并在采用报告前核对归档中的数据库成员与报告摘要。
 
+可信恢复程序可调用 `prepareProtectedRecoveryStorage({sourceFile, receipt, targetDirectory, nextScope, planDigest, dataGenerationId})`。函数复验快照并在独占空目录准备新库，使用计划指定的库实例、请求 epoch 和控制 epoch。它以原设备标识、类型和名称重建待复审目录，设备初始处于断开及保护态。重建的记录绑定原登记摘要和恢复计划。凭据、配对、当前设备资源与配置、控制持有人和命令原件继续保存在原快照。回执包含新库字节摘要与原命令清单计数，供 Suite 审核配置、现场状态和新代启动。
+
 `enroll-admin --data-dir <绝对目录>` 是供本机安装管理客户端使用的子进程入口。Windows 要求实际提升权限的管理员，首期系统工具固定标准 Windows 安装位置；Linux 要求有效 UID 0。没有在线角色、环境开关或命令参数可替代该检查。当前账户非管理员时，在打开业务库或发出能力前拒绝。父客户端必须用受控继承管道连接 stdin/stdout，终端和文件重定向拒绝；尚未提供交互安装向导。
 
 管道协议为：子进程首先只交付一次 `initialization_capability`，含 `token_id`、32随机字节的规范base64url `secret` 和600秒上限；父客户端通过 stdin 提交一个 UTF-8 JSON 对象后关闭输入，字段精确为 `token_id,secret,login,password,mode`。总输入至多64 KiB，mode为 `standalone` 或 `suite_issuer`。登录名保留精确大小写与字符，不trim或规范化，长度1—128个Unicode标量且不含控制字符；密码长度16—4096个Unicode标量，不接受非法代理项。秘密和密码不放 argv、环境变量、普通日志或磁盘中间文件；父客户端也须遵守一次交付边界。

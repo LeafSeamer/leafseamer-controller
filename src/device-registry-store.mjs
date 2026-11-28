@@ -15,14 +15,64 @@ function decode(body, expected) {
 }
 const scope = service => ({authority_service_id: service.service_id, database_instance_id: service.database_instance_id});
 const available = (db, service) => { if (!db.open || !service || Number(service.schema_revision) < 10) fail('device_migration_required'); };
+const validRegistration = input => input && Object.keys(input).sort().join(',') === 'device_kind,display_name,request_id' &&
+  id(input.request_id) && id(input.device_kind) && typeof input.display_name === 'string' && input.display_name.length >= 1 &&
+  input.display_name.length <= 1024 && !/[\u0000-\u001f\u007f]/.test(input.display_name);
+
+function writeRegistration(db, service, request, revision, deviceId, provenance = null) {
+  const recordId = crypto.randomUUID(), txId = crypto.randomUUID();
+  const descriptor = {device_id: deviceId, device_kind: request.device_kind, display_name: request.display_name,
+    connection_state: 'disconnected', actions: [], triggers: [], state_schema: {schema_id: 'device.unavailable',
+      dialect: 'https://json-schema.org/draft/2020-12/schema', document: false, digest: digest(false)}};
+  const controlBody = {record_id: recordId, scope: scope(service), device_id: deviceId, revision: '1', control_epoch: crypto.randomUUID(),
+    effective_version: '0', reserved_version: '0', holder: null, mode: 'automatic', pending_change: null, gate_state: 'protected',
+    in_flight_command_ids: [], unresolved_command_ids: []};
+  const control = {...controlBody, record_digest: digest(controlBody)};
+  const receipt = {request_id: request.request_id, transaction_id: txId, device_id: deviceId, scope: scope(service),
+    catalog_revision: String(revision + 1), descriptor_digest: digest(descriptor), control_ref: {record_id: recordId, revision: '1', digest: control.record_digest}};
+  const audit = {kind: provenance ? 'recovered_device_registration' : 'local_device_registration',
+    device_id: deviceId, transaction_id: txId, ...(provenance && {provenance})};
+  db.prepare('INSERT INTO device_registration VALUES (?,?,?,?,?)').run(request.request_id, digest(request), deviceId, txId, bytes(request));
+  db.prepare('INSERT INTO device_record VALUES (?,?,?,?,?,?,?)').run(deviceId, revision + 1, request.request_id, bytes(descriptor), digest(descriptor), recordId, txId);
+  db.prepare('INSERT INTO device_control_history VALUES (?,?,?,?,?,?)').run(recordId, deviceId, '1', control.control_epoch, bytes(control), digest(control));
+  db.prepare('INSERT INTO device_registration_commit VALUES (?,?,?,?,?,?,?,?)').run(txId, deviceId, request.request_id, bytes(receipt), digest(receipt),
+    bytes(audit), crypto.randomUUID(), bytes({kind: provenance ? 'device_restored' : 'device_registered', receipt}));
+  return receipt;
+}
+
+export function restoreDeviceRegistry(source, target, oldService, service, origin) {
+  if (!source.readonly || !target.inTransaction) fail('device_recovery_writer');
+  const origins=crypto.createHash('sha256'); let count=0;
+  if (Number(oldService.schema_revision)>=10) {
+    available(target,service);
+    const revision=source.prepare('SELECT revision FROM device_catalog WHERE singleton=1').pluck().get();
+    if (!Number.isInteger(revision) || revision<0 || revision>4096 ||
+        target.prepare('SELECT revision FROM device_catalog WHERE singleton=1').pluck().get()!==0) fail('device_recovery_catalog');
+    for (const [deviceId,sequence,requestId,transactionId,requestBody,requestHash,descriptorBody,descriptorHash,receiptBody,receiptHash] of source.prepare(`
+      SELECT d.device_id,d.sequence,d.request_id,d.tx_id,r.request_body,r.request_digest,d.descriptor_body,d.descriptor_digest,c.receipt_body,c.receipt_digest
+      FROM device_record d JOIN device_registration r USING(request_id,device_id,tx_id)
+      JOIN device_registration_commit c USING(request_id,device_id,tx_id) ORDER BY d.sequence`).raw().iterate()) {
+      const request=decode(requestBody,requestHash), descriptor=decode(descriptorBody,descriptorHash), oldReceipt=decode(receiptBody,receiptHash);
+      if (!id(deviceId)||sequence!==count+1||!validRegistration(request)||request.request_id!==requestId||descriptor.device_id!==deviceId||
+          descriptor.device_kind!==request.device_kind||descriptor.display_name!==request.display_name||oldReceipt.device_id!==deviceId||
+          oldReceipt.request_id!==requestId||oldReceipt.transaction_id!==transactionId||oldReceipt.descriptor_digest!==descriptorHash||
+          oldReceipt.catalog_revision!==String(sequence)||
+          canonical(oldReceipt.scope)!==canonical(scope(oldService))) fail('device_recovery_source');
+      const original={device_id:deviceId,sequence,registration_digest:receiptHash,descriptor_digest:descriptorHash};
+      writeRegistration(target,service,{...request,request_id:crypto.randomUUID()},count++,deviceId,
+        {...origin,source_scope:scope(oldService),...original});
+      origins.update(canonical(original)+'\n');
+    }
+    if (count!==revision) fail('device_recovery_catalog');
+  }
+  return {device_count:count,device_origin_digest:'sha256:'+origins.digest('hex')};
+}
 
 // 仅由可信本机安装管理调用；参数是待配置元数据，不是能力或设备运行批准。
 export function registerDevice(db, service, input) {
   available(db, service);
   if (db.inTransaction) fail('device_outer_transaction');
-  if (!input || Object.keys(input).sort().join(',') !== 'device_kind,display_name,request_id' ||
-    !id(input.request_id) || !id(input.device_kind) || typeof input.display_name !== 'string' || input.display_name.length < 1 || input.display_name.length > 1024 ||
-    /[\u0000-\u001f\u007f]/.test(input.display_name)) fail('device_registration_invalid');
+  if (!validRegistration(input)) fail('device_registration_invalid');
   const request = JSON.parse(canonical(input)), requestDigest = digest(request);
   return db.transaction(() => {
     if (db.prepare('SELECT count(*) FROM identity_receipt').pluck().get() !== 1) fail('device_admin_uninitialized');
@@ -31,22 +81,7 @@ export function registerDevice(db, service, input) {
     if (prior) { if (prior.request_digest !== requestDigest) fail('device_registration_conflict'); return decode(prior.receipt_body, prior.receipt_digest); }
     const revision = db.prepare('SELECT revision FROM device_catalog WHERE singleton=1').pluck().get();
     if (revision >= 4096) fail('device_capacity');
-    const deviceId = crypto.randomUUID(), recordId = crypto.randomUUID(), txId = crypto.randomUUID();
-    const descriptor = {device_id: deviceId, device_kind: request.device_kind, display_name: request.display_name,
-      connection_state: 'disconnected', actions: [], triggers: [], state_schema: {schema_id: 'device.unavailable',
-        dialect: 'https://json-schema.org/draft/2020-12/schema', document: false, digest: digest(false)}};
-    const controlBody = {record_id: recordId, scope: scope(service), device_id: deviceId, revision: '1', control_epoch: crypto.randomUUID(),
-      effective_version: '0', reserved_version: '0', holder: null, mode: 'automatic', pending_change: null, gate_state: 'protected',
-      in_flight_command_ids: [], unresolved_command_ids: []};
-    const control = {...controlBody, record_digest: digest(controlBody)};
-    const receipt = {request_id: request.request_id, transaction_id: txId, device_id: deviceId, scope: scope(service),
-      catalog_revision: String(revision + 1), descriptor_digest: digest(descriptor), control_ref: {record_id: recordId, revision: '1', digest: control.record_digest}};
-    db.prepare('INSERT INTO device_registration VALUES (?,?,?,?,?)').run(request.request_id, requestDigest, deviceId, txId, bytes(request));
-    db.prepare('INSERT INTO device_record VALUES (?,?,?,?,?,?,?)').run(deviceId, revision + 1, request.request_id, bytes(descriptor), digest(descriptor), recordId, txId);
-    db.prepare('INSERT INTO device_control_history VALUES (?,?,?,?,?,?)').run(recordId, deviceId, '1', control.control_epoch, bytes(control), digest(control));
-    db.prepare('INSERT INTO device_registration_commit VALUES (?,?,?,?,?,?,?,?)').run(txId, deviceId, request.request_id, bytes(receipt), digest(receipt),
-      bytes({kind: 'local_device_registration', device_id: deviceId, transaction_id: txId}), crypto.randomUUID(), bytes({kind: 'device_registered', receipt}));
-    return receipt;
+    return writeRegistration(db,service,request,revision,crypto.randomUUID());
   }).immediate();
 }
 

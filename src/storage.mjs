@@ -7,8 +7,9 @@ import crypto from 'node:crypto';
 import Database from 'better-sqlite3';
 import {acquireDatabaseOwner} from './database-owner.mjs';
 import {identityStore} from './identity-store.mjs';
+import {IdentityError} from './identity-error.mjs';
 import {authenticationClockStore} from './auth-clock-store.mjs';
-import {registerDevice} from './device-registry-store.mjs';
+import {registerDevice,restoreDeviceRegistry} from './device-registry-store.mjs';
 import {observeObsResource,registerObsResource,sealObsResourceCredential} from './obs-resource.mjs';
 import {sessionStore} from './session-store.mjs';
 import {configureVirtualDevice} from './worker-dependencies.mjs';
@@ -303,6 +304,10 @@ function identity(db, revision = '1') {
   return Object.freeze({...row});
 }
 export function initializeStorage(dataDir) {
+  return createStorage(dataDir, {service_id:crypto.randomUUID(),database_instance_id:crypto.randomUUID(),
+    control_epoch:crypto.randomUUID(),request_epoch:crypto.randomUUID()});
+}
+function createStorage(dataDir,scope) {
   const file = filename(dataDir);
   fs.mkdirSync(path.dirname(file), {recursive: true, mode: 0o700});
   let handle;
@@ -318,7 +323,7 @@ export function initializeStorage(dataDir) {
       db.exec(sql);
       pragma(db, 'application_id = ' + applicationId); pragma(db, 'user_version = 1');
       db.prepare("INSERT INTO service_state VALUES (1, 'controller', ?, ?, ?, ?, '1', 'protected', '0')")
-        .run(crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID());
+        .run(scope.service_id, scope.database_instance_id, scope.control_epoch, scope.request_epoch);
       db.prepare("INSERT INTO schema_migration VALUES (?, '0', '1', ?, NULL, 'committed', ?)")
         .run(crypto.randomUUID(), scriptDigest, crypto.randomUUID());
     }).immediate();
@@ -356,6 +361,9 @@ export function verifyBackupSnapshot(file, receipt) {
     require(sameFile(before)&&noSidecars(),'backup_snapshot_file');
     fd=fs.openSync(file,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0));
     require(sameFile(fs.fstatSync(fd,{bigint:true})),'backup_snapshot_file');
+    const header=Buffer.alloc(20);
+    require(fs.readSync(fd,header,0,header.length,0)===header.length&&
+      header.subarray(0,16).equals(Buffer.from('SQLite format 3\0'))&&header[18]===1&&header[19]===1,'backup_snapshot_file');
     const hash=crypto.createHash('sha256'), buffer=Buffer.alloc(65536);
     for(let offset=0;offset<receipt.bytes;){
       const count=fs.readSync(fd,buffer,0,Math.min(buffer.length,receipt.bytes-offset),offset);
@@ -383,6 +391,79 @@ export function verifyBackupSnapshot(file, receipt) {
     throw new StorageError(fd===undefined?'backup_snapshot_file':'backup_snapshot_inventory');
   }finally{
     try{db?.close();}finally{if(fd!==undefined)fs.closeSync(fd);}
+  }
+}
+
+export async function prepareProtectedRecoveryStorage({sourceFile,receipt,targetDirectory,nextScope,planDigest,dataGenerationId}={}) {
+  const snapshotReceipt=receipt&&{...receipt,scope:{...receipt.scope}};
+  const original=snapshotReceipt?.scope,next=nextScope&&{...nextScope},revision=Number(next?.schema_revision);
+  require(next?.authority==='controller'&&original?.authority==='controller'&&next.service_id===original.service_id&&
+    Object.keys(next).sort().join(',')==='authority,control_epoch,database_instance_id,request_epoch,schema_revision,service_id'&&
+    ['service_id','database_instance_id','control_epoch','request_epoch'].every(key=>typeof next[key]==='string'&&next[key].length===36&&uuid.test(next[key]))&&
+    ['database_instance_id','control_epoch','request_epoch'].every(key=>next[key]!==original[key])&&supportsStorageRevision(revision,1)&&
+    next.schema_revision===String(revision)&&revision>=Number(original.schema_revision)&&
+    typeof planDigest==='string'&&/^sha256:[0-9a-f]{64}(?![\s\S])/.test(planDigest)&&
+    typeof dataGenerationId==='string'&&dataGenerationId.length===36&&uuid.test(dataGenerationId),'recovery_storage_scope');
+  const file=filename(targetDirectory),directory=path.dirname(file),sidecars=['-wal','-shm','-journal'];
+  let stage,source;
+  try {
+    require(fs.lstatSync(directory).isDirectory()&&fs.readdirSync(directory).length===0,'recovery_storage_destination');
+    const before=fs.lstatSync(sourceFile,{bigint:true});
+    const checkSource=()=>{
+      const stat=fs.lstatSync(sourceFile,{bigint:true});
+      require(stat.isFile()&&stat.nlink===1n&&['dev','ino','size','mtimeNs','ctimeNs'].every(key=>stat[key]===before[key])&&
+        sidecars.every(suffix=>fs.lstatSync(sourceFile+suffix,{throwIfNoEntry:false})===undefined),'backup_snapshot_file');
+    };
+    const {command_inventory}=verifyBackupSnapshot(sourceFile,snapshotReceipt);
+    checkSource();
+    source=new Database(sourceFile,{readonly:true,fileMustExist:true,timeout:0});
+    pragma(source,'trusted_schema=OFF');pragma(source,'query_only=ON');
+    stage=fs.mkdtempSync(path.join(directory,'.controller-recovery-'));
+    const stagedFile=filename(stage);
+    createStorage(stage,next);
+    if(revision>1)await migrateStorage(stage,revision);
+    const origin={format:'leafseamer.controller-recovery-origin/1',plan_digest:planDigest,data_generation_id:dataGenerationId,
+      snapshot_receipt_id:snapshotReceipt.backup_operation_id,snapshot_sha256:snapshotReceipt.sha256};
+    const db=open(stagedFile);
+    let devices;
+    try {
+      const state=validateStorage(db);
+      require(Object.keys(next).every(key=>state[key]===next[key]),'recovery_storage_scope');
+      devices=source.transaction(()=>db.transaction(()=>{
+        const result=restoreDeviceRegistry(source,db,original,state,origin);
+        checkSource();
+        return result;
+      }).immediate())();
+      validateStorage(db);
+    } finally { db.close(); }
+    source.close();source=null;
+    checkSource();
+    require(sidecars.every(suffix=>fs.lstatSync(stagedFile+suffix,{throwIfNoEntry:false})===undefined),'recovery_storage_sidecars');
+    const fd=fs.openSync(stagedFile,'r+'),hash=crypto.createHash('sha256'),buffer=Buffer.alloc(65536);
+    let bytes=0;
+    try {
+      for(let length;(length=fs.readSync(fd,buffer,0,buffer.length,null))>0;){hash.update(buffer.subarray(0,length));bytes+=length;}
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+    const sha256=hash.digest('hex');
+    fs.linkSync(stagedFile,file);
+    return {format:'leafseamer.controller-protected-recovery-storage/1',origin,next_scope:{...next},bytes,sha256,
+      ...devices,command_inventory,device_review_required:devices.device_count>0,history_retained_in_source:true};
+  } catch(error) {
+    if(error instanceof StorageError)throw error;
+    if(error instanceof IdentityError)throw new StorageError('recovery_storage_device_invalid');
+    throw new StorageError(error.code==='EEXIST'?'recovery_storage_destination':'recovery_storage_failed');
+  } finally {
+    source?.close();
+    if(stage){
+      const expected=new Set(['controller.sqlite',...sidecars.map(suffix=>'controller.sqlite'+suffix),'controller.sqlite.owner','controller.sqlite.owner-journal']);
+      for(const name of fs.readdirSync(stage)){
+        if(expected.has(name)||/^controller-before-v[0-9]+-[a-f0-9-]{36}\.sqlite(\-wal|\-shm|\-journal)?$/.test(name)){
+          fs.unlinkSync(path.join(stage,name));
+        }
+      }
+      fs.rmdirSync(stage);
+    }
   }
 }
 export async function migrateStorage(dataDir, targetRevision = 70) {
