@@ -18,7 +18,8 @@ export async function automationPeer({business,manager,config,device,refresh,rep
  const endorsements=manager.sessions.runApprovalEndorsements,policies=manager.sessions.runEndorsementPolicies,preparations=manager.sessions.runPreparations;
  const commands=preparations?.automationCommands;
  let armedEventRequested=false,triggerPlanGrant=null,targetOpening=null;
- async function prepareEligibility(binding,socket,request){
+ async function prepareEligibility(binding,socket,request,options){
+  if(options?.recovery)return preparations.prepareEligibility(binding,socket,request,options);
   if(config.scheduled_admission&&request.schedule_device_ids){
    targetOpening??=openArmTarget();
    await targetOpening;
@@ -65,8 +66,10 @@ export async function automationPeer({business,manager,config,device,refresh,rep
   introspection:createIntrospectionEndpoint({sessions:manager.sessions,serviceId:identity.service_id,serviceBootId:business.serviceBootId})});
  policies?.bindProposalReader(transport.readRunApprovalProposal);
  endorsements?.bindApprovalReader(transport.readRunApproval);
- endorsements?.bindInitiatorReader(transport.readRunInitiator);
- preparations?.bindPlanReader(trace('readArmPlan',transport.prepareRunArmPlan));
+ endorsements?.bindInitiatorReader((bindingId,ref)=>ref.kind==='recovery_operation'?
+  transport.readRunRecoveryInitiator(bindingId,ref):transport.readRunInitiator(bindingId,ref));
+ preparations?.bindPlanReader(trace('readPreparationPlan',(bindingId,ref)=>ref.kind==='recovery_plan'?
+  transport.prepareRunRecoveryPlan(bindingId,ref):transport.prepareRunArmPlan(bindingId,ref)));
  if(preparations?.automationCommands)preparations.bindActionReader(trace('readActionBinding',transport.prepareRunActionBinding));
  let closing=false;
  const protectionDelivery=startRunProtectionDelivery({endorsements,workerLaunches:business.workerLaunches,
@@ -107,6 +110,7 @@ export async function automationPeer({business,manager,config,device,refresh,rep
    if(config.incremental_source_event){
     permissions.push('definition.publish','run.approve','run.arm','run.manage','run.read');
     if(config.scheduled_admission)permissions.push('schedule.read','schedule.publish','schedule.activate');
+    if(config.recovery_reconciliation)permissions.push('run.approval.revoke','run.resume');
     const current=manager.sessions.localPermissions(manager.auth),principal_id=manager.logged.session.principal_id;
     if(!current.permissions.includes('grant.manage'))manager.sessions.replaceLocalPermissions(manager.auth,{request_id:crypto.randomUUID(),principal_id,
      expected_revision:current.revision,permissions:[...current.permissions,'grant.manage','grant.read']});

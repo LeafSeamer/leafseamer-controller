@@ -144,6 +144,7 @@ async function openSuccessorGate(device,{checkObsSample=false}={}){
 }
 async function runSuccessor(device,parameters={value:23},contextId=commandRequest.context_id){
  const {opening,opened}=await openSuccessorGate(device);
+ if(input.automation_peer?.recovery_reconciliation)await source.refreshCoreObservation();
  const request={...commandRequest,parameters,context_id:contextId,idempotency_key:crypto.randomUUID(),dispatch:{mode:'immediate',max_queue_ms:10000}};
  const accepted=await commandHttp('POST','/api/v1/commands',request);
  if(accepted.status!==202)throw Object.assign(new Error('successor_http_admission'),{code:'successor_http_admission',cause:accepted.body});
