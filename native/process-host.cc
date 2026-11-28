@@ -76,11 +76,17 @@ int wmain(int argc, wchar_t** argv) {
     const bool initialize = argc == 3 && std::wstring(argv[1]) == L"--initialize";
     const bool upgrade = argc == 3 && std::wstring(argv[1]) == L"--upgrade";
     const bool upgradeTimeProvider=argc==3&&std::wstring(argv[1])==L"--upgrade-time-provider";
-    const bool journalCommand=initialize||upgrade||upgradeTimeProvider;
+    const bool retirement=argc==4&&std::wstring(argv[1])==L"--query-recovery-retirement";
+    const bool journalCommand=initialize||upgrade||upgradeTimeProvider||retirement;
     require(journalCommand ? absolute(argv[2]) : (argc >= 4 && absolute(argv[1]) && absolute(argv[2]) && absolute(argv[3])), "process_arguments");
     require(GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_PIPE, "control_pipe_required");
     require(GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_PIPE, "status_pipe_required");
-    Instance instance(journalCommand ? argv[2] : argv[1]); ProcessJournal journal(instance, initialize, upgrade,upgradeTimeProvider);
+    Instance instance(journalCommand ? argv[2] : argv[1]); ProcessJournal journal(instance, initialize, upgrade,upgradeTimeProvider,retirement);
+    if(retirement){
+      const auto evidence=journal.recoveryRetirement(utf8(argv[3]));
+      printf("{\"event\":\"process_recovery_retirement\",\"runtime_admitted\":false,\"evidence\":%s}\n",evidence.c_str());
+      fflush(stdout);return 0;
+    }
     if (initialize) { printf("{\"event\":\"process_journal_initialized\",\"runtime_admitted\":false}\n"); fflush(stdout); return 0; }
     if (upgrade||upgradeTimeProvider) { printf("{\"event\":\"process_journal_upgraded\",\"changed\":%s,\"schema_revision\":\"%s\",\"runtime_admitted\":false}\n", journal.upgraded ? "true" : "false",journal.timeProviderEnabled?"6":"5"); fflush(stdout); return 0; }
     const std::string id = identifier(); const std::wstring jobName = L"Global\\LeafSeamer.Core." + std::wstring(id.begin(), id.end());

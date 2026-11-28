@@ -5,10 +5,15 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import canonicalize from 'canonicalize';
 import {validateBootstrapPolicy} from './core-bootstrap.mjs';
+import {bootstrapVersion,decodeBootstrap,decodeProtectedLaunchIntent} from './sdk/bootstrap.mjs';
 
 export class ProcessHostError extends Error { constructor(code) { super(code); this.name = 'ProcessHostError'; this.code = code; } }
 const check = (condition, code) => { if (!condition) throw new ProcessHostError(code); };
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+const digest = value => 'sha256:' + hash(canonicalize(value));
+const same = (left,right) => canonicalize(left) === canonicalize(right);
+const identifier = /^[0-9a-f]{32}(?![\s\S])/;
+const fileIdentity = /^[0-9a-f]{48}(?![\s\S])/;
 
 function prepareProcessHost() {
   check(process.platform === 'win32' && process.arch === 'x64', 'process_host_platform');
@@ -36,15 +41,23 @@ export async function initializeProcessHost(dataDir) { return configureJournal(d
 export async function upgradeProcessHost(dataDir) { return configureJournal(dataDir, true); }
 export async function upgradeTimeProviderJournal(dataDir) { return configureJournal(dataDir, true, true); }
 async function configureJournal(dataDir, upgrade, timeProvider = false) {
+  const mode = timeProvider ? '--upgrade-time-provider' : upgrade ? '--upgrade' : '--initialize';
+  const frame = await journalCommand(dataDir, mode);
+  check(frame.event === (upgrade ? 'process_journal_upgraded' : 'process_journal_initialized') && frame.runtime_admitted === false &&
+    (!upgrade || ((timeProvider ? frame.schema_revision === '6' : ['5','6'].includes(frame.schema_revision)) &&
+      typeof frame.changed === 'boolean')), 'process_host_protocol');
+  return Object.freeze(frame);
+}
+
+function journalCommand(dataDir, mode, args = [], maxBytes = 4096) {
   const {executable, env} = prepareProcessHost();
   check(typeof dataDir === 'string' && path.isAbsolute(dataDir), 'process_host_options');
   return new Promise((resolve, reject) => {
-    const mode = timeProvider ? '--upgrade-time-provider' : upgrade ? '--upgrade' : '--initialize';
-    const child = spawn(executable, [mode, dataDir], {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env});
+    const child = spawn(executable, [mode, dataDir, ...args], {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env});
     let output = '', failed = null;
     const timer = setTimeout(() => { failed = 'process_host_startup_timeout'; child.kill(); }, 10000);
     child.stdin.on('error', () => {}); child.stdin.end(); child.stderr.resume();
-    child.stdout.setEncoding('utf8').on('data', chunk => { output += chunk; if (output.length > 4096) { failed = 'process_host_protocol'; child.kill(); } });
+    child.stdout.setEncoding('utf8').on('data', chunk => { output += chunk; if (Buffer.byteLength(output) > maxBytes) { failed = 'process_host_protocol'; child.kill(); } });
     child.once('error', () => { failed = 'process_host_spawn'; });
     child.once('close', code => {
       clearTimeout(timer);
@@ -52,12 +65,56 @@ async function configureJournal(dataDir, upgrade, timeProvider = false) {
         if (failed) throw new ProcessHostError(failed);
         const frame = JSON.parse(output);
         if (code !== 0) throw new ProcessHostError(typeof frame.code === 'string' && /^[a-z_]{1,64}$/.test(frame.code) ? frame.code : 'process_host_failed');
-        check(frame.event === (upgrade ? 'process_journal_upgraded' : 'process_journal_initialized') && frame.runtime_admitted === false &&
-          (!upgrade || ((timeProvider ? frame.schema_revision === '6' : ['5','6'].includes(frame.schema_revision)) &&
-            typeof frame.changed === 'boolean')), 'process_host_protocol'); resolve(Object.freeze(frame));
+        resolve(frame);
       } catch (error) { reject(error instanceof ProcessHostError ? error : new ProcessHostError('process_host_protocol')); }
     });
   });
+}
+
+export async function readProcessRecoveryRetirement({dataDir,runtimeGeneration,serviceId,databaseInstanceId} = {}) {
+  const code = 'process_retirement_unproven';
+  check(typeof runtimeGeneration === 'string' && identifier.test(runtimeGeneration), 'process_retirement_generation');
+  const frame = await journalCommand(dataDir, '--query-recovery-retirement', [runtimeGeneration], 65536);
+  check(frame.event === 'process_recovery_retirement' && frame.runtime_admitted === false && frame.evidence,code);
+  try {
+    const evidence = frame.evidence, attempt = evidence.attempt_id;
+    const {receipt,descriptor} = evidence;
+    const policy = validateBootstrapPolicy(evidence.policy);
+    const intent = await decodeProtectedLaunchIntent(Buffer.from(canonicalize(evidence.intent)));
+    await decodeBootstrap(Buffer.from(canonicalize({version:bootstrapVersion,type:'ADMISSION',payload:receipt})),'ADMISSION');
+    const {clock_domain_id,descriptor_digest,...domain} = descriptor;
+    const group = {backend:'windows_job',group_id:attempt,generation:runtimeGeneration};
+    check(identifier.test(evidence.journal_incarnation) && fileIdentity.test(evidence.directory_id) &&
+      identifier.test(attempt) && evidence.job_name === 'Global\\LeafSeamer.Core.'+attempt &&
+      Number.isInteger(evidence.supervisor_pid) && evidence.supervisor_pid > 0 &&
+      Number.isInteger(evidence.core_pid) && evidence.core_pid > 0 && evidence.core_pid !== evidence.supervisor_pid &&
+      /^[1-9][0-9]{0,19}(?![\s\S])/.test(evidence.creation_filetime) && fileIdentity.test(evidence.image_file_id) &&
+      evidence.active_processes === 0 && Number.isInteger(evidence.exit_code) && evidence.exit_code >= 0 &&
+      evidence.exit_code <= 0xffffffff && [0,1].includes(evidence.forced) &&
+      [evidence.worker_launches,evidence.time_provider_launches].every(count=>Number.isSafeInteger(count)&&count>=0),code);
+    check(policy.service_id === serviceId && policy.database_instance_id === databaseInstanceId &&
+      domain.descriptor_version === 'clock-domain/1' && domain.domain_kind === 'supervised_runtime' &&
+      domain.authority_service_id === serviceId && domain.runtime_generation === runtimeGeneration &&
+      domain.clock_backend_id === 'windows_interrupt_precise' && domain.clock_backend_revision === policy.clock_backend_revision &&
+      domain.namespace_identity === 'windows-global' && domain.tick_unit === 'ns' && domain.suspend_accounting === 'included' &&
+      domain.platform_profile_id === policy.platform_profile_ref.profile_id &&
+      domain.platform_profile_revision === policy.platform_profile_ref.revision &&
+      digest(domain) === descriptor_digest && clock_domain_id === 'clock_'+descriptor_digest.slice(7),code);
+    check(intent.launch_id === attempt && intent.role === 'core' && intent.service_id === serviceId &&
+      intent.supervisor_instance_id === domain.supervisor_instance_id && intent.runtime_generation === runtimeGeneration &&
+      intent.policy_revision === policy.policy_revision && same(intent.containment_ref,group) &&
+      same(intent.artifact_manifest_ref,policy.artifact_manifest_ref) && receipt.receipt_id === evidence.receipt_id &&
+      receipt.role === 'core' && receipt.launch_id === attempt && receipt.os_observation_ref === attempt &&
+      receipt.member_id === intent.member_id && receipt.launch_intent_digest === digest(intent) &&
+      same(receipt.artifact_manifest_ref,intent.artifact_manifest_ref) && same(receipt.containment_ref,group) &&
+      same(receipt.domain_ref,{clock_domain_id,descriptor_digest}) && receipt.gate_state === 'closed',code);
+    return Object.freeze({format:'leafseamer-windows-process-retirement/1',runtime_generation:runtimeGeneration,
+      service_id:serviceId,database_instance_id:databaseInstanceId,containment_id:attempt,receipt_id:receipt.receipt_id,
+      directory_id:evidence.directory_id,journal_incarnation:evidence.journal_incarnation,active_processes:evidence.active_processes,
+      exit_code:evidence.exit_code,forced:Boolean(evidence.forced),retirement_digest:digest(evidence)});
+  } catch(error) {
+    throw error instanceof ProcessHostError ? error : new ProcessHostError(code);
+  }
 }
 
 // 安装内容的局部摘要；发行签名与加载防替换仍由安装层提供。

@@ -19,7 +19,7 @@ import {canonical, digest, ref, seal} from '../dist/auth-clock-value.mjs';
 import {fixture as clockFixture} from './auth-clock-fixture.mjs';
 import {peerCertificates} from './fixtures/peer-certificates.mjs';
 import {startProcessHost, initializeProcessHost, upgradeProcessHost, upgradeTimeProviderJournal,
-  installedCoreDigest, installedTimeProviderDigest} from '../dist/process-host.mjs';
+  installedCoreDigest, installedTimeProviderDigest, readProcessRecoveryRetirement} from '../dist/process-host.mjs';
 
 const options = {skip: process.platform !== 'win32', timeout: 30000};
 function temporary(t) {
@@ -330,6 +330,45 @@ test('真实CNG挑战、Node证明、双库回执与监听形成闭环，设备�
     {domain_ref: {...saved.receipt.domain_ref, clock_domain_id: 'other'}}, {admitted_tick_ns: assignment.expires_tick_ns}]) {
     await assert.rejects(verifyCoreAdmission(assignment, {...saved.receipt, ...change}, policyFor(identity)));
   }
+});
+
+test('按当前运行代查回原生 Job 退役证据，并拒绝活跃或过时的记录',{...options,timeout:60000},async t=>{
+  const dir=temporary(t),identity=initializeStorage(dir);
+  await migrateStorage(dir,48);
+  await initializeProcessHost(dir);
+  const lookup={dataDir:dir,serviceId:identity.service_id,databaseInstanceId:identity.database_instance_id};
+  const journalPath=path.join(dir,'supervisor-journal.db');
+  await assert.rejects(readProcessRecoveryRetirement({...lookup,runtimeGeneration:'f'.repeat(32)}),
+    {code:'process_retirement_unproven'});
+  async function launch(){
+    let output='';
+    const app=await startProcessHost({dataDir:dir,bootstrapPolicy:policyFor(identity),onCoreOutput:chunk=>{output+=chunk;}});
+    t.after(()=>app.close());
+    await until(()=>output.split('\n').filter(Boolean).map(line=>JSON.parse(line)).find(frame=>frame.event==='listening'));
+    return app;
+  }
+  function runtime(){
+    return inspect(dir,'supervisor-journal.db',db=>db.prepare(
+      "SELECT json_extract(descriptor_jcs,'$.runtime_generation') AS id FROM core_bootstrap ORDER BY rowid DESC LIMIT 1").pluck().get());
+  }
+  const first=await launch();
+  await assert.rejects(readProcessRecoveryRetirement({...lookup,runtimeGeneration:'f'.repeat(32)}),{code:'instance_in_use'});
+  assert.equal((await first.close()).exitCode,0);
+  const retiredRequest={...lookup,runtimeGeneration:runtime()};
+  const original=fs.readFileSync(journalPath);
+  const retired=await readProcessRecoveryRetirement(retiredRequest);
+  assert.equal(retired.format,'leafseamer-windows-process-retirement/1');
+  assert.equal(retired.containment_id,first.containment.containment_id);
+  assert.equal(retired.active_processes,0);
+  assert.match(retired.retirement_digest,/^sha256:[0-9a-f]{64}$/);
+  assert.deepEqual(await readProcessRecoveryRetirement(retiredRequest),retired);
+  assert.deepEqual(fs.readFileSync(journalPath),original);
+  await assert.rejects(readProcessRecoveryRetirement({...retiredRequest,databaseInstanceId:crypto.randomUUID()}),
+    {code:'process_retirement_unproven'});
+  const next=await launch();
+  assert.equal((await next.close()).exitCode,0);
+  await assert.rejects(readProcessRecoveryRetirement(retiredRequest),{code:'process_retirement_unproven'});
+  assert.equal((await readProcessRecoveryRetirement({...lookup,runtimeGeneration:runtime()})).containment_id,next.containment.containment_id);
 });
 
 test('核心绑定事务失败时不监听，监督准入原件仍保留且没有业务绑定', options, async t => {

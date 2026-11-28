@@ -577,6 +577,8 @@ schema48允许核心内部调用`executionClient.initialOpen(openingRef,{ready:t
 
 `init-process-host` 只安装当前本机开发身份的 `supervisor-journal.db`，目录须已存在，文件已存在就拒绝覆盖；也可由可信本机装配调用 `initializeProcessHost(dataDir)`。普通 `supervise` 不初始化或补建日志。安装没有创建人员权限、生产宿主批准或已认证运行域。已有开发目录需显式安装该日志后再使用 `supervise`，原 `start` 仍是无设备出口的保护态诊断入口。
 
+可信本机恢复程序可调用 `dist/process-host.mjs` 的 `readProcessRecoveryRetirement({dataDir, runtimeGeneration, serviceId, databaseInstanceId})`。原生监督器持有同一目录的单实例互斥锁，以只读方式核对持久监督日志。只有最后一次启动的运行代、受认证的准入原件及整个 Job 清空的记录相符，才返回绑定目标服务、数据库实例和监督日志的退役摘要。正在运行的监督器、未确认退出或已被后续启动取代的运行代都会拒绝查询。恢复程序负责将该证据绑定到已批准的恢复操作。
+
 原生宿主按已打开目录的卷标识和128位文件ID取得 `Global` 命名互斥锁，显式DACL只允许当前账户和LocalSystem，句柄不继承。目录大小写／junction别名归并至同一实际目录，核心使用从目录句柄解析的路径。重复实例、无法取锁及abandoned均拒绝创建；本轮已验证同会话并发与junction，未验证另一交互会话、服务账户切换或真实abandoned恢复。（接口依据：[Microsoft CreateMutexW](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createmutexw)、[文件身份](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfileinformationbyhandleex)。）
 
 原生启动记录静态链接与业务驱动同源的SQLite 3.53.4，`native-inputs.json`额外锁定既有better-sqlite3包中的sqlite3.c／sqlite3.h；不在运行时下载或调用外部sqlite工具。日志单writer、DELETE／EXTRA，开启外键与递归触发器并回读设置；普通启动检查版本、完整DDL、完整性、外键、原安装目录身份和账户，不在线修复。四张初期表保存安装身份、核心创建尝试、实际进程观察及已确认退出，尚未填充完整DF02的runtime、fence、bootstrap和AdmissionReceipt。（SQLite配置依据：[官方PRAGMA](https://www.sqlite.org/pragma.html)。）

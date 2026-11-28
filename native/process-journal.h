@@ -99,9 +99,9 @@ class ProcessJournal {
 public:
   bool upgraded = false;
   bool timeProviderEnabled = false;
-  ProcessJournal(Instance& instance, bool initialize, bool upgrade = false, bool upgradeTimeProvider = false) {
+  ProcessJournal(Instance& instance, bool initialize, bool upgrade = false, bool upgradeTimeProvider = false, bool observe = false) {
     const std::wstring filename = instance.path + L"\\supervisor-journal.db";
-    file.value = CreateFileW(filename.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &instance.security,
+    file.value = CreateFileW(filename.c_str(), observe ? GENERIC_READ : GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &instance.security,
       initialize ? CREATE_NEW : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     require(file.value != INVALID_HANDLE_VALUE, initialize ? "process_journal_exists" : "process_journal_missing");
     LARGE_INTEGER size{};
@@ -109,17 +109,27 @@ public:
     FILE_ATTRIBUTE_TAG_INFO attributes{};
     require(GetFileInformationByHandleEx(file.value, FileAttributeTagInfo, &attributes, sizeof(attributes)) &&
       !(attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT), "process_journal_link");
-    sqlite3* opened = nullptr; const int code = sqlite3_open_v2(utf8(filename).c_str(), &opened, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, nullptr);
+    if (observe) {
+      FILE_STANDARD_INFO standard{}; unsigned char header[20]{}; DWORD bytes = 0;
+      require(GetFileInformationByHandleEx(file.value, FileStandardInfo, &standard, sizeof(standard)) && standard.NumberOfLinks == 1 &&
+        ReadFile(file.value, header, sizeof(header), &bytes, nullptr) && bytes == sizeof(header) &&
+        std::string(reinterpret_cast<char*>(header), 16) == std::string("SQLite format 3\0", 16) &&
+        header[18] == 1 && header[19] == 1, "process_journal_observation_file");
+    }
+    sqlite3* opened = nullptr;
+    const int flags = (observe ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) | SQLITE_OPEN_NOMUTEX;
+    const int code = sqlite3_open_v2(utf8(filename).c_str(), &opened, flags, nullptr);
     db.reset(opened); require(code == SQLITE_OK, "process_journal_open");
     require(std::string(sqlite3_sourceid()) == "2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc", "process_journal_engine");
     require(sqlite3_busy_timeout(db.get(), 0) == SQLITE_OK, "process_journal_busy");
     // 只在显式初始化时选择日志模式；运行时错模式拒绝，不隐式修复。
     if (initialize) execute("PRAGMA journal_mode=DELETE");
     require(scalar("PRAGMA journal_mode") == "delete", "process_journal_mode");
-    require(scalar("PRAGMA page_size") == "4096" && scalar("PRAGMA max_page_count=4096") == "4096", "process_journal_capacity");
+    require(scalar("PRAGMA page_size") == "4096" && (observe || scalar("PRAGMA max_page_count=4096") == "4096"), "process_journal_capacity");
     execute("PRAGMA synchronous=EXTRA; PRAGMA foreign_keys=ON; PRAGMA recursive_triggers=ON; PRAGMA trusted_schema=OFF; PRAGMA locking_mode=EXCLUSIVE");
     require(scalar("PRAGMA synchronous") == "3" && scalar("PRAGMA foreign_keys") == "1" && scalar("PRAGMA recursive_triggers") == "1" &&
       scalar("PRAGMA trusted_schema") == "0" && scalar("PRAGMA locking_mode") == "exclusive", "process_journal_profile");
+    if (observe) execute("PRAGMA query_only=ON; BEGIN");
     if (initialize) {
       execute("BEGIN IMMEDIATE"); execute(processJournalSql);
       Statement meta(db.get(), "INSERT INTO host_meta VALUES(1,'leafseamer-process-journal/1',?,?,?)");
@@ -169,6 +179,29 @@ public:
       timeProviderEnabled=upgradeTimeProvider;
       upgraded = true;
     }
+  }
+  std::string recoveryRetirement(const std::string& generation) {
+    require(generation.size() == 32 && generation.find_first_not_of("0123456789abcdef") == std::string::npos,
+      "process_retirement_generation");
+    const std::string providerCount = timeProviderEnabled
+      ? "(SELECT count(*) FROM time_provider_attempt t WHERE t.core_attempt_id=a.attempt_id)" : "0";
+    const auto query = std::string(
+      "SELECT json_object('journal_incarnation',m.incarnation,'directory_id',m.directory_id,"
+        "'attempt_id',a.attempt_id,'job_name',a.job_name,'supervisor_pid',a.supervisor_pid,"
+        "'core_pid',o.core_pid,'creation_filetime',o.creation_filetime,'image_file_id',o.image_file_id,"
+        "'policy',json(b.policy_jcs),'descriptor',json(b.descriptor_jcs),'intent',json(b.intent_jcs),"
+        "'receipt_id',c.receipt_id,'receipt',json(c.receipt_jcs),'exit_code',e.exit_code,'forced',e.forced,"
+        "'active_processes',e.active_processes,'worker_launches',(SELECT count(*) FROM worker_launch w WHERE w.attempt_id=a.attempt_id),"
+        "'time_provider_launches',") + providerCount + ")"
+      " FROM core_attempt a JOIN core_observation o USING(attempt_id) JOIN core_bootstrap b USING(attempt_id)"
+      " JOIN core_admission c USING(attempt_id) JOIN core_exit e USING(attempt_id) CROSS JOIN host_meta m"
+      " WHERE a.rowid=(SELECT max(rowid) FROM core_attempt) AND e.active_processes=0"
+      " AND json_extract(b.descriptor_jcs,'$.runtime_generation')=? AND m.singleton=1";
+    Statement q(db.get(), query.c_str()); q.bind(1, generation);
+    require(sqlite3_step(q.value) == SQLITE_ROW, "process_retirement_unproven");
+    auto body = q.text(0);
+    require(sqlite3_step(q.value) == SQLITE_DONE && body.size() <= 49152, "process_retirement_unproven");
+    return body;
   }
   void begin(const std::string& id, const std::wstring& job, const std::string& policy = "", const std::string& descriptor = "", const std::string& intent = "") {
     execute("BEGIN IMMEDIATE"); Statement q(db.get(), "INSERT INTO core_attempt VALUES(?,?,?)");
